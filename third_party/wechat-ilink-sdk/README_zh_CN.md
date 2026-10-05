@@ -1,0 +1,522 @@
+# WeChat iLink SDK for Go
+
+[English](./README.md) | 中文文档
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/the-yex/wechat-ilink-sdk.svg)](https://pkg.go.dev/github.com/the-yex/wechat-ilink-sdk)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> 🚀 **微信官方授权 Bot SDK** | 合法合规 · 可接入企业网络 · 生命周期可控 · 生产就绪
+>
+> 基于 2026 年腾讯 OpenClaw 开放的 iLink 协议，这是微信**首个官方个人 Bot API**。
+
+**3 分钟上手，5 行代码跑起来，同时保留生产级控制力：**
+
+```go
+client, _ := ilinksdk.NewClient(ilinksdk.WithTokenStore(tokenStore))
+client.OnText(func(ctx context.Context, msg *ilink.Message, text string) error {
+    return client.SendText(ctx, msg.FromUserID, "收到: "+text)
+})
+client.Run(ctx, nil)  // 自动扫码登录，自动处理消息
+```
+
+---
+
+## 为什么团队会优先考虑这个 SDK
+
+- **运行时能力完整** - 自动登录、已存 Token 校验、会话过期恢复、长轮询失败退避都内建在 SDK 里，不需要业务层自己拼装。
+- **适合真实生产环境** - API、长轮询、CDN 三条链路都能分别注入 `http.Client`，方便接代理、mTLS、自定义 Transport、Tracing 和稳定测试。
+- **生命周期语义明确** - `Close()` 会等待 `Run` 循环退出，并把正在执行的异步事件处理收尾完成，部署和停机更可控。
+- **单账号心智更贴合 iLink** - `RestoreToken`、`LoadDefaultToken` 和 default-token helper 减少了 `accountID` 样板代码，同时保留对旧存储结构的兼容。
+- **扩展而不失控** - 按类型 Handler、中间件、插件、事件系统分层清楚，团队可以叠加业务能力，而不是 fork 一套 SDK。
+
+## 关于 iLink 协议
+
+> **2026 年，腾讯通过 OpenClaw 框架正式开放了微信个人账号的 Bot API（iLink 协议）。这是微信首次提供合法的个人 Bot 开发接口，使用标准 HTTP/JSON 协议，接入域名为 `ilinkai.weixin.qq.com`。**
+
+**重要说明：**
+- ✅ **官方授权** - iLink 是微信官方提供的合法接口，非逆向或破解
+- ✅ **安全合规** - 使用官方 API，不会触发封号风险
+- ✅ **稳定可靠** - 官方维护，协议稳定，长期支持
+- ✅ **标准协议** - HTTP/JSON，易于集成和调试
+
+## 功能特性
+
+- **扫码登录** - 扫描二维码认证，Token 本地持久化存储
+- **自动重登录** - 自动验证存储的 Token，处理会话过期
+- **消息处理** - 收发文本、图片、视频、文件、语音消息
+- **传输层可注入** - API、长轮询、CDN 可分别配置 `http.Client`
+- **运行时保护** - 内置重试、限流、Panic 恢复、长轮询失败退避
+- **优雅关闭** - 关闭客户端时会等待进行中的异步事件处理完成
+- **结构化错误模型** - 支持稳定的 `errors.Is` 判断以及认证/临时错误分类
+- **中间件系统** - 内置日志、重试、恢复中间件
+- **插件系统** - 可扩展的插件架构，支持自定义功能
+- **事件系统** - 异步事件分发，实现松耦合
+- **生产就绪** - 完善的错误处理、日志记录和测试
+
+## 安装
+
+```bash
+go get github.com/the-yex/wechat-ilink-sdk
+```
+
+## 快速开始
+
+```go
+package main
+
+import (
+    "context"
+    "log/slog"
+    "os"
+
+    "github.com/the-yex/wechat-ilink-sdk"
+    "github.com/the-yex/wechat-ilink-sdk/ilink"
+    "github.com/the-yex/wechat-ilink-sdk/login"
+)
+
+func main() {
+    logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+    // 创建 Token 存储器
+    tokenStore, _ := login.NewFileTokenStore("")
+
+    // 创建客户端
+    client, _ := ilinksdk.NewClient(
+        ilinksdk.WithLogger(logger),
+        ilinksdk.WithTokenStore(tokenStore),
+    )
+    defer client.Close()
+
+    // 运行机器人 - SDK 自动处理登录和消息
+    ctx := context.Background()
+    client.Run(ctx, func(ctx context.Context, msg *ilink.Message) error {
+        if text := msg.GetText(); text != "" {
+            return client.SendText(ctx, msg.FromUserID, "收到: "+text)
+        }
+        return nil
+    })
+}
+```
+
+## 交互流程
+
+### 登录流程
+
+```
+┌─────────────┐     获取二维码      ┌─────────────┐
+│   用户      │ ◄───────────────── │  iLink 服务  │
+│             │                    │             │
+│   扫码确认   │ ─────────────────► │             │
+└─────────────┘                    └─────────────┘
+       │
+       ▼
+  获取 bot_token
+  自动保存到 TokenStore
+```
+
+SDK 自动处理：显示二维码 → 轮询扫码状态 → 保存凭证。
+
+### 消息流程
+
+```
+┌──────────┐                    ┌──────────┐
+│ 微信用户  │ ──发送消息────────► │ iLink 服务 │
+└──────────┘                    └────┬─────┘
+                                     │
+                                     ▼
+┌──────────┐                    ┌──────────┐
+│  Bot SDK │ ◄──长轮询获取消息─── │ iLink 服务 │
+│          │ ────发送回复───────► │          │
+└──────────┘                    └──────────┘
+       │
+       ▼
+  用户收到回复
+```
+
+**关键概念**：
+- SDK 通过长轮询接收消息，不是 WebSocket
+- 每条消息绑定的 `context_token` 会自动管理，无需手动处理
+
+### 消息类型
+
+| type | 类型 | 说明 |
+|------|------|------|
+| `1` | TEXT | 文本消息 |
+| `2` | IMAGE | 图片消息 |
+| `3` | VOICE | 语音消息 |
+| `4` | FILE | 文件消息 |
+| `5` | VIDEO | 视频消息 |
+
+## 发送消息
+
+```go
+// 发送文本
+client.SendText(ctx, toUserID, "Hello!")
+
+// 发送图片
+client.SendImage(ctx, toUserID, imageData)
+
+// 发送视频
+client.SendVideo(ctx, toUserID, videoData)
+
+// 发送文件
+client.SendFile(ctx, toUserID, "document.pdf", fileData)
+
+// 发送输入状态
+client.SendTyping(ctx, toUserID, true)  // 开始输入
+client.SendTyping(ctx, toUserID, false) // 停止输入
+```
+
+> **⚠️ 消息发送限制**
+>
+> 由于 iLink 协议的设计，SDK **只能回复消息，无法主动发起对话**。
+>
+> - ✅ **被动回复**：用户先发消息，SDK 存储会话凭证（Context Token），然后回复
+> - ❌ **主动发送**：无法给从未发过消息的用户发送消息（无 Context Token）
+>
+> 程序重启后 Context Token 会丢失，用户需要重新发送一条消息才能恢复回复能力。
+
+## 接收消息
+
+### 方式一：按类型注册 Handler（推荐）
+
+代码更清晰，每种消息类型独立处理：
+
+```go
+client.OnText(func(ctx context.Context, msg *ilink.Message, text string) error {
+    fmt.Printf("收到文本: %s\n", text)
+    return client.SendText(ctx, msg.FromUserID, "收到: "+text)
+})
+
+client.OnImage(func(ctx context.Context, msg *ilink.Message, item *types.ImageItem) error {
+    fmt.Printf("收到图片\n")
+    // 下载并回复图片
+    data, _ := client.DownloadMedia(ctx, &media.DownloadRequest{
+        EncryptQueryParam: item.Media.EncryptQueryParam,
+        AESKey:            item.Media.AESKey,
+    })
+    return client.SendImage(ctx, msg.FromUserID, data)
+})
+
+client.OnVideo(func(ctx context.Context, msg *ilink.Message, item *types.VideoItem) error {
+    fmt.Printf("收到视频\n")
+    return nil
+})
+
+client.OnVoice(func(ctx context.Context, msg *ilink.Message, item *types.VoiceItem) error {
+    fmt.Printf("收到语音: %s\n", item.Text)
+    return nil
+})
+
+client.OnFile(func(ctx context.Context, msg *ilink.Message, item *types.FileItem) error {
+    fmt.Printf("收到文件: %s\n", item.FileName)
+    return nil
+})
+
+// 运行机器人（无需传 handler，自动使用上面注册的）
+client.Run(ctx, nil)
+```
+
+### 方式二：通用消息处理器
+
+适合需要统一处理所有消息类型的场景：
+
+```go
+client.OnMessage(func(ctx context.Context, msg *ilink.Message) error {
+    if !msg.IsFromUser() {
+        return nil
+    }
+
+    // 根据 msg.ItemList 判断消息类型并处理
+    if text := msg.GetText(); text != "" {
+        return client.SendText(ctx, msg.FromUserID, "收到: "+text)
+    }
+
+    return nil
+})
+
+client.Run(ctx, nil)
+```
+
+### 方式三：直接传给 Run()
+
+最简单的方式：
+
+```go
+client.Run(ctx, func(ctx context.Context, msg *ilink.Message) error {
+    if text := msg.GetText(); text != "" {
+        return client.SendText(ctx, msg.FromUserID, "收到: "+text)
+    }
+    return nil
+})
+```
+
+## 消息发送限制
+
+⚠️ **重要：** SDK 只能**被动回复**消息，不能主动发送。
+
+**原因：** 微信 iLink 协议要求发送消息时必须携带 `context_token`，该 Token 只有在收到用户消息时才能获取。
+
+**工作流程：**
+```
+用户发送消息 → SDK 收到 context_token → 存储 → 机器人回复时使用
+```
+
+**正确用法：**
+```go
+// ✅ 正确：在收到消息后回复
+client.OnText(func(ctx context.Context, msg *ilink.Message, text string) error {
+    return client.SendText(ctx, msg.FromUserID, "收到: "+text)
+})
+
+// ❌ 错误：主动发送（会失败，因为没有 context_token）
+client.SendText(ctx, "some_user_id", "你好")  // 返回 ErrContextTokenRequired
+```
+
+**限制：**
+- 只能给**发过消息的用户**回复
+- 如果用户从未发过消息，无法主动联系
+
+## 配置选项
+
+```go
+transport := &http.Transport{
+    Proxy: http.ProxyFromEnvironment,
+}
+
+sharedHTTP := &http.Client{
+    Timeout:   15 * time.Second,
+    Transport: transport,
+}
+
+client, _ := ilinksdk.NewClient(
+    ilinksdk.WithLogger(logger),
+    ilinksdk.WithTokenStore(tokenStore),
+    ilinksdk.WithHTTPClient(sharedHTTP),
+    ilinksdk.WithLongPollHTTPClient(&http.Client{
+        Timeout:   40 * time.Second,
+        Transport: transport,
+    }),
+    ilinksdk.WithCDNHTTPClient(&http.Client{
+        Transport: transport,
+    }),
+    ilinksdk.WithRetry(3, time.Second, 5*time.Second),
+    ilinksdk.WithRateLimit(5, 1),
+    ilinksdk.WithMiddleware(
+        middleware.Logging(logger),
+        middleware.Recovery(logger),
+    ),
+)
+```
+
+这样可以把 API 请求、长轮询请求、CDN 请求分开治理，便于接企业代理、观测链路或定制网络策略。
+
+## Token 管理
+
+SDK 默认使用文件存储 Token，自动处理持久化：
+
+```go
+// 默认存储在 ./.weixin/default.json
+tokenStore, _ := login.NewFileTokenStore("")
+
+// 或指定存储目录
+tokenStore, _ := login.NewFileTokenStore("./my-bot")
+```
+
+对于单账号 Bot，还可以直接使用更贴近运行时的恢复方式：
+
+```go
+stored, _ := login.LoadDefaultToken(tokenStore)
+_ = client.RestoreToken(stored)
+
+// 或让 client 从当前配置的 TokenStore 中恢复：
+_ = client.LoadDefaultToken()
+```
+
+### 自定义存储
+
+实现 `TokenStore` 接口即可自定义存储方式：
+
+```go
+type TokenStore interface {
+    Save(accountID string, token *TokenInfo) error
+    Load(accountID string) (*TokenInfo, error)
+    Delete(accountID string) error
+    List() ([]string, error)
+}
+```
+
+SQLite 存储示例请参考 [examples/sqlite-storage](./examples/sqlite-storage/)。
+
+## 中间件
+
+### 内置中间件
+
+| 中间件 | 描述 |
+|--------|------|
+| `Logging` | 请求/响应日志 |
+| `Retry` | 指数退避自动重试 |
+| `RateLimit` | 限制消息发送速率 |
+| `Recovery` | Panic 恢复 |
+
+### 高层配置选项
+
+常见的生产配置可以直接通过 `NewClient` 启用：
+
+```go
+client, _ := ilinksdk.NewClient(
+    ilinksdk.WithRetry(3, time.Second, 5*time.Second),
+    ilinksdk.WithRateLimit(5, 1),
+)
+```
+
+### 自定义中间件
+
+```go
+func CustomMiddleware() middleware.Middleware {
+    return func(next middleware.Handler) middleware.Handler {
+        return func(ctx context.Context, req *ilink.SendMessageRequest) error {
+            // 前置处理
+            err := next(ctx, req)
+            // 后置处理
+            return err
+        }
+    }
+}
+
+client.Use(CustomMiddleware())
+```
+
+## 事件系统
+
+SDK 内置事件系统，用于监听生命周期事件。
+`client.Close()` 会等待异步事件 handler 收尾完成，适合在服务退出和滚动发布时保持行为可预期。
+
+### 可用事件
+
+| 事件 | 触发时机 |
+|------|----------|
+| `EventTypeMessage` | 收到新消息 |
+| `EventTypeLogin` | 登录成功 |
+| `EventTypeError` | 发生错误 |
+| `EventTypeSessionExpired` | 会话过期 |
+| `EventTypeConnected` | 客户端启动 |
+| `EventTypeDisconnected` | 客户端停止 |
+
+### 使用事件
+
+```go
+// 监听登录成功事件
+client.Events().Subscribe(event.EventTypeLogin, func(ctx context.Context, e *event.Event) error {
+    result := e.Data.(*ilink.LoginResult)
+    log.Printf("登录成功: %s", result.UserID)
+    return nil
+})
+
+// 监听会话过期事件
+client.Events().Subscribe(event.EventTypeSessionExpired, func(ctx context.Context, e *event.Event) error {
+    log.Println("会话已过期")
+    return nil
+})
+```
+
+## 插件系统
+
+```go
+type MyPlugin struct{}
+
+func (p *MyPlugin) Name() string { return "my-plugin" }
+func (p *MyPlugin) Initialize(ctx context.Context, sdk plugin.SDK) error { return nil }
+func (p *MyPlugin) OnMessage(ctx context.Context, msg *ilink.Message) error {
+    // 处理消息
+    return nil
+}
+func (p *MyPlugin) OnError(ctx context.Context, err error) {}
+```
+
+### 注册插件
+
+两种方式效果相同，按注册顺序执行：
+
+**方式一：批量注册（推荐）**
+
+```go
+client, _ := ilinksdk.NewClient(
+    ilinksdk.WithPlugins(plugin1, plugin2, plugin3),
+)
+```
+
+**方式二：单个注册**
+
+```go
+client.UsePlugin(plugin1)
+client.UsePlugin(plugin2)
+```
+
+### 内置插件
+
+SDK 提供以下内置插件：
+
+#### LogoutPlugin - 退出登录插件
+
+用户发送 `/exit` 命令即可退出登录，SDK 会清除本地 Token 并自动弹出二维码让用户重新扫码登录：
+
+```go
+// 简单用法 - 直接注册
+client, _ := ilinksdk.NewClient(
+    ilinksdk.WithPlugins(plugin.NewLogoutPlugin()),
+)
+
+// 可选：带回调
+client, _ := ilinksdk.NewClient(
+    ilinksdk.WithPlugins(plugin.NewLogoutPlugin(func(ctx context.Context) error {
+        log.Println("用户已退出，等待重新扫码")
+        return nil
+    })),
+)
+```
+
+用户交互流程：
+```
+用户: /exit
+Bot:  确定要退出吗？再次发送 /exit 确认退出。
+用户: /exit
+Bot:  正在退出，请重新扫码登录...
+[SDK 自动弹出二维码等待扫码]
+```
+
+详细插件开发指南请参考 [examples/plugins/README.md](./examples/plugins/README.md)。
+
+## 示例
+
+查看 [examples](./examples/) 目录：
+
+| 示例 | 描述 |
+|------|------|
+| `simple-login` | 基础扫码登录 |
+| `qrcode-login` | 显式登录 + 单账号 Token 持久化 helper |
+| `basic-bot` | 带重试、限流、自定义 HTTP client 的生产风格 Echo 机器人 |
+| `auto-relogin` | 自定义会话过期回调与重登录流程 |
+| `sqlite-storage` | 基于 SQLite 的 TokenStore 示例 |
+| `token-provider` | 外部凭据仓库 / 数据库接入模式 |
+| `event-demo` | 事件系统使用示例 |
+| `error-handling` | 结构化错误分类与恢复策略 |
+| `plugins` | 插件开发示例 |
+| `ai-assistant` | AI 助手集成模式 |
+
+## 开发
+
+```bash
+# 运行测试
+go test ./...
+
+# 测试覆盖率
+go test -cover ./...
+
+# 代码检查
+golangci-lint run
+```
+
+## 许可证
+
+MIT License - 详见 [LICENSE](LICENSE)

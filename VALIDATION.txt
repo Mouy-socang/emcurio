@@ -1,0 +1,22 @@
+$ python -m pytest -q
+......................                                                   [100%]
+22 passed in 3.45s
+
+Additional checks: JavaScript syntax and launchd plist parsing passed.
+Original main 26 tests and scripts/accept_unified.py: unavailable, NOT RUN.
+Live API collection: NOT RUN.
+Local review HTTP server and browser form: checked.
+Read-only import: 851 products, 1 owner review; old database unchanged.
+
+2026-10-05 hourly collector update:
+$ .venv/bin/python -m pytest -q
+31 passed in 5.15s
+(The HTTP test requires permission to bind a local test port.)
+Live OAuth + Browse search: HTTP 200, returned 3 products.
+First live collection: eBay +1000, Kleinanzeigen +509 (20-page initial cap).
+Second run started by launchd: eBay +0, Kleinanzeigen +0, both status ok.
+launchctl: loaded, interval 3600 seconds, runs=1, last exit code=0.
+Duplicate item IDs in SQLite: 0.
+Legacy off-topic corrections: 2, audited in rule_corrections.
+No paid providers called; daily budget remains zero.
+Original main acceptance tests remain unavailable; no PR was created.

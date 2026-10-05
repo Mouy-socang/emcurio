@@ -1,0 +1,8 @@
+# 已确认的价格线；当前不启用任何新价格线。不从 DRAFT 自动导入。
+# rules:
+#   - pattern: '精确系列或器型正则'
+#     max_price: 100.00
+#     currency: EUR
+#     basis: total_price  # 或 listed_price
+#     reason: '超过已确认采购上限'
+rules: []

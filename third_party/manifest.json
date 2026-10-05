@@ -1,0 +1,9 @@
+{
+  "wechat-ilink-sdk": {
+    "upstream": "https://github.com/the-yex/wechat-ilink-sdk",
+    "commit": "c2dc55718bac83f1c0b23db488d6e96f89969cfc",
+    "license": "Apache-2.0 (LICENSE file)",
+    "go_requirement": "1.25",
+    "status": "Source downloaded only; not built, authenticated or integrated"
+  }
+}
