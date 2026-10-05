@@ -87,3 +87,13 @@ launchctl bootout gui/$(id -u)/com.curio.collect.phase1
 ## 2026-10-05 本机部署结果
 
 已安装每小时任务 `com.curio.collect.phase1`。首次实采 eBay 新增1000、Kleinanzeigen新增509；随后通过 launchd 执行第二轮，两个平台均成功、新增均为0，确认已知编号不会重复入库。31个本地测试通过。新版 `.env` 已从桌面旧版安全配置，旧项目未修改。
+
+## 采集、筛选、字段规范和微信 Bot
+
+- [当前采集与筛选方式](docs/COLLECTION_AND_SCREENING.md)
+- [字段映射及核验边界](docs/FIELD_MAPPING.md)
+- [V2 全部75字段](docs/product-fields-v2.json)
+- [V2 字段与命名规范正文](docs/瓷器字段与命名规则V2.txt)
+- [微信接入与运行](docs/WECHAT.md)
+
+微信适配代码位于 `wechat_bot/` 和 `scripts/wechat_feed.py`；固定版本SDK在 `third_party/`。

@@ -1,0 +1,457 @@
+{
+  "schema_version": "2.0",
+  "source_document": "瓷器描述字段和命名规则 V2.docx",
+  "status": "Target specification; current Curio catalog is not fully migrated",
+  "fields": [
+    {
+      "field": "product_id",
+      "type": "string",
+      "label": "商品唯一编号",
+      "rule": "建档必填"
+    },
+    {
+      "field": "product_title",
+      "type": "string",
+      "label": "标准商品名称",
+      "rule": "规则生成后审核"
+    },
+    {
+      "field": "raw_title",
+      "type": "string",
+      "label": "来源中的原始名称",
+      "rule": "建议保留"
+    },
+    {
+      "field": "raw_description",
+      "type": "text",
+      "label": "来源中的原始描述",
+      "rule": "建议保留"
+    },
+    {
+      "field": "source_types",
+      "type": "array<string>",
+      "label": "信息来源类型",
+      "rule": "建议"
+    },
+    {
+      "field": "review_status",
+      "type": "enum",
+      "label": "资料核对进度",
+      "rule": "unreviewed / partial / reviewed；AI 提取完成不等于核验完成。"
+    },
+    {
+      "field": "created_at",
+      "type": "datetime",
+      "label": "建档时间",
+      "rule": "系统必填"
+    },
+    {
+      "field": "updated_at",
+      "type": "datetime",
+      "label": "更新时间",
+      "rule": "系统必填"
+    },
+    {
+      "field": "schema_version",
+      "type": "string",
+      "label": "结构版本",
+      "rule": "固定为 2.0；与词表版本分别管理。"
+    },
+    {
+      "field": "external_refs",
+      "type": "array<object>",
+      "label": "外部标识",
+      "rule": "保存 source_system、external_id、source_location；不直接替代 product_id。"
+    },
+    {
+      "field": "maker",
+      "type": "string",
+      "label": "制造者或窑厂",
+      "rule": "保存稳定品牌标识；无标或无法归属时可为空，并记录核验情况。"
+    },
+    {
+      "field": "country_of_origin",
+      "type": "string",
+      "label": "原产国",
+      "rule": "建议"
+    },
+    {
+      "field": "date_start_year",
+      "type": "integer",
+      "label": "年代起始年",
+      "rule": "已知时填写"
+    },
+    {
+      "field": "date_end_year",
+      "type": "integer",
+      "label": "年代截止年",
+      "rule": "已知时填写"
+    },
+    {
+      "field": "date_label",
+      "type": "string",
+      "label": "可读年代描述",
+      "rule": "粗略年代适用"
+    },
+    {
+      "field": "factory_grade",
+      "type": "enum",
+      "label": "厂家等级",
+      "rule": "first / second / other / unknown；仅据可靠证据解释，不由历史“一等”直接转换。"
+    },
+    {
+      "field": "marks",
+      "type": "array<object>",
+      "label": "标记记录",
+      "rule": "保存底款、划杠、磨标等观察；结构见第八部分。"
+    },
+    {
+      "field": "decoration_origin",
+      "type": "enum",
+      "label": "装饰归属",
+      "rule": "factory / outside / mixed / undecorated / unknown；归属与工艺分开。"
+    },
+    {
+      "field": "decorator",
+      "type": "string",
+      "label": "装饰者",
+      "rule": "已确认的画师或工作室稳定标识；未知留空，不用 maker 代填。"
+    },
+    {
+      "field": "object_family",
+      "type": "string",
+      "label": "器物大类",
+      "rule": "受控词表值；与 object_type 的父类关系由词表校验。"
+    },
+    {
+      "field": "object_type",
+      "type": "string",
+      "label": "主体器型",
+      "rule": "按主体功能器物归类；商品混合套组使用 mixed_set 并保留成员分类。"
+    },
+    {
+      "field": "series_name",
+      "type": "string",
+      "label": "系列名称",
+      "rule": "有依据时填写"
+    },
+    {
+      "field": "model_name",
+      "type": "string",
+      "label": "厂家器型名称",
+      "rule": "建议"
+    },
+    {
+      "field": "model_number",
+      "type": "string",
+      "label": "器型编号／模号",
+      "rule": "建议，保留原格式"
+    },
+    {
+      "field": "form_styles",
+      "type": "array<string>",
+      "label": "结构与形制特征",
+      "rule": "如双耳、高足、三足、镂空结构；不以 Rococo 等艺术风格代替形制。"
+    },
+    {
+      "field": "intended_uses",
+      "type": "array<string>",
+      "label": "原设计或约定用途",
+      "rule": "经确认的茶、咖啡、陈设等用途；摩卡简称不直接确定器型。"
+    },
+    {
+      "field": "components",
+      "type": "array<object>",
+      "label": "组成成员",
+      "rule": "结构见第四部分；完整登记后才派生物理件数。"
+    },
+    {
+      "field": "physical_piece_count",
+      "type": "integer",
+      "label": "物理部件总数",
+      "rule": "由完整的组件树叶节点数量派生；包括可分离盖子，不含固定把手。"
+    },
+    {
+      "field": "has_relief",
+      "type": "boolean",
+      "label": "是否有浮雕",
+      "rule": "建议检查"
+    },
+    {
+      "field": "relief_motifs",
+      "type": "array<string>",
+      "label": "浮雕图案",
+      "rule": "有浮雕时填写"
+    },
+    {
+      "field": "sale_unit_type",
+      "type": "enum",
+      "label": "销售单位形式",
+      "rule": "single / pair / set / mixed_set / part；数量另见组件或订单。"
+    },
+    {
+      "field": "component_list_status",
+      "type": "enum",
+      "label": "组件登记状态",
+      "rule": "not_recorded / partial / complete；登记完整不代表原套完整。"
+    },
+    {
+      "field": "completeness_status",
+      "type": "enum",
+      "label": "相对于原器或原套的完整性",
+      "rule": "complete / incomplete / unknown / not_applicable；依据和缺件见成员备注。"
+    },
+    {
+      "field": "pairing_status",
+      "type": "enum",
+      "label": "配套关系",
+      "rule": "original / matched / mixed / unknown / not_applicable；仅有年份差异不足以确认后配。"
+    },
+    {
+      "field": "sale_piece_count",
+      "type": "integer",
+      "label": "业务套装件数",
+      "rule": "按完整器物口径计数；壶含盖算一件；可记录明确的“三件套”，不推断成员。"
+    },
+    {
+      "field": "service_count",
+      "type": "integer",
+      "label": "服务人数",
+      "rule": "六人套为 6；不能据此推断杯、碟、壶的数量。"
+    },
+    {
+      "field": "suggested_uses",
+      "type": "array<string>",
+      "label": "建议或改用用途",
+      "rule": "例如缺盖小罐可作茶杯；不覆盖原设计用途，不证明适合食品接触。"
+    },
+    {
+      "field": "materials",
+      "type": "array<string>",
+      "label": "主体及附属材质",
+      "rule": "瓷、玻璃、水晶、金属等；材质与装饰颜色分开，未知不猜。"
+    },
+    {
+      "field": "styles",
+      "type": "array<string>",
+      "label": "整体艺术风格",
+      "rule": "如 Rococo；与结构形制 form_styles 分开，避免重复标注。"
+    },
+    {
+      "field": "subjects",
+      "type": "array<string>",
+      "label": "描绘主体",
+      "rule": "有明确主体时填写"
+    },
+    {
+      "field": "themes",
+      "type": "array<string>",
+      "label": "表达主题",
+      "rule": "可选，不强行推断"
+    },
+    {
+      "field": "motifs",
+      "type": "array<string>",
+      "label": "具体纹样",
+      "rule": "建议"
+    },
+    {
+      "field": "pattern_name",
+      "type": "string",
+      "label": "装饰名称／花样名称",
+      "rule": "有依据时填写"
+    },
+    {
+      "field": "decoration_layouts",
+      "type": "array<string>",
+      "label": "装饰布局",
+      "rule": "建议"
+    },
+    {
+      "field": "decoration_techniques",
+      "type": "array<string>",
+      "label": "装饰工艺",
+      "rule": "有依据时填写"
+    },
+    {
+      "field": "colors",
+      "type": "array<string>",
+      "label": "可见主要颜色",
+      "rule": "建议"
+    },
+    {
+      "field": "ground_color",
+      "type": "string",
+      "label": "装饰底色",
+      "rule": "背景色已确认时"
+    },
+    {
+      "field": "ground_technique",
+      "type": "string",
+      "label": "底色工艺",
+      "rule": "工艺已确认时"
+    },
+    {
+      "field": "has_gilding",
+      "type": "boolean",
+      "label": "是否有鎏金",
+      "rule": "建议检查"
+    },
+    {
+      "field": "has_gilded_rim",
+      "type": "boolean",
+      "label": "圈口是否鎏金",
+      "rule": "有圈口时检查"
+    },
+    {
+      "field": "gilding_motifs",
+      "type": "array<string>",
+      "label": "鎏金图案",
+      "rule": "有鎏金时填写"
+    },
+    {
+      "field": "gilding_subjects",
+      "type": "array<string>",
+      "label": "鎏金描绘主体",
+      "rule": "有具象主体时填写"
+    },
+    {
+      "field": "border_pattern_name",
+      "type": "string",
+      "label": "命名边饰",
+      "rule": "例如经确认的 A 边；与花卉等主装饰并存，不强塞进整体花样。"
+    },
+    {
+      "field": "height_cm",
+      "type": "decimal",
+      "label": "高度",
+      "rule": "至少一项主要尺寸"
+    },
+    {
+      "field": "diameter_cm",
+      "type": "decimal",
+      "label": "直径",
+      "rule": "按器型填写"
+    },
+    {
+      "field": "width_cm",
+      "type": "decimal",
+      "label": "宽度",
+      "rule": "按器型填写"
+    },
+    {
+      "field": "depth_cm",
+      "type": "decimal",
+      "label": "深度",
+      "rule": "按器型填写"
+    },
+    {
+      "field": "measurement_notes",
+      "type": "text",
+      "label": "尺寸口径说明",
+      "rule": "保存近似、测量方向和原始写法；组合尺寸放在对应组件。"
+    },
+    {
+      "field": "condition_grade",
+      "type": "integer/null",
+      "label": "当前品相评估等级",
+      "rule": "1 极好；2 轻微使用痕迹；3 明显缺陷但无已知修复；4 已修复或结构性破损。不得转换为“一等”等厂家用语。"
+    },
+    {
+      "field": "defect_types",
+      "type": "array<string>",
+      "label": "已确认瑕疵类型",
+      "rule": "未全面检查仍可登记已知瑕疵；[] 仅表示完整检查后未发现，null 表示未知。"
+    },
+    {
+      "field": "has_chips",
+      "type": "boolean",
+      "label": "是否有磕口或崩缺",
+      "rule": "已知 chip 即 true；全面检查并排除才为 false；否则为 null。"
+    },
+    {
+      "field": "has_restoration",
+      "type": "boolean",
+      "label": "是否修复",
+      "rule": "检查后填写"
+    },
+    {
+      "field": "restoration_level",
+      "type": "enum/null",
+      "label": "修复程度",
+      "rule": "minor / moderate / extensive；有修复但程度未知时为空，不能推断无修。"
+    },
+    {
+      "field": "condition_notes",
+      "type": "text",
+      "label": "品相说明",
+      "rule": "具体位置与程度"
+    },
+    {
+      "field": "condition_inspection_status",
+      "type": "enum",
+      "label": "品相检查状态",
+      "rule": "not_inspected / partial / complete；与资料 review_status 分开。"
+    },
+    {
+      "field": "condition_inspected_at",
+      "type": "datetime",
+      "label": "品相检查时间",
+      "rule": "完成或更新检查时记录；旧订单的品相不能自动代表现状。"
+    },
+    {
+      "field": "acquisition_cost",
+      "type": "decimal",
+      "label": "整组已分摊采购成本",
+      "rule": "商品销售单位的总采购成本；已包含费用不得再加一次运费或佣金。"
+    },
+    {
+      "field": "acquisition_currency",
+      "type": "string",
+      "label": "采购币种",
+      "rule": "成本有值必填"
+    },
+    {
+      "field": "acquired_on",
+      "type": "date",
+      "label": "采购日期",
+      "rule": "建议"
+    },
+    {
+      "field": "fx_rate_to_cny",
+      "type": "decimal",
+      "label": "采购换算人民币汇率",
+      "rule": "非人民币换算必填"
+    },
+    {
+      "field": "fx_rate_date",
+      "type": "date",
+      "label": "汇率适用日期",
+      "rule": "使用汇率时记录"
+    },
+    {
+      "field": "fx_rate_source",
+      "type": "string",
+      "label": "汇率依据",
+      "rule": "使用汇率时记录"
+    },
+    {
+      "field": "acquisition_cost_cny",
+      "type": "decimal",
+      "label": "人民币采购成本",
+      "rule": "公式派生"
+    },
+    {
+      "field": "target_price",
+      "type": "decimal",
+      "label": "整组目标售价",
+      "rule": "在售必填"
+    },
+    {
+      "field": "target_currency",
+      "type": "string",
+      "label": "目标售价币种",
+      "rule": "售价有值必填"
+    }
+  ]
+}

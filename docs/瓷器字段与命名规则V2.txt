@@ -1,0 +1,446 @@
+来源：用户提供的《瓷器描述字段和命名规则 V2.docx》。规范正文转录；第十一节真实订单示例不公开。此规范是目标标准，不表示 Curio 已完成全字段迁移。
+
+瓷器描述字段和命名规则 V2
+GoodCustomer Product Schema V2    版本 2.0    2026 年 10 月 4 日
+本规范用于古董与收藏瓷器的建档、核验、上架及历史订单整理。V2 替代 V1 的字段定义与标题规则，重点解决等级含义混用、外画归属、缺件与混配、套装计数以及交易备注混入商品资料的问题。
+商品名称是结构化资料的展示结果。原始描述必须保留；没有依据的信息允许未知。历史订单可进入待核验状态，但不能因为成功抽取字段就自动成为正式商品事实。
+一 商品单位和资料边界
+对象
+负责保存的内容
+Product
+一个可独立销售的单位，可以是单件、一对、成套组合或单独零件。
+Component
+销售单位中的器物成员及其可分离部件；记录各自年代、品相、尺寸和关系。
+Evidence 与 ProductInference
+来源原文和凭据；候选值、证据关联、冲突与核验结论。
+Order 与 Acquisition
+购买数量、实际成交、退款、赠品、随机发货、采购费用及分摊。
+
+二 V2 的关键约定
+厂家等级与当前品相独立保存。历史“一等、二等、四杠、四缸”先作为原始陈述，不自动解释为完美、磨损或修复程度。
+制造者与装饰者独立保存。“外画”属于装饰归属，不等同于一种工艺，也不自动改变瓷胎的制造者。
+组件登记完整、原器原套完整、原配关系分别判断。多件整体出售时，订单数量仍以销售单位计。
+正式标题至少需要明确主体器型或可说明成员的组合名称。缺失值可以省略，但不能生成只有品牌、等级或尺寸的正式标题。
+三 文档使用顺序
+先确定销售单位，再录原始资料与证据，随后填写分类、组成与已确认事实，核验品相，最后预览标题。第九部分提供基础分类边界；第十至十二部分规定标题、示例与迁移验收。
+字段表合计 75 个 Product 顶层字段，包含派生项和可选项，不等于人工必填数量。组件、标记和关联实体的内部属性另行定义。
+二 身份 品牌与年代字段
+身份与资料管理
+字段与类型
+中文含义
+填写规则
+product_idstring
+商品唯一编号
+建档必填
+product_titlestring
+标准商品名称
+规则生成后审核
+raw_titlestring
+来源中的原始名称
+建议保留
+raw_descriptiontext
+来源中的原始描述
+建议保留
+source_typesarray<string>
+信息来源类型
+建议
+review_statusenum
+资料核对进度
+unreviewed / partial / reviewed；AI 提取完成不等于核验完成。
+created_atdatetime
+建档时间
+系统必填
+updated_atdatetime
+更新时间
+系统必填
+schema_versionstring
+结构版本
+固定为 2.0；与词表版本分别管理。
+external_refsarray<object>
+外部标识
+保存 source_system、external_id、source_location；不直接替代 product_id。
+
+品牌 年代与装饰归属
+字段与类型
+中文含义
+填写规则
+makerstring
+制造者或窑厂
+保存稳定品牌标识；无标或无法归属时可为空，并记录核验情况。
+country_of_originstring
+原产国
+建议
+date_start_yearinteger
+年代起始年
+已知时填写
+date_end_yearinteger
+年代截止年
+已知时填写
+date_labelstring
+可读年代描述
+粗略年代适用
+factory_gradeenum
+厂家等级
+first / second / other / unknown；仅据可靠证据解释，不由历史“一等”直接转换。
+marksarray<object>
+标记记录
+保存底款、划杠、磨标等观察；结构见第八部分。
+decoration_originenum
+装饰归属
+factory / outside / mixed / undecorated / unknown；归属与工艺分开。
+decoratorstring
+装饰者
+已确认的画师或工作室稳定标识；未知留空，不用 maker 代填。
+
+同码不同物需核验关联，不覆盖记录；客户资料不入商品标题。
+三 器型 组成与材质字段
+字段与类型
+中文含义
+填写规则
+object_familystring
+器物大类
+受控词表值；与 object_type 的父类关系由词表校验。
+object_typestring
+主体器型
+按主体功能器物归类；商品混合套组使用 mixed_set 并保留成员分类。
+series_namestring
+系列名称
+有依据时填写
+model_namestring
+厂家器型名称
+建议
+model_numberstring
+器型编号／模号
+建议，保留原格式
+form_stylesarray<string>
+结构与形制特征
+如双耳、高足、三足、镂空结构；不以 Rococo 等艺术风格代替形制。
+intended_usesarray<string>
+原设计或约定用途
+经确认的茶、咖啡、陈设等用途；摩卡简称不直接确定器型。
+componentsarray<object>
+组成成员
+结构见第四部分；完整登记后才派生物理件数。
+physical_piece_countinteger
+物理部件总数
+由完整的组件树叶节点数量派生；包括可分离盖子，不含固定把手。
+has_reliefboolean
+是否有浮雕
+建议检查
+relief_motifsarray<string>
+浮雕图案
+有浮雕时填写
+sale_unit_typeenum
+销售单位形式
+single / pair / set / mixed_set / part；数量另见组件或订单。
+component_list_statusenum
+组件登记状态
+not_recorded / partial / complete；登记完整不代表原套完整。
+completeness_statusenum
+相对于原器或原套的完整性
+complete / incomplete / unknown / not_applicable；依据和缺件见成员备注。
+pairing_statusenum
+配套关系
+original / matched / mixed / unknown / not_applicable；仅有年份差异不足以确认后配。
+sale_piece_countinteger
+业务套装件数
+按完整器物口径计数；壶含盖算一件；可记录明确的“三件套”，不推断成员。
+service_countinteger
+服务人数
+六人套为 6；不能据此推断杯、碟、壶的数量。
+suggested_usesarray<string>
+建议或改用用途
+例如缺盖小罐可作茶杯；不覆盖原设计用途，不证明适合食品接触。
+materialsarray<string>
+主体及附属材质
+瓷、玻璃、水晶、金属等；材质与装饰颜色分开，未知不猜。
+
+model_name 为厂家命名的特定器型，model_number 为编号并保留前导零，series_name 为系列。四位数若可能是编号、年份或尺寸，只保留原文并等待核验。
+四 组件结构与数量规则
+components 可采用树形结构。每个节点表示一个器物成员或可分离部件；同类但年代、品相、配套关系不同的成员必须拆开登记，不合并到一个 quantity 中。
+内部属性
+定义
+component_id
+组内稳定标识，用于关联照片、瑕疵和来源。
+type / quantity
+受控组件类型；quantity 为同质节点数量，必须为正整数。
+children
+可分离子部件；例如壶节点下记录壶身与壶盖。无子节点时该节点作为物理叶节点。
+maker / factory_grade / marks
+与整组不一致或需独立核验时记录；未写不自动证明与整组一致。
+date_start_year / date_end_year / date_label
+组件自身年代；不同年份不得压成整组统一生产年份。
+condition_grade / defect_types / has_restoration / condition_notes
+组件品相与瑕疵位置；仅整组概括不足以代替组件事实。
+measurements
+对象列表：dimension、value、unit、is_approximate、notes；记录高度、直径等。
+completeness_status / pairing_status
+本成员的完整性或与其余成员的关系；允许 unknown。
+notes / evidence_ids
+缺少什么、配套依据、照片或订单位置等。
+
+pairing_status 中 original 为有原配依据；matched 为后期匹配且按款式相配；mixed 为已知混合搭配；unknown 为证据不足。组件品相可另记 condition_inspection_status 与 condition_inspected_at，不能默认整组检查覆盖每件成员。
+三个不同的数量
+sale_piece_count 按业务中完整器物计数。壶身和盖子合成一把壶，壶糖奶通常为三件业务器物；原文的“三件套”只能证明业务件数，不能证明其具体组成。
+physical_piece_count 仅在 component_list_status = complete 时计算。对所有叶节点求和：叶节点数量乘以路径上各祖先 quantity；父节点与子节点不重复计数。壶身与壶盖是两个物理部件。
+Order.quantity 表示购买几个 Product 销售单位。两套相同三件套可为 quantity = 2；两个不同物件固定捆绑出售，则可建立一个 mixed_set，quantity = 1。必须依据实际销售约定。
+示例
+壶糖奶：壶身 1、壶盖 1、糖罐身 1、糖罐盖 1、奶罐 1；业务件数为 3，物理部件数为 5。仅在组成已核实时使用这个清单。
+一杯一托一点心盘：业务件数和物理部件数均为 3。若只有“三件套”原文，则 sale_piece_count = 3，components 可为 null，physical_piece_count = null。
+五 装饰与语义字段
+字段与类型
+中文含义
+填写规则
+stylesarray<string>
+整体艺术风格
+如 Rococo；与结构形制 form_styles 分开，避免重复标注。
+subjectsarray<string>
+描绘主体
+有明确主体时填写
+themesarray<string>
+表达主题
+可选，不强行推断
+motifsarray<string>
+具体纹样
+建议
+pattern_namestring
+装饰名称／花样名称
+有依据时填写
+decoration_layoutsarray<string>
+装饰布局
+建议
+decoration_techniquesarray<string>
+装饰工艺
+有依据时填写
+colorsarray<string>
+可见主要颜色
+建议
+ground_colorstring
+装饰底色
+背景色已确认时
+ground_techniquestring
+底色工艺
+工艺已确认时
+has_gildingboolean
+是否有鎏金
+建议检查
+has_gilded_rimboolean
+圈口是否鎏金
+有圈口时检查
+gilding_motifsarray<string>
+鎏金图案
+有鎏金时填写
+gilding_subjectsarray<string>
+鎏金描绘主体
+有具象主体时填写
+border_pattern_namestring
+命名边饰
+例如经确认的 A 边；与花卉等主装饰并存，不强塞进整体花样。
+
+装饰字段的边界
+pattern_name 是主装饰的命名；border_pattern_name 是命名边饰；motifs 是具体纹样；subjects 是描绘主体；themes 是表达主题。A 边与花卉可以并存，不必拼成一个新花样词条。
+ground_color 只描述装饰背景色；colors 描述整体可见颜色。红地不等于红釉，金色不等于已经确认鎏金。工艺未经核验时留在候选层。
+没有圈口时 has_gilded_rim 为 null，并由器型或备注说明不适用；有圈口且确认无金边时为 false。有金边必须同时有 has_gilding = true。
+立体瓷偶不因其本身立体就属于浮雕。贴塑立体花、浮雕、镂空分别描述，不能只用 has_relief 统包。
+六 尺寸与当前品相字段
+尺寸
+字段与类型
+中文含义
+填写规则
+height_cmdecimal
+高度
+至少一项主要尺寸
+diameter_cmdecimal
+直径
+按器型填写
+width_cmdecimal
+宽度
+按器型填写
+depth_cmdecimal
+深度
+按器型填写
+measurement_notestext
+尺寸口径说明
+保存近似、测量方向和原始写法；组合尺寸放在对应组件。
+
+当前品相
+字段与类型
+中文含义
+填写规则
+condition_gradeinteger/null
+当前品相评估等级
+1 极好；2 轻微使用痕迹；3 明显缺陷但无已知修复；4 已修复或结构性破损。不得转换为“一等”等厂家用语。
+defect_typesarray<string>
+已确认瑕疵类型
+未全面检查仍可登记已知瑕疵；[] 仅表示完整检查后未发现，null 表示未知。
+has_chipsboolean
+是否有磕口或崩缺
+已知 chip 即 true；全面检查并排除才为 false；否则为 null。
+has_restorationboolean
+是否修复
+检查后填写
+restoration_levelenum/null
+修复程度
+minor / moderate / extensive；有修复但程度未知时为空，不能推断无修。
+condition_notestext
+品相说明
+具体位置与程度
+condition_inspection_statusenum
+品相检查状态
+not_inspected / partial / complete；与资料 review_status 分开。
+condition_inspected_atdatetime
+品相检查时间
+完成或更新检查时记录；旧订单的品相不能自动代表现状。
+
+当前品相等级为可选人工综合评估：1 无已知瑕疵且检查完整；2 轻微使用痕迹；3 明显磨损、非结构性小磕口或其他明显缺陷但无已知修复；4 已修复、断裂、缺失结构部件或严重破损。裂纹需判断位置和结构影响，不能只按关键词评级。
+已知瑕疵不因“未评级”而丢弃。已知修复时不允许评为 1 至 3；严重程度不明则等级留空。缺盖、混配和厂家二等分别披露，不机械换算成当前品相分数。
+检查未完成时可以记录已知缺陷，但不能用空瑕疵列表或 false 表示整件无瑕、无修。当前品相标题用“轻微磨损”“杯口有磕”等事实，避免输出裸露的“一等、二等”。
+七 采购 定价与关联业务记录
+字段与类型
+中文含义
+填写规则
+acquisition_costdecimal
+整组已分摊采购成本
+商品销售单位的总采购成本；已包含费用不得再加一次运费或佣金。
+acquisition_currencystring
+采购币种
+成本有值必填
+acquired_ondate
+采购日期
+建议
+fx_rate_to_cnydecimal
+采购换算人民币汇率
+非人民币换算必填
+fx_rate_datedate
+汇率适用日期
+使用汇率时记录
+fx_rate_sourcestring
+汇率依据
+使用汇率时记录
+acquisition_cost_cnydecimal
+人民币采购成本
+公式派生
+target_pricedecimal
+整组目标售价
+在售必填
+target_currencystring
+目标售价币种
+售价有值必填
+
+价格和汇率口径
+采购成本和目标售价都对应整个销售单位。非人民币采购换算：acquisition_cost_cny = acquisition_cost × fx_rate_to_cny，保留两位小数。原币为 CNY 时汇率为 1。汇率日期与来源必须可追溯，不用今日汇率改写历史成本。
+单一汇率不能表达多币种、多次付款和多项费用。Acquisition/Cost 明细应保存金额、币种、发生日期、汇率、费用类型、分摊方法与 Evidence；Product 采购字段只作汇总快照。
+以下内容不新增为 Product 的描述字段
+关联记录
+应保存的内容
+OrderLine
+product_id、quantity、成交金额与币种、成交时间、交易状态、随机选货或专拍约定。
+OrderAdjustment
+补差价、折扣、退款、赠品关系与金额；不能创建“补价链接”商品来充当器型。
+ConditionEvent
+发生时间、阶段、组件、变化前后情况及证据。区分市场已损与仓库后续破损。
+Evidence
+文件、工作表、行号、原消息和照片关联；历史标识冲突不丢弃来源。
+
+订单备注中的“美国、德国”可能是收货或履约信息，不可自动写成 country_of_origin。标准售价也不能未经确认就等同于实际成交价。
+八 等级 标记与缺失值规则
+厂家等级与历史表达
+factory_grade 只表达经确认的厂家质量等级。first 显示“厂家一等”，second 显示“厂家二等”；other 必须在证据中解释，unknown 表示尚未确定。历史标题的“一等”不自动进入此字段，也不自动进入 condition_grade。
+四杠、四缸、磨标、罗马标等先记录可观察或原文声称的标记。划杠数量的含义依品牌、时期和证据核验，不设置通用的“杠数等于某等级”规则。
+marks 内部属性
+定义
+mark_id / component_id
+标记标识；所属组件，可为空表示整件。
+kind / location
+maker_mark、incision、erasure、date_mark、other；位置如底部。
+raw_text / observed_features
+原文和已经观察到的特征分开保存。只见“四缸”原文，不自动生成四道划痕事实。
+interpretation / verification_status
+解释结论；unreviewed / confirmed / disputed。
+evidence_ids
+照片或资料凭据标识；无证据不填已确认。
+
+外画与制造归属
+decoration_origin = outside 表示经确认的非原厂装饰。原厂画师参与不必然等于原厂出品；“原厂画师外画”可以同时保存画师归属陈述与外画结论。混合装饰填 mixed，并说明各部分。未装饰填 undecorated，仅在有依据时使用。
+统一缺失值规则
+一般标量 null 表示未知或未采集；有明确 unknown 选项的状态字段使用 unknown。boolean 的 true/false 必须基于证据；null 表示未知或不适用，不适用由器型规则或备注说明。
+列表 null 表示未知；[] 表示确认没有。对瑕疵，必须同时看 condition_inspection_status；对组件，必须同时看 component_list_status。不能以数组存在就认定登记完成。
+ProductInference 每条至少保存 product_id、attribute_path、candidate_value、evidence_ids、confidence、model、created_at、review_status 和 reviewed_at。attribute_path 可定位组件或标记；确认前候选不得进入正式标题。
+九 基础分类边界与词表约定
+器型词表与字段结构分开管理。下表定义 V2 的基础归类方向；每个正式词条需有稳定 code、中文名、英文名、parent_code、别名、边界说明与词表版本。新增词条可以不改变字段结构。
+分类方向
+基础词条与边界
+餐具与饮用器
+杯、杯托、盘、碗、壶、奶罐、糖罐、蛋杯、酱料船、调料瓶、托盘。茶咖用途单独记录，避免平行分类重复收录。
+餐桌附件
+勺、勺搁、筷子架、面包板、加热器、壶承、果篮。烟盘不归普通餐盘。
+陈设器
+花瓶、花盆、烛台、相框、陈设盒。带人物或动物结构不自动归瓷偶。
+塑像
+单体人物、组像、动物塑像、胸像。两件可分离瓷偶成对出售，以 pair 表示，不自动作为组像。
+文房与画类
+墨水台、笔盘、瓷板、瓷板画。独立画作使用画类扩展。
+个人用品与烟具
+香水瓶、首饰盒、烟灰缸、烟斗等；首饰盒不归首饰。
+组合与零件
+同类套组保留主体器型；异类捆绑为 mixed_set，并记录成员类型。单卖盖子为 lid，sale_unit_type = part。
+非瓷器扩展
+玻璃或水晶器沿用通用器型并记录 materials。首饰、独立画作使用独立分类及扩展属性。
+
+不靠扩大词表解决的信息缺失
+“一等18”“Kpm20”“如图三个”“八加三”均不足以确定器型。unknown 或待识别属于工作状态，不作为一个能算入分类成功率的商品类目。
+非瓷器商品的扩展接口
+本规范以瓷器为主。首饰关联 JewelryDetails，至少记录 product_id、material、fineness、weight_g、size、evidence_ids；14K 与 925 保存为成色规格，不能根据材质推断品牌或器型。缺失资料保持待补。
+独立画作关联 ArtworkDetails，按需记录媒材、载体、题名、作者与画面尺寸。上述属性不强制增加到每件瓷器的顶层字段。
+十 标题生成规则
+公共顺序：年代 → 品牌 → 厂家等级 → 主装饰或主体 → 用途与器型 → 规格与组成 → 必要状态说明。每一段都必须有依据；没有值时省略，但不得省掉识别商品所需的最低信息。
+标题部分
+生成规则
+年代
+区间显示“1860–1910年”；约年保留“约”；世纪描述不强行转成精确年。混合年代套组不显示统一年份。
+品牌
+由 maker 词表生成统一显示名，如 Meissen梅森；品牌未知可省略。禁从蓝洋葱、全蕾丝等花样自动反推品牌。
+厂家等级
+只有经核验的 factory_grade 才输出“厂家一等”等完整用语；当前品相不使用“一等”字样。
+主装饰或主体
+优先确定的主装饰；必要时加边饰、布局、底色。人物塑像优先主体，避免只输出“瓷偶”。
+用途与器型
+组合为“咖啡杯碟”等自然短语；已有用途词不重复。多个用途未分主次时只显示器型。
+规格与组成
+优先必要的高、直径或型号，再加明确组成。“一杯一托一盘”不能简化成“一杯两碟”掩盖差异。
+状态说明
+缺盖、后配、混配、不同年代、重要磕碰和修复等必须明确披露。已确认影响购买判断时放入标题尾部或紧邻标题的不可省略说明。
+
+类别模板
+杯盘与餐具：品牌＋主装饰或边饰＋用途与器型＋尺寸或组成＋必要状态。陈设器：年代＋品牌＋主体或装饰＋器型＋高度＋状态。塑像：品牌＋主体或型号＋塑像类型＋尺寸＋修复或缺损。
+混合套组：品牌（仅适用时）＋成员名称＋组合数量＋配套状态。零件：品牌（已确认时）＋零件类型＋适配型号或尺寸＋状态。
+生成和人工修改
+先选择有证据的事实，再处理重复词，最后生成预览。保留手工润色后的 product_title；事实变化时重新预览，由人工确认替换，不用旧标题反向覆盖事实。raw_title 不变。
+缺器型或缺套组成员信息时，可以保留工作标题，但不能通过正式上架标题校验。不同实物可以同名，不以标题去重或合并 Product。
+十二 迁移规则与验收
+V1 到 V2 的迁移
+原字段或旧规则
+V2 处理
+condition_grade 与“一等”
+保留原等级来源。只有明确依据当前品相标准评定的旧值可沿用；从历史“一等”抽取的值回退为待核验。
+piece_count
+停止使用其混合口径。已确认是物理部件数才迁入 physical_piece_count；业务三件套数量迁入 sale_piece_count。不能同时机械复制。
+components
+保留原清单；补 component_id、登记状态和必要的成员属性。单层结构仍可使用，不为简单杯碟强制增加嵌套。
+maker 与外画描述
+maker 保留制造者含义；将经核验的装饰归属和装饰者迁入独立字段。
+form_styles 与 styles
+形制归 form_styles；艺术风格归 styles。旧 Rococo 不再无条件复制到两处。
+pattern_name 中的 A 边等
+核验后拆出 border_pattern_name，主花样保留；原文始终保存在 raw_title。
+旧商品代码和标准售价
+代码放 external_refs 并核查冲突；标准售价不自动变为实际成交价。
+其他 V1 字段
+除本规范明确修订的定义外，保留原值并按 V2 校验；禁止因版本升级自动提高 review_status。
+
+建档和上架门槛
+建档必填：product_id、schema_version、created_at、updated_at、review_status。其余信息允许待补；至少关联一条原始来源，才能追溯业务记录。
+上架前：明确销售单位、器型、适用规格、目标价格与币种；明确披露品牌未知等关键不确定性。组合或零件必须能说明实际出售范围。完成必要品相检查并披露已知损伤与修复。厂家等级和年代可以未知。
+必须通过的检查
+1. 等级不混用，外画不归入工艺；2. 组件数量为正整数，树中无循环或重复计数；3. 登记完整才计算物理件数；4. 混合年代不生成统一年代；5. 已修复不评当前品相 1 至 3；6. 金边与鎏金状态一致；7. 数值带单位，金额带币种；8. 标题不含客户或履约信息；9. 历史代码冲突不覆盖记录；10. 字段或标题候选可以回溯到证据。
+采用 V2 表示采用本版字段与规则，不表示所有历史订单已经完成核验。词表完善、历史资料补齐与商品逐条审核应分别记录进度。
