@@ -99,6 +99,8 @@ type LoginFlow struct {
 
 	qrCode       *QRCode
 	refreshCount int
+	// Curio patch: refreshed login codes must also reach the display callback.
+	onQRCode QRCodeCallback
 }
 
 // NewLoginFlow creates a new login flow.
@@ -125,6 +127,11 @@ func (f *LoginFlow) GetQRCode(ctx context.Context) (*QRCode, error) {
 	}
 
 	f.qrCode = qr
+	if f.onQRCode != nil {
+		if err := f.onQRCode(ctx, qr); err != nil {
+			return nil, fmt.Errorf("display QR code: %w", err)
+		}
+	}
 	return qr, nil
 }
 
@@ -238,18 +245,12 @@ type QRCodeCallback func(ctx context.Context, qr *QRCode) error
 // 4. Return login result
 func LoginWithContext(ctx context.Context, client *ilink.Client, displayCallback QRCodeCallback, config LoginConfig) (*ilink.LoginResult, error) {
 	flow := NewLoginFlow(client, config)
+	flow.onQRCode = displayCallback
 
 	// Get initial QR code
-	qr, err := flow.GetQRCode(ctx)
+	_, err := flow.GetQRCode(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get QR code: %w", err)
-	}
-
-	// Display QR code with context
-	if displayCallback != nil {
-		if err := displayCallback(ctx, qr); err != nil {
-			return nil, fmt.Errorf("display QR code: %w", err)
-		}
 	}
 
 	// Poll for status

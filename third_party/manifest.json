@@ -4,6 +4,10 @@
     "commit": "c2dc55718bac83f1c0b23db488d6e96f89969cfc",
     "license": "Apache-2.0 (LICENSE file)",
     "go_requirement": "1.25",
-    "status": "Source downloaded only; not built, authenticated or integrated"
+    "status": "Integrated with owner-only Curio query bot; authentication remains local",
+    "local_patches": [
+      "login/login.go: display refreshed QR codes via callback",
+      "login/curio_refresh_test.go: expired-code regression test"
+    ]
   }
 }
