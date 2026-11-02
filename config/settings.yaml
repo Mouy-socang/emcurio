@@ -1,7 +1,14 @@
 keywords:
   - Meissen
+  - KPM Berlin
 auction_fee_rate: 0.0
 cheap_damaged_max: null
 daily_budget: 0
 kleinanzeigen_enabled: true
 status_check_limit: 200
+# 每平台每日外部请求上限（含 OAuth、重试），按柏林日期归零；低于官方上限。
+# 新货抓取最多用 60%，在售检查保底 40%；用完当天跳过该平台。
+api_budget:
+  ebay: 4500
+  etsy: 4500          # 账号额度 5000/天、5 次/秒（请求间隔 ≥0.2 秒，由 curio/etsy.py 保证）
+  kleinanzeigen: 1500

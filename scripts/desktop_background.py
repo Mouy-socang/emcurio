@@ -1,4 +1,4 @@
-"""Finder 启动入口：确保每 30 分钟采集任务已加载，不打开浏览器。"""
+"""Finder 启动入口：确保每 5 分钟唤醒的采集调度任务已加载，不打开浏览器。"""
 import fcntl
 import os
 from pathlib import Path

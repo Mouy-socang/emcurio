@@ -132,11 +132,14 @@ class CollectionError(Exception):
     """Sanitized error: response bodies, headers and credentials are never exposed."""
 
 class EbayAPI:
-    def __init__(self, root):
+    def __init__(self,root,budget=None):
         from .config import credentials
         self.client_id,self.secret=credentials(root)
         self.session=requests.Session();self.token=None
+        # AD-27：每个外部请求（含 OAuth）先计入当日预算；purpose 为 fetch（新货）或 check（在售检查）。
+        self.budget=budget;self.purpose='fetch'
     def _request(self,method,url,**kwargs):
+        if self.budget is not None:self.budget.spend('ebay',self.purpose)
         try:return self.session.request(method,url,timeout=30,**kwargs)
         except requests.RequestException:raise CollectionError('eBay 网络请求失败') from None
     def _authorize(self):
@@ -196,9 +199,12 @@ def collect_ebay(store,api,config):
 def blocked(raw):
     return bool(re.search(r'captcha|access denied|verify you are human|sicherheitsüberprüfung|robot check',raw,re.I))
 
-def collect_ka(store,config):
+def collect_ka(store,config,budget=None):
+    from .schedule import BudgetExhausted
     if time.time()<float(store.get('ka_pause_until','0')):
         store.set('ka_status','paused');return 0
+    if budget is not None and not budget.available('kleinanzeigen','fetch'):
+        store.set('ka_status','budget_exhausted');return 0
     store.set('ka_status','running')
     checkpoint=store.get('ka_incremental_known')
     known=set(json.loads(checkpoint)) if checkpoint else store.known()
@@ -206,6 +212,11 @@ def collect_ka(store,config):
     added=0;reached_limit=False
     for keyword in config['keywords']:
         for page in range(1,21):
+            if budget is not None:
+                # 用完即停：保留本轮增量边界（ka_incremental_known），明天接着抓。
+                try:budget.spend('kleinanzeigen','fetch')
+                except BudgetExhausted:
+                    store.set('ka_status','budget_exhausted');return added
             rows,error=fetch_kleinanzeigen(keyword,page)
             if error:
                 is_block='拦截' in error or '人机验证' in error
@@ -228,10 +239,19 @@ def collect_ka(store,config):
         c.execute("DELETE FROM kv WHERE k IN ('ka_incremental_known','ka_error')")
     return added
 
-def check_existing(store,api,config):
-    """Rotate independently of search ingestion; retain failures as unknown."""
+def check_existing(store,api,config,budget=None,etsy=None):
+    """Rotate independently of search ingestion; retain failures as unknown.
+
+    每平台平分 status_check_limit；Etsy 按 100 个编号一批查询。预算用完的平台本轮跳过并写入 budget_exhausted。"""
     from .store import now
+    from .schedule import BudgetExhausted
     summary=dict(attempted=0,active=0,gone=0,errors=0,paused=0)
+    exhausted=set()
+    for client in (api,etsy):
+        if client is not None:client.purpose='check'
+    def event(iid,platform,outcome,evidence):
+        summary['errors' if outcome=='error' else outcome]+=1
+        with store.connect() as c:c.execute('INSERT INTO status_check_events(item_id,platform,checked_at,outcome,evidence) VALUES(?,?,?,?,?)',(iid,platform,now(),outcome,evidence))
     with store.connect() as c:
         c.executescript("""CREATE TABLE IF NOT EXISTS status_check_events(
           id INTEGER PRIMARY KEY,item_id TEXT,platform TEXT,checked_at TEXT,outcome TEXT,evidence TEXT);
@@ -242,13 +262,35 @@ def check_existing(store,api,config):
           ORDER BY COALESCE((SELECT max(e.checked_at) FROM status_check_events e WHERE e.item_id=i.item_id),'') ASC,
           CASE WHEN i.agent_decision IN ('want','probe') AND NOT EXISTS(SELECT 1 FROM market_decisions m WHERE m.item_id=i.item_id AND m.irrelevant=1) THEN 0 ELSE 1 END,
           i.checked_at,i.item_id""")]
-    limit=config['status_check_limit'];per_platform=max(1,(limit+1)//2);used={};started=time.monotonic()
+    ka_usable=config['kleinanzeigen_enabled'] and time.time()>=float(store.get('ka_pause_until','0'))
+    usable=[p for p,ok in (('ebay',api is not None),('kleinanzeigen',ka_usable),('etsy',etsy is not None)) if ok]
+    limit=config['status_check_limit'];per_platform=max(1,-(-limit//max(1,len(usable))));used={};started=time.monotonic()
+    if etsy is not None and limit>0:
+        picks=[r for r in rows if r['platform']=='etsy'][:min(per_platform,limit)]
+        if picks and budget is not None and not budget.available('etsy','check'):
+            exhausted.add('etsy');picks=[]
+        if picks:
+            from .etsy import judge_listings,parse as etsy_parse
+            verdicts,error=judge_listings(etsy,[r['item_id'] for r in picks])
+            if isinstance(error,BudgetExhausted):exhausted.add('etsy')
+            elif error is not None:summary['etsy_error']=str(error)
+            for row in picks:
+                outcome,evidence,listing=verdicts[row['item_id']]
+                summary['attempted']+=1;used['etsy']=used.get('etsy',0)+1
+                try:
+                    if outcome=='gone':store.mark_gone(row['item_id'])
+                    elif outcome=='active':store.ingest(etsy_parse(listing,''),config)
+                except Exception:outcome,evidence='error','status update failed; state retained'
+                event(row['item_id'],'etsy',outcome,evidence)
     for row in rows:
         if summary['attempted']>=limit or time.monotonic()-started>=240:break
         platform=row['platform']
+        if platform=='etsy' or platform in exhausted:continue
         if used.get(platform,0)>=per_platform:continue
         if platform=='ebay' and api is None:continue
         if platform=='kleinanzeigen' and (not config['kleinanzeigen_enabled'] or time.time()<float(store.get('ka_pause_until','0'))):continue
+        if budget is not None and platform in ('ebay','kleinanzeigen') and not budget.available(platform,'check'):
+            exhausted.add(platform);continue
         summary['attempted']+=1;used[platform]=used.get(platform,0)+1
         outcome='error';evidence='status_unverified'
         try:
@@ -260,6 +302,7 @@ def check_existing(store,api,config):
                     row.update(parse(detail,''));row['description']=detail.get('shortDescription',row.get('description',''))
                     store.ingest(row,config);outcome='active';evidence='API detail available; no out-of-stock marker'
             else:
+                if budget is not None:budget.spend('kleinanzeigen','check')
                 status,raw,url,error=ka_curl(row['url'])
                 if status in (403,429) or blocked(raw):
                     store.set('ka_pause_until',time.time()+7200);outcome='paused';evidence='HTTP challenge/rate limit'
@@ -275,15 +318,24 @@ def check_existing(store,api,config):
                         with store.connect() as c:c.execute('UPDATE items SET checked_at=? WHERE item_id=?',(now(),row['item_id']))
                     outcome='active';evidence='original listing HTTP 200; no unavailable marker'
             if outcome=='gone':store.mark_gone(row['item_id'])
-        except Exception:evidence='detail request failed; state retained'
-        summary['errors' if outcome=='error' else outcome]+=1
-        with store.connect() as c:c.execute('INSERT INTO status_check_events(item_id,platform,checked_at,outcome,evidence) VALUES(?,?,?,?,?)',(row['item_id'],platform,now(),outcome,evidence))
+        except BudgetExhausted:
+            exhausted.add(platform);outcome='error';evidence='daily API budget exhausted; state retained'
+        except Exception:outcome='error';evidence='detail request failed; state retained'
+        event(row['item_id'],platform,outcome,evidence)
+    if exhausted:summary['budget_exhausted']=sorted(exhausted)
     with store.connect() as c:summary['remaining_active']=c.execute("SELECT count(*) FROM items WHERE status='active'").fetchone()[0]
     return summary
 
-def run(root):
-    from .config import load
+FETCH_OK=('ok','disabled','not_due')
+
+def run(root,clock=time.time):
+    """launchd 每 5 分钟唤醒一次；调度器决定本轮是否抓新货、是否做在售检查（AD-27）。
+
+    两者都不到期时直接结束，不写 collection_runs。"""
+    from .config import load,etsy_credentials
     from .store import Store,now
+    from .schedule import Scheduler,Budget,BudgetExhausted
+    from .etsy import EtsyAPI,collect_etsy
     import uuid
     store=Store(root/'data/curio.db');config=load(root);owner=uuid.uuid4().hex
     with store.connect() as c:
@@ -292,30 +344,64 @@ def run(root):
         if lock and float(lock[0])>time.time():return {'status':'already_running'}
         c.execute("INSERT OR REPLACE INTO kv VALUES('collect_lock_until',?)",(str(time.time()+3600),))
         c.execute("INSERT OR REPLACE INTO kv VALUES('collect_lock_owner',?)",(owner,))
-    result={};api=None
-    with store.connect() as c:
-        c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
-          id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,status TEXT,result TEXT)''')
-        run_id=c.execute('INSERT INTO collection_runs(started_at,status) VALUES(?,?)',(now(),'running')).lastrowid
     try:
-        try:
-            api=EbayAPI(root);result['ebay_new']=collect_ebay(store,api,config);result['ebay_status']='ok'
-        except Exception:
-            result['ebay_status']='error';result['ebay']='采集未完成：检查网络、API 权限或 .env'
-        if config['kleinanzeigen_enabled']:
-            try:
-                result['kleinanzeigen_new']=collect_ka(store,config)
-                result['kleinanzeigen_status']=store.get('ka_status')
-                if store.get('ka_error'):result['kleinanzeigen_error']=store.get('ka_error')
-            except Exception:result['kleinanzeigen_status']='error'
-        else:result['kleinanzeigen_status']='disabled'
-        try:result['status_check_summary']=check_existing(store,api,config)
-        except Exception:result['status_checks']='本轮状态检查未完成，将在后续轮次重试'
+        sched=Scheduler(store,clock);budget=Budget(store,config['api_budget'],clock)
+        do_fetch=sched.fetch_due();do_check=sched.check_due()
+        if not do_fetch and not do_check:
+            return {'status':'idle',**sched.summary()}
+        result={'fetch_ran':do_fetch,'status_check_ran':do_check}
+        with store.connect() as c:
+            c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
+              id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,status TEXT,result TEXT)''')
+            run_id=c.execute('INSERT INTO collection_runs(started_at,status) VALUES(?,?)',(now(),'running')).lastrowid
+        try:api=EbayAPI(root,budget)
+        except Exception:api=None
+        etsy_keys=etsy_credentials(root)
+        etsy=EtsyAPI(*etsy_keys,budget=budget) if etsy_keys else None
+        if do_fetch:
+            sched.mark_fetch_started();fetch_started=now()
+            if api is None:
+                result['ebay_status']='error';result['ebay']='采集未完成：检查网络、API 权限或 .env'
+            elif not budget.available('ebay','fetch'):result['ebay_status']='budget_exhausted'
+            else:
+                try:api.purpose='fetch';collect_ebay(store,api,config);result['ebay_status']='ok'
+                except BudgetExhausted:result['ebay_status']='budget_exhausted'
+                except Exception:
+                    result['ebay_status']='error';result['ebay']='采集未完成：检查网络、API 权限或 .env'
+            if config['kleinanzeigen_enabled']:
+                try:
+                    collect_ka(store,config,budget)
+                    result['kleinanzeigen_status']=store.get('ka_status')
+                    if store.get('ka_error'):result['kleinanzeigen_error']=store.get('ka_error')
+                except Exception:result['kleinanzeigen_status']='error'
+            else:result['kleinanzeigen_status']='disabled'
+            if etsy is None:result['etsy_status']='disabled'
+            elif not budget.available('etsy','fetch'):result['etsy_status']='budget_exhausted'
+            else:
+                try:etsy.purpose='fetch';collect_etsy(store,etsy,config);result['etsy_status']='ok'
+                except BudgetExhausted:result['etsy_status']='budget_exhausted'
+                except CollectionError as error:result['etsy_status']='error';result['etsy']=str(error)
+                except Exception:result['etsy_status']='error';result['etsy']='Etsy 采集未完成，将在后续轮次重试'
+            # 以入库时间计新货：采集中途失败或预算用完时，已入库的新货同样计入。
+            with store.connect() as c:
+                counts=dict(c.execute('SELECT platform,count(*) FROM items WHERE first_seen>=? GROUP BY platform',(fetch_started,)).fetchall())
+            for platform in ('ebay','kleinanzeigen','etsy'):result[platform+'_new']=counts.get(platform,0)
+            result['new_total']=sum(result[p+'_new'] for p in ('ebay','kleinanzeigen','etsy'))
+            sched.record_fetch(result['new_total'])
+        else:
+            result['ebay_status']='not_due'
+            result['kleinanzeigen_status']='not_due' if config['kleinanzeigen_enabled'] else 'disabled'
+            result['etsy_status']='not_due' if etsy is not None else 'disabled'
+        if do_check:
+            sched.mark_check_started()
+            try:result['status_check_summary']=check_existing(store,api,config,budget,etsy)
+            except Exception:result['status_checks']='本轮状态检查未完成，将在后续轮次重试'
         store.archive();store.set('last_collection',now())
-        import json
+        result['api_usage']=budget.snapshot();result.update(sched.summary())
         store.set('last_collection_result',json.dumps(result,ensure_ascii=False))
         with store.connect() as c:
-            status='ok' if result.get('ebay_status')=='ok' and result.get('kleinanzeigen_status') in ('ok','disabled') and 'status_checks' not in result and not result.get('status_check_summary',{}).get('errors') else 'partial'
+            ok=all(result.get(p+'_status') in FETCH_OK for p in ('ebay','kleinanzeigen','etsy'))
+            status='ok' if ok and 'status_checks' not in result and not result.get('status_check_summary',{}).get('errors') else 'partial'
             c.execute('UPDATE collection_runs SET finished_at=?,status=?,result=? WHERE id=?',
                       (now(),status,json.dumps(result,ensure_ascii=False),run_id))
         return result

@@ -1,6 +1,6 @@
 # Curiobject · Mac 本地权威端
 
-采集 eBay / Kleinanzeigen → 所有货进入 SQLite → 规则筛选 → 本地空模型层 → 店主审核。
+采集 eBay / Etsy / Kleinanzeigen → 所有货进入 SQLite → 规则筛选 → 本地空模型层 → 店主审核。
 
 ## 仓库位置与来源（2026-11-02 合并）
 
@@ -20,7 +20,7 @@ uv sync                 # 安装 Python 3.13 虚拟环境与锁定依赖
 cp .env.example .env    # 首次部署才需要
 ```
 
-用文本编辑器填写 `.env` 中的 `EBAY_CLIENT_ID`、`EBAY_CLIENT_SECRET`，使用具备 Browse API 权限的正式环境凭据。只读该文件，不读取系统环境变量，不记录认证响应或密钥。不要提交 `.env`。
+用文本编辑器填写 `.env` 中的 `EBAY_CLIENT_ID`、`EBAY_CLIENT_SECRET`，使用具备 Browse API 权限的正式环境凭据。Etsy 可选：填 `ETSY_API_KEY`（Keystring）与 `ETSY_SHARED_SECRET`；不填或留空则跳过 Etsy，每轮结果写 `etsy_status: disabled`。只读该文件，不读取系统环境变量，不记录认证响应或密钥。不要提交 `.env`。
 
 ```sh
 # 单次采集、规则判断、价格和下架检查
@@ -33,12 +33,28 @@ uv run python -m curio.review
 
 打开网页不会触发采集或模型调用。所有操作数据都在 `data/curio.db`（WAL 模式，连接等待 30 秒；备份请用 `VACUUM INTO`，不要直接复制正在写入的库）：items、price_history、price_drops、cases、screening_jobs、kv。可用 `uv run python scripts/import_desktop.py /旧版路径/curio.db` 只读导入 eBay/Kleinanzeigen 商品与审核记录（不含 Lottissimo）。重复导入不会重复创建记录。旧审核缺失的当时价格快照留空，不拿当前价冒充；原价格历史保留在旧库，不迁移。导入商品需后续重新核验在售状态。采集状态和错误摘要保存在 kv。
 
+## 调度与接口调用预算（AD-27）
+
+launchd 每 5 分钟唤醒一次 `curio.curio_monitor`，由 `curio/schedule.py` 按 kv 里的状态决定本轮做什么：
+
+- **新货抓取**：基础间隔初始 30 分钟；每轮抓完按三平台合计新货调整——≥10 件减半、0 件 ×1.5、其余不变，夹在 5–60 分钟。柏林时间 01:00–06:59 实际间隔再 ×2（仍不超过 60）。唤醒时刻允许 30 秒抖动。
+- **在售检查**（`check_existing`）：独立节拍，每 30 分钟最多一轮，每轮最多 `status_check_limit` 件，在可用平台间平分；Etsy 按 100 个编号一批查。
+- 两者都没到期时本轮直接结束（输出 `{"status":"idle",...}`），不写 `collection_runs`。同一时间只有一轮（kv 锁）。
+- **每日预算** `config/settings.yaml` 的 `api_budget`（默认 eBay 4500、Etsy 4500、Kleinanzeigen 1500）：每个外部 HTTP 请求（含 eBay OAuth、Etsy 换 key 写法与 429 重试、Kleinanzeigen 每次 curl）发出前计数，按柏林日期归零，计数存 kv `api_usage`。新货抓取最多用 60%，在售检查保底 40%。某平台用完当天跳过，结果写 `<平台>_status: budget_exhausted`（在售检查写入 `status_check_summary.budget_exhausted`）。
+- 每轮结果（`collection_runs.result` 与 kv `last_collection_result`）含：`fetch_ran` / `status_check_ran`、`ebay_status` / `kleinanzeigen_status` / `etsy_status`（ok、error、paused、page_limit、budget_exhausted、disabled、not_due）、各平台 `*_new` 与 `new_total`、`api_usage`（当日各平台已用、上限、新货份额）、`fetch_interval_min`、`fetch_base_interval_min`、`next_fetch_at`。
+
+```sh
+sqlite3 data/curio.db "SELECT result FROM collection_runs ORDER BY id DESC LIMIT 1"
+```
+
 ## 采集行为
 
-- eBay Browse API：EBAY_DE、itemLocationCountry:DE、newlyListed；关键词在 `config/settings.yaml`，默认 Meissen。
+- 关键词在 `config/settings.yaml`：Meissen、KPM Berlin，三个平台共用。
+- eBay Browse API：EBAY_DE、itemLocationCountry:DE、newlyListed。
 - 首次最多 1,000 条，跨关键词共享上限，按关键词顺序采集；记录分页进度，失败可继续。之后每个关键词按新上架翻页，遇到本轮增量开始前已在库里的 ID 停止（中断重试沿用同一边界）。API 每个查询最多翻至 10,000 条，**不是首次回填 10,000**。
 - 已知商品另轮询详情（默认每轮20件，最久未检查优先），保留价格变化和下架记录。未出现在搜索列表不等于下架；明确404/410或无库存才标记，下架不推断为已售。
 - Kleinanzeigen 沿用 curl，最多20页/关键词；遇到验证或拦截暂停2小时，状态存库。站点HTML变动仍可能影响解析，不绕过验证码。
+- Etsy Open API v3（`curio/etsy.py`，移植自 `legacy/desktop_curio/etsy_source.py`）：只在 `.env` 有 `ETSY_API_KEY` 时启用；按最新上架翻页（每关键词每轮最多 300 条），一页全是已知货即停，只为新货批量补图。货号 `etsy:<listing_id>`，经 `store.ingest` 去重并记录价格变化。账号额度 5000 次/天、5 次/秒，代码保证相邻请求间隔不少于 0.2 秒。在售检查：`state` 不是 active 或 `quantity` 为 0 判下架（`quantity` 缺失视为在售）；批量查询中途失败时只对拿到详情的编号下结论，其余保持原状态并记录错误。Etsy 未启用、鉴权失败（如 403）或出错时不影响 eBay 与 Kleinanzeigen。
 - 每件新货调用一次 judge；仅标价或币种变化重判。规则排除的也保存原因。更改规则配置不会自动重判历史货。
 - 拍卖总价 = 标价 × (1 + auction_fee_rate)，其他总价=标价。这里只包含配置手续费，不含未知运费/税费；竞拍标价是当前出价，不是最终成交价。
 
@@ -52,9 +68,9 @@ want / probe 进入 cheap / deep 记录。`daily_budget: 0` 时不调用任何 p
 
 审核默认显示未审核的要/询市，新货优先；被规则排除页可以改判。点击要/询市/不要后可填原因和心理价，不要必须写原因。保存后从待审核中移除；每次判断追加 cases，保留当时的规则原因、标价、总价和规则版本。重复请求幂等，价格更新后的旧表单会被拒绝，避免错配快照。已审核商品改价不会自动重新进入待审核。
 
-## 每30分钟本机自动采集（launchd）
+## 每5分钟唤醒的本机自动采集（launchd）
 
-只安装一个定时任务 `com.curiobject.collect`：每 1800 秒运行一次 `curio.curio_monitor`，由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。
+只安装一个定时任务 `com.curiobject.collect`：每 300 秒唤醒一次 `curio.curio_monitor`，由调度器决定是否真正抓取（见上文「调度与接口调用预算」），由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。
 
 视觉识别进程（`scripts/install_visual_worker.py`，`com.curio.visual.phase1`）与微信机器人代码保留在仓库中，但**不安装**它们的定时任务。
 

@@ -7,7 +7,9 @@ from curio.curio_monitor import collect_ebay,EbayAPI,CollectionError,collect_ka,
 from screening.pipeline import process,NoopProvider
 
 @pytest.fixture
-def cfg():return load()
+def cfg():
+    # 这些用例按单关键词编排模拟响应；关键词配置本身见 test_settings_keywords_and_budget。
+    return dict(load(),keywords=['Meissen'])
 @pytest.fixture
 def db(tmp_path):return Store(tmp_path/'curio.db')
 def item(i='one',price=40,title='Meissen rote Rose Tasse'):
@@ -168,10 +170,15 @@ def test_store_uses_wal(db):
         assert c.execute('PRAGMA journal_mode').fetchone()[0]=='wal'
         assert c.execute('PRAGMA busy_timeout').fetchone()[0]==30000
 
+def test_settings_keywords_and_budget():
+    config=load()
+    assert config['keywords']==['Meissen','KPM Berlin']
+    assert config['api_budget']=={'ebay':4500,'etsy':4500,'kleinanzeigen':1500}
+
 def test_hourly_launchd_configuration():
     from scripts.install_hourly import configuration
     data=configuration()
-    assert data['StartInterval']==1800
+    assert data['StartInterval']==300
     assert data['ProgramArguments'][-1]=='curio.curio_monitor'
     assert data['RunAtLoad'] is False
     assert data['Label']=='com.curiobject.collect'

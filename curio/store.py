@@ -58,7 +58,7 @@ class Store:
         # Only explicit public product fields are persisted; no response blobs or credentials.
         fields=('item_id','platform','title','description','currency','price_text','buying','url','image','created','ends','condition','country')
         p={k:item.get(k,'') or '' for k in fields}
-        if not p['item_id'] or p['platform'] not in ('ebay','kleinanzeigen'):raise ValueError('来源商品编号无效')
+        if not p['item_id'] or p['platform'] not in ('ebay','kleinanzeigen','etsy'):raise ValueError('来源商品编号无效')
         listed,total=prices(item,config['auction_fee_rate']);p.update(price=listed,listed_price=listed,total_price=total)
         ts=now()
         with self.connect() as c:
