@@ -72,6 +72,29 @@ want / probe 进入 cheap / deep 记录。`daily_budget: 0` 时不调用任何 p
 
 审核默认显示未审核的要/询市，新货优先；被规则排除页可以改判。点击要/询市/不要后可填原因和心理价，不要必须写原因。保存后从待审核中移除；每次判断追加 cases，保留当时的规则原因、标价、总价和规则版本。重复请求幂等，价格更新后的旧表单会被拒绝，避免错配快照。已审核商品改价不会自动重新进入待审核。
 
+## 拣选状态与货号（AD-26、AD-7）
+
+拣选状态只经 `curio/triage.py` 写入（表 `triage`、追加式事件表 `triage_events`、货号表 `item_codes`，由 `Store` 建表）：
+
+- 状态：`new` 新货、`kept` 留下、`removed` 去掉、`auto_removed` 自动移出、`out_of_pool` 移出商品池。
+- 系统（规则归口）：入库时判断 `skip` → `auto_removed`，其余 → `new`；重判（改价、屏蔽词全量重判）只在**没有任何人工事件**的货上于 `new` / `auto_removed` 间移动。有人工事件的货只更新分数与理由，不改状态。
+- 人工动作：留下（`new`/`removed` → `kept`）、去掉（`new`/`kept`/`auto_removed`/`out_of_pool` → `removed`）、捞回（`auto_removed` → `new`，排新货队列最前）、移出商品池（`kept` → `out_of_pool`）、放回商品池（`out_of_pool` → `kept`）、撤销上一步（`undo`：撤销最近一个未撤销的人工动作，可连续多步，系统动作不进撤销栈）。非法转换抛中文 `TriageError`。
+- 现有入口已接入：`Store.review` 的 want → 留下（自动移出的先捞回、移出商品池的放回）、skip/irrelevant → 去掉、probe → 留在新货并记一条人工事件；`Store.block` 的那件货 → 去掉；`market.set_decision` 无关 → 去掉、取消无关 → 撤销那次去掉。`cases`、`market_decisions` 照旧写入，旧读者不变。
+- 每条事件记：UTC 时间、旧/新状态、动作、执行者（human/system）、当时的 `agent_decision`、分数（`items` 尚无分数列时为空）、`rule_version`、理由。
+- 货号 `CO-` + 至少 4 位序号（`CO-0001`…`CO-9999`、`CO-10000`…），首次进入 `kept` 时在 `BEGIN IMMEDIATE` 事务内分配；`code`、`item_id` 各自唯一；再次留下返回原货号；撤销、去掉、移出都不释放，号码永不复用。
+- 新货队列 `triage.queue`：捞回的在前（最近捞回优先），其余按 `first_seen` 新到旧，不含 `backlog`。
+
+### 迁移
+
+```sh
+sqlite3 data/curio.db ".backup data/backups/curio-before-triage-<UTC时间>.db"
+uv run python scripts/migrate_triage.py      # 幂等，可重跑；打印各状态计数
+```
+
+规则：`cases` / `market_decisions` 中最新的 irrelevant/skip → `removed`（human，沿用原时间；两表都有时取时间较新者）；`cases` 的 want → `kept` 并按决定时间顺序分配货号；probe → `new`（human）；其余按判断结果入 `new`/`auto_removed`。迁移时刻（kv `triage_migrated_at`，首次运行写入，重跑沿用）前 7 天以上入库、未经人工的 `new` 货标 `backlog=1`，不进新货队列（待故事 7 处理）。已有人工事件的货重跑时跳过，所以不会重复写事件或货号。`scripts/import_desktop.py`、`market.migrate_legacy` 仍直接写 `cases` / `market_decisions`，用它们导入后需再跑一次本迁移。
+
+2026-11-02 真实库迁移结果：items 21996 = triage 21996；`removed` 195（cases 180 件 + market_decisions 15 件，全为人工无关/不要）、`auto_removed` 10539、`new` 11262（其中 backlog 7050，新货队列 4212）；无 want，货号 0 个。备份在 `data/backups/curio-before-triage-20261102T200445Z.db`。第二次运行新增事件 0、货号 0。
+
 ## 每5分钟唤醒的本机自动采集（launchd）
 
 只安装一个定时任务 `com.curiobject.collect`：每 300 秒唤醒一次 `curio.curio_monitor`，由调度器决定是否真正抓取（见上文「调度与接口调用预算」），由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。

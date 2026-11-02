@@ -7,6 +7,7 @@ from urllib.parse import urlparse,parse_qs
 ROOT=Path(__file__).resolve().parents[1]
 DB=ROOT/'data/curio.db'
 from .product_v2 import FORMS
+from . import triage
 TYPE_LABELS={code:label for code,family,label,pattern in FORMS}
 TYPE_LABELS.update(cup_set='杯碟／杯组',cup='单杯',saucer='单碟／杯托',mixed_set='混合套组')
 LABELS={f['field']:f['label'] for f in json.loads((ROOT/'docs/product-fields-v2.json').read_text())['fields']}
@@ -50,6 +51,12 @@ def set_decision(platform,item_id,irrelevant,reason):
   if not c.execute('select 1 from market_items where platform=? and item_id=?',(platform,item_id)).fetchone():raise ValueError('商品不存在')
  stamp=datetime.now(timezone.utc).isoformat()
  with connect() as c:
+  # AD-26：无关 → 去掉；取消无关 → 撤销那次去掉，回到之前的状态。
+  c.execute('BEGIN IMMEDIATE')
+  if irrelevant:triage.remove(c,item_id,reason or '无关')
+  elif triage.state(c,item_id)=='removed':
+   try:triage.undo(c,item_id,actions=('remove','migrate'))
+   except triage.TriageError:pass
   c.execute('insert into market_decisions values(?,?,?,?,?) on conflict(platform,item_id) do update set irrelevant=excluded.irrelevant,reason=excluded.reason,updated_at=excluded.updated_at',(platform,item_id,int(irrelevant),reason,stamp))
   c.execute('insert into market_events(platform,item_id,irrelevant,reason,created_at) values(?,?,?,?,?)',(platform,item_id,int(irrelevant),reason,stamp))
 def connect():
