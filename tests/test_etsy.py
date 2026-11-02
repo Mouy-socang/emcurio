@@ -98,10 +98,12 @@ def test_check_partial_batch_failure_keeps_rest(db,cfg):
     etsy=FakeEtsy(details=details,fail_batch=2)
     summary=check_existing(db,None,dict(cfg,kleinanzeigen_enabled=False),None,etsy)
     assert etsy.batches==2 and summary['attempted']==100 and summary['etsy_error']
-    assert summary['gone']==50 and summary['active']==50 and summary['errors']==0
+    assert summary['gone']+summary['active']==100 and summary['errors']==0
     with db.connect() as c:
         status=dict(c.execute("SELECT item_id,status FROM items WHERE platform='etsy'").fetchall())
         events=dict(c.execute("SELECT item_id,outcome FROM status_check_events").fetchall())
+    # 奇数编号 quantity 0 → gone；哪 100 件落在第一批取决于轮换顺序，所以按编号核对。
+    assert all(o==('gone' if int(i.split(':')[1])%2 else 'active') for i,o in events.items())
     assert len(events)==100                                   # 失败批次的货不写检查记录，保持轮换位置
     for iid,state in status.items():
         if iid not in events:assert state=='active'           # 未取到详情：保持原状态
@@ -204,8 +206,8 @@ def test_etsy_disabled_or_403_does_not_block_others(tmp_path,etsy_env):
          patch('curio.etsy.requests.Session',return_value=session),patch('curio.etsy.time.sleep'):
         result=run(tmp_path,lambda:NOON)
     assert result['etsy_status']==('error' if etsy_env else 'disabled')
-    # 每个关键词各试两种 key 写法：2 × 2 次请求；一个关键词失败不挡下一个。
-    if etsy_env:assert '鉴权失败' in result['etsy'] and result['api_usage']['etsy']['fetch']==4
+    # 两种 key 写法各试一次后即停（鉴权失败对所有关键词一样），并进入 1 小时退避。
+    if etsy_env:assert result['etsy']=='Etsy 鉴权失败，1 小时后重试' and result['api_usage']['etsy']['fetch']==2
     assert result['ebay_status']=='ok' and result['kleinanzeigen_status']=='ok'
     assert result['ebay_new']==1 and result['kleinanzeigen_new']==1
 
@@ -265,3 +267,30 @@ def test_collection_error_is_single_class_under_module_entry():
            "ns=runpy.run_module('curio.curio_monitor',run_name='probe');"
            "assert ns['CollectionError'] is e.CollectionError")
     subprocess.run([sys.executable,'-c',probe],cwd=ROOT,check=True)
+
+def test_auth_failure_backs_off_one_hour_then_clears(tmp_path):
+    from curio.curio_monitor import run
+    from curio.etsy import AUTH_BACKOFF_KEY
+    import time as real_time
+    shutil.copytree(ROOT/'config',tmp_path/'config')
+    (tmp_path/'.env').write_text('EBAY_CLIENT_ID=dummy\nEBAY_CLIENT_SECRET=dummy\nETSY_API_KEY=k\nETSY_SHARED_SECRET=s\n')
+    session=Mock();session.get.return_value=response(403)
+    clock=[NOON]
+    def once():
+        with patch('curio.curio_monitor.collect_ebay',return_value=0),\
+             patch('curio.curio_monitor.collect_ka',side_effect=lambda s,c,b=None:s.set('ka_status','ok')),\
+             patch('curio.etsy.requests.Session',return_value=session),patch('curio.etsy.time.sleep'):
+            return run(tmp_path,lambda:clock[0])
+    store=Store(tmp_path/'data/curio.db')
+    first=once()
+    assert first['etsy_status']=='error' and session.get.call_count==2      # 403 × 两种写法，检查也不再发
+    assert float(store.get(AUTH_BACKOFF_KEY))>real_time.time()+3500
+    store.set('schedule_last_fetch_at',0);store.set('schedule_last_status_check_at',0)
+    second=once()
+    assert second['etsy_status']=='error' and second['etsy']=='Etsy 鉴权失败，1 小时后重试'
+    assert session.get.call_count==2 and second['api_usage']['etsy']['used']==2  # 退避期间零请求
+    store.set(AUTH_BACKOFF_KEY,real_time.time()-1)
+    session.get.return_value=response(200,{'results':[]})
+    store.set('schedule_last_fetch_at',0);store.set('schedule_last_status_check_at',0)
+    third=once()
+    assert third['etsy_status']=='ok' and store.get(AUTH_BACKOFF_KEY) is None

@@ -41,7 +41,7 @@ launchd 每 5 分钟唤醒一次 `curio.curio_monitor`，由 `curio/schedule.py`
 - **在售检查**（`check_existing`）：独立节拍，每 30 分钟最多一轮，每轮最多 `status_check_limit` 件，在还有检查预算的平台间平分；每平台本轮份额再不超过「剩余检查预算 ÷ 到柏林午夜还剩的检查轮数」（至少 1），让检查份额撑满一整天。Etsy 按 100 个编号一批查。预算中途用完而没发出的检查不写检查记录、不算错误，计入 `budget_skipped`。
 - 新货抓取后只有至少一个平台状态为 ok 时才调整间隔；全部出错、暂停或预算用完时间隔保持不变。
 - 两者都没到期时本轮直接结束（输出 `{"status":"idle",...}`），不写 `collection_runs`。同一时间只有一轮（kv 锁）。
-- **每日预算** `config/settings.yaml` 的 `api_budget`（默认 eBay 4500、Etsy 4500、Kleinanzeigen 1500）：每个外部 HTTP 请求（含 eBay OAuth——令牌缓存在 kv `ebay_oauth`，到期前 60 秒内复用，不是每次唤醒都换；Etsy 换 key 写法与 429 重试、Kleinanzeigen 每次 curl）发出前计数，按柏林日期归零，计数存 kv `api_usage`。新货抓取最多用 60%，在售检查保底 40%。某平台用完当天跳过，结果写 `<平台>_status: budget_exhausted`（在售检查写入 `status_check_summary.budget_exhausted`）。
+- **每日预算** `config/settings.yaml` 的 `api_budget`（默认 eBay 4500、Etsy 4500、Kleinanzeigen 1500）：每个外部 HTTP 请求（含 eBay OAuth——令牌缓存在 `data/ebay_oauth.json`（gitignore，权限 0600，不进数据库），到期前 60 秒内复用，遇 401 换一次令牌重试，不是每次唤醒都换；Etsy 换 key 写法与 429 重试、Kleinanzeigen 每次 curl）发出前计数，按柏林日期归零，计数存 kv `api_usage`。新货抓取最多用 60%，在售检查保底 40%。某平台用完当天跳过，结果写 `<平台>_status: budget_exhausted`（在售检查写入 `status_check_summary.budget_exhausted`）。
 - 每轮结果（`collection_runs.result` 与 kv `last_collection_result`）含：`fetch_ran` / `status_check_ran`、`ebay_status` / `kleinanzeigen_status` / `etsy_status`（ok、error、paused、page_limit、budget_exhausted、disabled、not_due）、各平台 `*_new` 与 `new_total`、`api_usage`（当日各平台已用、上限、新货份额）、`fetch_interval_min`、`fetch_base_interval_min`、`night_mode`、`next_fetch_at`。另有：
   - 文字说明 `ebay`、`etsy`（出错原因）与 `kleinanzeigen_error`；只做在售检查的轮次 eBay 缺凭据时 `ebay_status` 为 error。
   - `status_check_summary`：`attempted`、`active`、`gone`、`errors`、`paused`、`unknown`（Etsy 未返回该货或无 state，保持原状态）、`budget_skipped`、`budget_exhausted`、`etsy_error`、`remaining_active`；整轮检查失败时写 `status_checks`。
@@ -58,7 +58,7 @@ sqlite3 data/curio.db "SELECT result FROM collection_runs ORDER BY id DESC LIMIT
 - 首次最多 1,000 条，跨关键词共享上限，按关键词顺序采集；记录分页进度，失败可继续。之后每个关键词按新上架翻页，遇到本轮增量开始前已在库里的 ID 停止（中断重试沿用同一边界）。API 每个查询最多翻至 10,000 条，**不是首次回填 10,000**。
 - 已知商品另轮询详情（默认每轮20件，最久未检查优先），保留价格变化和下架记录。未出现在搜索列表不等于下架；明确404/410或无库存才标记，下架不推断为已售。
 - Kleinanzeigen 沿用 curl，最多20页/关键词；遇到验证或拦截暂停2小时，状态存库。站点HTML变动仍可能影响解析，不绕过验证码。
-- Etsy Open API v3（`curio/etsy.py`，移植自 `legacy/desktop_curio/etsy_source.py`）：只在 `.env` 有 `ETSY_API_KEY` 时启用；按最新上架翻页（每关键词每轮最多 300 条），一页全是已知货即停，只为新货批量补图。货号 `etsy:<listing_id>`，经 `store.ingest` 去重并记录价格变化。账号额度 5000 次/天、5 次/秒，代码保证相邻请求间隔不少于 0.2 秒。在售检查：`state` 不是 active 或 `quantity` 为 0 判下架（`quantity` 缺失视为在售）；批量查询中途失败时只对拿到详情的编号下结论，其余保持原状态并记录错误。Etsy 未启用、鉴权失败（如 403）或出错时不影响 eBay 与 Kleinanzeigen。
+- Etsy Open API v3（`curio/etsy.py`，移植自 `legacy/desktop_curio/etsy_source.py`）：只在 `.env` 有 `ETSY_API_KEY` 时启用；按最新上架翻页（每关键词每轮最多 300 条），一页全是已知货即停，只为新货批量补图。货号 `etsy:<listing_id>`，经 `store.ingest` 去重并记录价格变化。账号额度 5000 次/天、5 次/秒，代码保证相邻请求间隔不少于 0.2 秒。在售检查：`state` 不是 active 或 `quantity` 为 0 判下架（`quantity` 缺失视为在售）；批量查询中途失败时只对拿到详情的编号下结论，其余保持原状态并记录错误。Etsy 未启用、鉴权失败（如 403）或出错时不影响 eBay 与 Kleinanzeigen。两种 key 写法都被 401/403 拒绝后，kv 记 `etsy_auth_backoff_until`（1 小时），期间 Etsy 不发任何请求（含在售检查），结果写 `etsy_status: error`、`etsy: Etsy 鉴权失败，1 小时后重试`；之后第一次请求成功即清除。
 - 每件新货调用一次 judge；仅标价或币种变化重判。规则排除的也保存原因。更改规则配置不会自动重判历史货。
 - 拍卖总价 = 标价 × (1 + auction_fee_rate)，其他总价=标价。这里只包含配置手续费，不含未知运费/税费；竞拍标价是当前出价，不是最终成交价。
 

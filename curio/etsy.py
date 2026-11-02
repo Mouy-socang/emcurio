@@ -20,10 +20,24 @@ API = 'https://openapi.etsy.com/v3/application'
 MAX_PER_KEYWORD = 300   # 每个关键词每轮最多翻看多少条最新上架
 BATCH = 100             # /listings/batch 每批最多 100 个编号
 MIN_GAP = 0.2           # Etsy 限 5 次/秒：任意两次请求之间至少 0.2 秒
+AUTH_BACKOFF_KEY = 'etsy_auth_backoff_until'
+AUTH_BACKOFF_SECONDS = 3600
+AUTH_BACKOFF_MESSAGE = 'Etsy 鉴权失败，1 小时后重试'
+
+
+class EtsyAuthError(CollectionError):
+    """两种 key 写法都被 401/403 拒绝。"""
+
+
+def auth_backoff_active(store):
+    try:
+        return float(store.get(AUTH_BACKOFF_KEY) or 0) > time.time()
+    except ValueError:
+        return False
 
 
 class EtsyAPI:
-    def __init__(self, key, secret='', budget=None, session=None):
+    def __init__(self, key, secret='', budget=None, session=None, store=None):
         self.key = key.strip()
         self.secret = (secret or '').strip()
         self.budget = budget
@@ -31,6 +45,7 @@ class EtsyAPI:
         self.session = session or requests.Session()
         self._header = None
         self._last = None
+        self.store = store   # 有 store 时记录/清除鉴权退避（kv etsy_auth_backoff_until）
 
     def _throttle(self):
         if self._last is not None:
@@ -77,9 +92,14 @@ class EtsyAPI:
             if not isinstance(data, dict):
                 raise CollectionError('Etsy 响应无效')
             self._header = header
+            if self.store is not None and self.store.get(AUTH_BACKOFF_KEY) is not None:
+                with self.store.connect() as c:
+                    c.execute('DELETE FROM kv WHERE k=?', (AUTH_BACKOFF_KEY,))
             return data
         if auth_failed:
-            raise CollectionError('Etsy 鉴权失败：检查 .env 的 ETSY_API_KEY / ETSY_SHARED_SECRET，以及该 key 是否已启用')
+            if self.store is not None:
+                self.store.set(AUTH_BACKOFF_KEY, time.time() + AUTH_BACKOFF_SECONDS)
+            raise EtsyAuthError('Etsy 鉴权失败：检查 .env 的 ETSY_API_KEY / ETSY_SHARED_SECRET，以及该 key 是否已启用')
         raise CollectionError('Etsy 请求失败')
 
 
@@ -166,6 +186,8 @@ def collect_etsy(store, api, config, max_per_keyword=MAX_PER_KEYWORD):
         # 一个关键词失败不挡后面的关键词；预算用完则整轮停。
         try:
             added += _collect_keyword(store, api, config, keyword, known, max_per_keyword)
+        except EtsyAuthError:
+            raise   # 鉴权失败对所有关键词都一样，不再白花请求
         except CollectionError as error:
             failures.append(f'{keyword}: {error}')
     if failures:

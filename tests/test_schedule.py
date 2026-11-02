@@ -281,8 +281,30 @@ def test_ebay_token_cached_until_60s_before_expiry(tmp_path,db):
     second=EbayAPI(tmp_path,b,db);second.session=Mock();second.session.request.return_value=ok({'itemSummaries':[]})
     second.search('Meissen',0,200)
     assert second.session.request.call_count==1 and b.snapshot()['ebay']['used']==3   # 第二次不再换令牌
-    db.set('ebay_oauth',json.dumps({'token':'t1','expires_at':__import__('time').time()+30}))
+    cache=tmp_path/'data/ebay_oauth.json'
+    assert cache.stat().st_mode&0o777==0o600 and json.loads(cache.read_text())['token']=='t1'
+    with db.connect() as c:assert c.execute("SELECT count(*) FROM kv WHERE k='ebay_oauth'").fetchone()[0]==0
+    assert 't1' not in db.path.read_bytes().decode(errors='ignore')                      # 令牌不进数据库
+    cache.write_text(json.dumps({'token':'t1','expires_at':__import__('time').time()+30}))
     third=EbayAPI(tmp_path,b,db);assert third.token is None                               # 60 秒内到期：重换
+
+def test_old_kv_token_removed(tmp_path,db):
+    from curio.curio_monitor import EbayAPI
+    (tmp_path/'.env').write_text('EBAY_CLIENT_ID=dummy\nEBAY_CLIENT_SECRET=dummy\n')
+    db.set('ebay_oauth',json.dumps({'token':'old','expires_at':9e12}))
+    api=EbayAPI(tmp_path,None,db)
+    assert api.token is None and db.get('ebay_oauth') is None
+
+def test_cached_token_401_refreshes_once(tmp_path,db):
+    from curio.curio_monitor import EbayAPI
+    (tmp_path/'.env').write_text('EBAY_CLIENT_ID=dummy\nEBAY_CLIENT_SECRET=dummy\n')
+    (tmp_path/'data').mkdir(exist_ok=True)
+    (tmp_path/'data/ebay_oauth.json').write_text(json.dumps({'token':'stale','expires_at':9e12}))
+    api=EbayAPI(tmp_path,None,db);api.session=Mock()
+    api.session.request.side_effect=[Mock(status_code=401),Mock(status_code=200,json=lambda:{'access_token':'fresh','expires_in':7200}),
+                                     Mock(status_code=200,json=lambda:{'itemSummaries':[]})]
+    api.search('Meissen',0,200)
+    assert api.token=='fresh' and json.loads((tmp_path/'data/ebay_oauth.json').read_text())['token']=='fresh'
 
 def items_for(db,cfg):
     from curio.etsy import parse as etsy_parse

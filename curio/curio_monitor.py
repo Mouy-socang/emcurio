@@ -1,5 +1,6 @@
 """Collectors adapted from the local Curio monitor; no browser automation."""
-import base64, html, re, subprocess, time, urllib.parse, json
+import base64, html, os, re, subprocess, time, urllib.parse, json
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import requests
 from .errors import CollectionError
@@ -137,14 +138,16 @@ class EbayAPI:
         self.session=requests.Session();self.token=None
         # AD-27：每个外部请求（含 OAuth）先计入当日预算；purpose 为 fetch（新货）或 check（在售检查）。
         self.budget=budget;self.purpose='fetch'
-        # OAuth 令牌缓存在 kv（ebay_oauth），到期前 60 秒内都复用，避免每次唤醒都换令牌。
-        self.store=store;self._cached=False
+        # OAuth 令牌缓存在 data/ebay_oauth.json（gitignore，权限 0600），到期前 60 秒内复用，避免每次唤醒都换令牌。
+        # 凭据类数据不进数据库（spine）：只在传入 store 时启用缓存，并清掉旧版写在 kv 里的 ebay_oauth。
+        self.cache_path=Path(root)/'data/ebay_oauth.json' if store is not None else None;self._cached=False
         if store is not None:
+            with store.connect() as c:c.execute("DELETE FROM kv WHERE k='ebay_oauth'")
             try:
-                cache=json.loads(store.get('ebay_oauth') or '{}')
+                cache=json.loads(self.cache_path.read_text())
                 if cache.get('token') and float(cache.get('expires_at',0))-60>time.time():
                     self.token=cache['token'];self._cached=True
-            except (ValueError,TypeError,AttributeError):pass
+            except (OSError,ValueError,TypeError,AttributeError):pass
     def _request(self,method,url,**kwargs):
         if self.budget is not None:self.budget.spend('ebay',self.purpose)
         try:return self.session.request(method,url,timeout=30,**kwargs)
@@ -157,8 +160,11 @@ class EbayAPI:
             data=r.json();self.token=data['access_token'];expires=float(data.get('expires_in',7200))
         except (ValueError,KeyError,TypeError):raise CollectionError('eBay 授权响应无效') from None
         self._cached=False
-        if self.store is not None:
-            self.store.set('ebay_oauth',json.dumps({'token':self.token,'expires_at':time.time()+expires}))
+        if self.cache_path is not None:
+            self.cache_path.parent.mkdir(parents=True,exist_ok=True)
+            fd=os.open(self.cache_path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+            os.fchmod(fd,0o600)
+            with os.fdopen(fd,'w') as f:json.dump({'token':self.token,'expires_at':time.time()+expires},f)
     def get(self,path,params=None):
         if not self.token:self._authorize()
         r=self._request('GET','https://api.ebay.com/buy/browse/v1/'+path,
@@ -365,7 +371,7 @@ def run(root,clock=time.time):
     from .config import load,etsy_credentials
     from .store import Store,now
     from .schedule import Scheduler,Budget,BudgetExhausted
-    from .etsy import EtsyAPI,collect_etsy
+    from .etsy import EtsyAPI,EtsyAuthError,collect_etsy,auth_backoff_active,AUTH_BACKOFF_MESSAGE
     import uuid
     store=Store(root/'data/curio.db');config=load(root);owner=uuid.uuid4().hex
     with store.connect() as c:
@@ -387,7 +393,9 @@ def run(root,clock=time.time):
         try:api=EbayAPI(root,budget,store)
         except Exception:api=None
         etsy_keys=etsy_credentials(root)
-        etsy=EtsyAPI(*etsy_keys,budget=budget) if etsy_keys else None
+        etsy=EtsyAPI(*etsy_keys,budget=budget,store=store) if etsy_keys else None
+        # 鉴权失败后退避 1 小时：期间 Etsy 不发任何请求（含在售检查）。
+        etsy_backoff=etsy is not None and auth_backoff_active(store)
         if do_fetch:
             sched.mark_fetch_started();fetch_started=now()
             if api is None:
@@ -406,10 +414,12 @@ def run(root,clock=time.time):
                 except Exception:result['kleinanzeigen_status']='error'
             else:result['kleinanzeigen_status']='disabled'
             if etsy is None:result['etsy_status']='disabled'
+            elif etsy_backoff:result['etsy_status']='error';result['etsy']=AUTH_BACKOFF_MESSAGE
             elif not budget.available('etsy','fetch'):result['etsy_status']='budget_exhausted'
             else:
                 try:etsy.purpose='fetch';collect_etsy(store,etsy,config);result['etsy_status']='ok'
                 except BudgetExhausted:result['etsy_status']='budget_exhausted'
+                except EtsyAuthError:result['etsy_status']='error';result['etsy']=AUTH_BACKOFF_MESSAGE
                 except CollectionError as error:result['etsy_status']='error';result['etsy']=str(error)
                 except Exception:result['etsy_status']='error';result['etsy']='Etsy 采集未完成，将在后续轮次重试'
             # 以入库时间计新货：采集中途失败或预算用完时，已入库的新货同样计入。
@@ -424,10 +434,12 @@ def run(root,clock=time.time):
             result['ebay_status']='not_due' if api is not None else 'error'
             if api is None:result['ebay']='缺少 eBay 凭据：检查 .env'
             result['kleinanzeigen_status']='not_due' if config['kleinanzeigen_enabled'] else 'disabled'
-            result['etsy_status']='not_due' if etsy is not None else 'disabled'
+            result['etsy_status']='disabled' if etsy is None else 'error' if etsy_backoff else 'not_due'
+            if etsy_backoff:result['etsy']=AUTH_BACKOFF_MESSAGE
         if do_check:
             sched.mark_check_started()
-            try:result['status_check_summary']=check_existing(store,api,config,budget,etsy)
+            check_etsy=None if etsy is None or auth_backoff_active(store) else etsy
+            try:result['status_check_summary']=check_existing(store,api,config,budget,check_etsy)
             except Exception:result['status_checks']='本轮状态检查未完成，将在后续轮次重试'
         store.archive();store.set('last_collection',now())
         result['api_usage']=budget.snapshot();result.update(sched.summary())
