@@ -206,3 +206,11 @@ def test_etsy_disabled_or_403_does_not_block_others(tmp_path,etsy_env):
     if etsy_env:assert '鉴权失败' in result['etsy'] and result['api_usage']['etsy']['fetch']==2
     assert result['ebay_status']=='ok' and result['kleinanzeigen_status']=='ok'
     assert result['ebay_new']==1 and result['kleinanzeigen_new']==1
+
+def test_placeholder_secret_skipped(db):
+    session=Mock();session.get.return_value=response(200,{'results':[]})
+    api=EtsyAPI('KEY','待填 secret',None,session)
+    api.get('/listings/active',{})
+    assert [c.kwargs['headers']['x-api-key'] for c in session.get.call_args_list]==['KEY']
+    with pytest.raises(CollectionError) as error:EtsyAPI('钥匙 x','',None,session).get('/a',{})
+    assert '格式无效' in str(error.value)

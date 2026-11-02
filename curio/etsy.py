@@ -44,11 +44,15 @@ class EtsyAPI:
         if self._header:
             return [self._header]
         out = [f'{self.key}:{self.secret}'] if self.secret else []
-        return out + [self.key]
+        # HTTP 头只能是可见 ASCII；.env 里误填的占位文字（中文、空格）直接跳过，不发请求。
+        return [h for h in out + [self.key] if h and h.isascii() and h.isprintable() and ' ' not in h]
 
     def get(self, path, params):
         auth_failed = False
-        for header in self._candidates():
+        candidates = self._candidates()
+        if not candidates:
+            raise CollectionError('Etsy key 格式无效：检查 .env 的 ETSY_API_KEY / ETSY_SHARED_SECRET')
+        for header in candidates:
             for attempt in range(3):
                 if self.budget is not None:
                     self.budget.spend('etsy', self.purpose)
