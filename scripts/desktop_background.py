@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 import subprocess
 
-PROJECT = Path('/Users/shichunxiao/.codex/.chatgpt-projects/g-p-6a61c1bbe9f88191bd79146cc18d7fa0/curio-phase1')
-LABEL = 'com.curio.collect.phase1'
+PROJECT = Path(__file__).resolve().parents[1]
+LABEL = 'com.curiobject.collect'
 
 
 def start():

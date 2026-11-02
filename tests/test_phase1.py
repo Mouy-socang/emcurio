@@ -163,12 +163,19 @@ def test_ebay_interrupted_incremental_does_not_lose_tail(db,cfg):
     assert collect_ebay(db,api,cfg)==1
     assert 'tail' in db.known() and db.get('ebay_incremental_known') is None
 
+def test_store_uses_wal(db):
+    with db.connect() as c:
+        assert c.execute('PRAGMA journal_mode').fetchone()[0]=='wal'
+        assert c.execute('PRAGMA busy_timeout').fetchone()[0]==30000
+
 def test_hourly_launchd_configuration():
     from scripts.install_hourly import configuration
     data=configuration()
     assert data['StartInterval']==1800
     assert data['ProgramArguments'][-1]=='curio.curio_monitor'
     assert data['RunAtLoad'] is False
+    assert data['Label']=='com.curiobject.collect'
+    assert data['StandardOutPath'].endswith('data/logs/collect.log')
 
 @pytest.mark.parametrize('title',['Baugrundstück in Meißen','Terrassenplatten Meissen Beton 2.0','KPM Berlin Gutschein','Meissen Wohnung zu vermieten','Meissen Job Vollzeit'])
 def test_irrelevant_hidden_but_retained(db,cfg,title):

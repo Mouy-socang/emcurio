@@ -1,31 +1,37 @@
-# Curio 第一期 · 本地实现
+# Curiobject · Mac 本地权威端
 
 采集 eBay / Kleinanzeigen → 所有货进入 SQLite → 规则筛选 → 本地空模型层 → 店主审核。
 
-这是独立本地交付，未覆盖桌面旧 Curio。复用了桌面 `curio_monitor.py` 的解析和 curl 采集函数、`judge.py` 的规则，以及本地 `screening/pipeline.py` 的记录方式。没有获得 GitHub main，原仓库的 `price.py`、26 个测试、`scripts/accept_unified.py`、310 件验收案例及价格草稿不可用，因此**不能声称原验收通过，也没有伪造对应脚本或输出**。此目录尚不是原仓库上的 PR。
+## 仓库位置与来源（2026-11-02 合并）
 
-## 安装与启动（Mac，Python 3.9+）
+- 本仓库位于 `~/Desktop/curiobject`，由原 `curio-phase1`（`~/.codex/.chatgpt-projects/.../curio-phase1`）带完整 git 历史克隆而来；原仓库最后一次提交为「合并前快照」，此后不再使用。
+- 桌面旧版 `~/Desktop/curio` 的货已经 `scripts/import_desktop.py` 并入 `data/curio.db`；其未接入的 Etsy 代码保存在 `legacy/desktop_curio/`，仅供故事 2 参考。
+- 跨机契约（JSON Schema 与 `schema_version` 约定）见 [`contract/README.md`](contract/README.md)。
+- `.env`、`data/` 被 gitignore，从不提交。
+
+## 安装与启动（Mac，Python 3.13，uv）
+
+Python 版本与依赖由 [uv](https://docs.astral.sh/uv/) 管理：`pyproject.toml` 声明，`uv.lock` 锁定，虚拟环境在 `.venv`。运行依赖只有 `requests`、`PyYAML`，测试依赖 `pytest`（dev 组）。不要使用系统 `/usr/bin/python3`。
 
 在本目录执行：
 
 ```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-cp .env.example .env
+uv sync                 # 安装 Python 3.13 虚拟环境与锁定依赖
+cp .env.example .env    # 首次部署才需要
 ```
 
 用文本编辑器填写 `.env` 中的 `EBAY_CLIENT_ID`、`EBAY_CLIENT_SECRET`，使用具备 Browse API 权限的正式环境凭据。只读该文件，不读取系统环境变量，不记录认证响应或密钥。不要提交 `.env`。
 
 ```sh
 # 单次采集、规则判断、价格和下架检查
-.venv/bin/python -m curio.curio_monitor
+uv run python -m curio.curio_monitor
 # 启动审核页（保持运行）
-.venv/bin/python -m curio.review
+uv run python -m curio.review
 ```
 
 电脑打开 http://127.0.0.1:8788 。手机使用同一局域网时，以 `--host 0.0.0.0` 启动，然后访问 `http://电脑局域网IP:8788`。此页面没有用户登录，仅用于可信局域网，不要映射到公网。
 
-打开网页不会触发采集或模型调用。所有操作数据都在 `data/curio.db`：items、price_history、price_drops、cases、screening_jobs、kv。可用 `.venv/bin/python scripts/import_desktop.py /旧版路径/curio.db` 只读导入 eBay/Kleinanzeigen 商品与审核记录（不含 Lottissimo）。重复导入不会重复创建记录。旧审核缺失的当时价格快照留空，不拿当前价冒充；原价格历史保留在旧库，不迁移。导入商品需后续重新核验在售状态。采集状态和错误摘要保存在 kv。
+打开网页不会触发采集或模型调用。所有操作数据都在 `data/curio.db`（WAL 模式，连接等待 30 秒；备份请用 `VACUUM INTO`，不要直接复制正在写入的库）：items、price_history、price_drops、cases、screening_jobs、kv。可用 `uv run python scripts/import_desktop.py /旧版路径/curio.db` 只读导入 eBay/Kleinanzeigen 商品与审核记录（不含 Lottissimo）。重复导入不会重复创建记录。旧审核缺失的当时价格快照留空，不拿当前价冒充；原价格历史保留在旧库，不迁移。导入商品需后续重新核验在售状态。采集状态和错误摘要保存在 kv。
 
 ## 采集行为
 
@@ -46,29 +52,41 @@ want / probe 进入 cheap / deep 记录。`daily_budget: 0` 时不调用任何 p
 
 审核默认显示未审核的要/询市，新货优先；被规则排除页可以改判。点击要/询市/不要后可填原因和心理价，不要必须写原因。保存后从待审核中移除；每次判断追加 cases，保留当时的规则原因、标价、总价和规则版本。重复请求幂等，价格更新后的旧表单会被拒绝，避免错配快照。已审核商品改价不会自动重新进入待审核。
 
-## 每小时本机自动采集
+## 每30分钟本机自动采集（launchd）
 
-桌面 `Curio.app` 的实际启动入口（旧 `EM 西洋瓷器/scripts/em-browser/desktop.py`）现已改为静默启动，源码保存在 `scripts/desktop_background.py`。双击只确保下面的每小时任务已加载：任务已存在就直接退出，不重置计时，不打开网页，不再启动旧 Playwright 采集器。原启动脚本备份在 `data/launcher-backups/`。旧浏览器采集进程已通过其关闭接口退出；旧数据不删除。
+只安装一个定时任务 `com.curiobject.collect`：每 1800 秒运行一次 `curio.curio_monitor`，由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。
 
-此定时任务执行增量采集和既有规则判断。桌面导出的客户证据初筛报告仍是静态快照，不会随采集自动更新。
+视觉识别进程（`scripts/install_visual_worker.py`，`com.curio.visual.phase1`）与微信机器人代码保留在仓库中，但**不安装**它们的定时任务。
 
-按本次要求，调度间隔改为 **3600秒**，由当前 Mac 用户的 launchd 执行，不依赖 Codex 对话，不调用 AI。默认关键词仍为 Meissen，可在 `config/settings.yaml` 调整。
+桌面 `Curio.app` 的静默启动入口源码在 `scripts/desktop_background.py`（路径以仓库根目录为准）：任务已加载就直接退出，否则安装并运行一次。原启动脚本备份在 `data/launcher-backups/`。
 
 安装或更新：
 
 ```sh
-.venv/bin/python scripts/install_hourly.py
+uv run python scripts/install_hourly.py
 ```
 
 检查 / 手动执行 / 停止：
 
 ```sh
-launchctl print gui/$(id -u)/com.curio.collect.phase1
-launchctl kickstart gui/$(id -u)/com.curio.collect.phase1
-launchctl bootout gui/$(id -u)/com.curio.collect.phase1
+launchctl print gui/$(id -u)/com.curiobject.collect
+launchctl kickstart gui/$(id -u)/com.curiobject.collect
+launchctl bootout gui/$(id -u)/com.curiobject.collect
 ```
 
-安装文件：`~/Library/LaunchAgents/com.curio.collect.phase1.plist`。登录后加载；电脑关机或睡眠时不保证执行。若要永久停用，可把该 plist 移出 LaunchAgents，再执行 bootout。不要移动本项目和 `.venv`，移动后需重装调度路径。
+安装文件：`~/Library/LaunchAgents/com.curiobject.collect.plist`。登录后加载；电脑关机或睡眠时不保证执行。不要移动本仓库和 `.venv`，移动后需重新运行 `uv sync` 与安装脚本。
+
+从旧任务切换（一次性）：
+
+```sh
+launchctl bootout gui/$(id -u)/com.curio.collect.phase1
+launchctl bootout gui/$(id -u)/com.curio.visual.phase1   # 若已加载
+mv ~/Library/LaunchAgents/com.curio.*.phase1.plist data/launcher-backups/
+uv run python scripts/install_hourly.py
+launchctl kickstart gui/$(id -u)/com.curiobject.collect
+```
+
+回退：`launchctl bootout gui/$(id -u)/com.curiobject.collect`，再把 `data/launcher-backups/com.curio.collect.phase1.plist` 放回 `~/Library/LaunchAgents/` 并 `launchctl bootstrap gui/$(id -u)` 该文件（原仓库与数据未被改动）。
 
 该任务只运行采集与规则判断，不负责启动审核网页。每轮结果、开始/结束时间存储在同一数据库的 `collection_runs` 和 `kv` 表。失败时不会把现有商品误标为已售；下一轮重试。Kleinanzeigen 被拦暂停2小时，会明确记录 paused，而不是当成“没有新货”。旧置顶广告不会导致整页新货漏抓；eBay 增量中断时保留原去重边界，重试会继续收取未完成的新货。
 
@@ -79,7 +97,7 @@ launchctl bootout gui/$(id -u)/com.curio.collect.phase1
 ## 验证
 
 ```sh
-.venv/bin/python -m pytest -q
+uv run pytest -q
 ```
 
 测试使用模拟API和临时数据库，不连接商品平台，不消耗模型额度。测试结果见 `VALIDATION.txt`。原仓库基线验收仍待拿到 main 和案例后运行；目标计数为店主「要」21件：6/15/0，店主「不要」289件：4/245/40，当前未验证。

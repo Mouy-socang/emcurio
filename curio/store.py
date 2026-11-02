@@ -40,6 +40,8 @@ class Store:
     @contextmanager
     def connect(self):
         c=sqlite3.connect(self.path,timeout=30);c.row_factory=sqlite3.Row
+        # AD-19：WAL 让后台读与采集写并行；busy_timeout 与 timeout 一致。
+        c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA busy_timeout=30000')
         try:
             yield c;c.commit()
         except Exception:
