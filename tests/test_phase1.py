@@ -166,7 +166,7 @@ def test_ebay_interrupted_incremental_does_not_lose_tail(db,cfg):
 def test_hourly_launchd_configuration():
     from scripts.install_hourly import configuration
     data=configuration()
-    assert data['StartInterval']==3600
+    assert data['StartInterval']==1800
     assert data['ProgramArguments'][-1]=='curio.curio_monitor'
     assert data['RunAtLoad'] is False
 
@@ -181,3 +181,50 @@ def test_damaged_exception_cannot_rescue_job(db,cfg):
     cfg['cheap_damaged_max']=100
     db.ingest(item(title='Meissen Job defekt',price=1),cfg)
     assert db.page()['total']==0
+
+def test_block_rescreens_existing_and_future_preserves_cases(db,cfg):
+    db.ingest(item('one',title='Meissen Mietangebot'),cfg)
+    db.ingest(dict(item('two'),description='Dieses Mietangebot in Meißen'),cfg)
+    db.ingest(item('safe'),cfg)
+    db.review('two','want','人工记录',None,'old-case',1)
+    result=db.block('one','Mietangebot','block1',1,cfg)
+    assert result['checked']==3 and result['blocked']==2
+    assert db.block('one','Mietangebot','block1',1,cfg)==result
+    assert db.page()['total']==1
+    with db.connect() as c:
+        assert c.execute("SELECT decision FROM cases WHERE request_id='old-case'").fetchone()[0]=='want'
+        assert c.execute('SELECT count(*) FROM blocked_words').fetchone()[0]==1
+    db.ingest(item('new',title='Meissen MIETANGEBOT'),cfg)
+    assert db.page()['total']==1
+    with pytest.raises(ValueError):db.review('safe','want','',None,'stale',0)
+
+def test_block_literal_validation_and_atomicity(db,cfg):
+    db.ingest(item(title='Meissen [a+b] Tasse'),cfg)
+    with pytest.raises(ValueError):db.block('one','wohnung','invalid',1,cfg)
+    with db.connect() as c:assert c.execute('SELECT count(*) FROM blocked_words').fetchone()[0]==0
+    assert db.block('one','[a+b]','literal',1,cfg)['blocked']==1
+    with pytest.raises(ValueError):db.block('one','Tasse','literal',1,cfg)
+
+def test_description_block_survives_summary_refresh(db,cfg):
+    db.ingest(dict(item(),description='Mietangebot'),cfg)
+    db.block('one','Mietangebot','block',1,cfg)
+    db.ingest(item(price=30),cfg)
+    assert db.page()['total']==0
+    assert db.page('excluded')['items'][0]['description']=='Mietangebot'
+
+def test_http_block(db,cfg):
+    from curio.review import server
+    import re
+    db.ingest(item(title='Meissen Wohnung'),cfg)
+    httpd=server(db,port=0)
+    threading.Thread(target=httpd.serve_forever,daemon=True).start()
+    base='http://127.0.0.1:'+str(httpd.server_port)
+    try:
+        html=urllib.request.urlopen(base).read().decode()
+        token=re.search("const token='([^']+)'",html)[1]
+        payload=dict(item_id='one',word='Wohnung',request_id='http-block',rule_version=1)
+        req=urllib.request.Request(base+'/api/block',json.dumps(payload).encode(),headers={'X-Curio-Token':token})
+        result=json.load(urllib.request.urlopen(req))
+        assert result['checked']==1 and result['blocked']==1
+        assert json.load(urllib.request.urlopen(base+'/api/items'))['blocked_words']==['Wohnung']
+    finally:httpd.shutdown();httpd.server_close()

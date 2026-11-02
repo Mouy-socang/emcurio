@@ -30,6 +30,9 @@ class Store:
                 reason TEXT NOT NULL,fair_price REAL,currency TEXT,agent_decision TEXT,agent_reason TEXT,
                 listed_price REAL,total_price REAL,rule_version INTEGER,decided_at TEXT,
                 request_id TEXT NOT NULL UNIQUE);
+            CREATE TABLE IF NOT EXISTS market_decisions(platform TEXT,item_id TEXT,irrelevant INTEGER NOT NULL,reason TEXT,updated_at TEXT,PRIMARY KEY(platform,item_id));
+            CREATE TABLE IF NOT EXISTS blocked_words(word TEXT PRIMARY KEY,created_at TEXT);
+            CREATE TABLE IF NOT EXISTS block_requests(request_id TEXT PRIMARY KEY,payload TEXT,result TEXT);
             CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY,v TEXT);
             CREATE INDEX IF NOT EXISTS review_order ON items(status,agent_decision,created,first_seen);
             CREATE INDEX IF NOT EXISTS cases_item ON cases(item_id);
@@ -59,7 +62,9 @@ class Store:
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             old=c.execute('SELECT * FROM items WHERE item_id=?',(p['item_id'],)).fetchone()
-            changed=old is None or old['listed_price']!=listed or old['currency']!=p['currency']
+            if old and 'description' not in item:p['description']=old['description'] or ''
+            config=dict(config,blocked_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')])
+            changed=old is None or old['listed_price']!=listed or old['currency']!=p['currency'] or old['title']!=p['title'] or (old['description'] or '')!=p['description']
             if changed:
                 result=evaluate(p,config)
                 p.update(agent_decision=result['decision'],agent_reason=result['reason'],fair_price=result.get('fair',''))
@@ -85,7 +90,7 @@ class Store:
         # Missing/withdrawn is never asserted to be sold. Archive in SQLite only.
         with self.connect() as c:c.execute("UPDATE items SET status='archived' WHERE status='gone' AND julianday(gone_at)<julianday('now','-3 days')")
     def review(self,iid,decision,reason,fair_price,request_id,version):
-        if decision not in ('want','probe','skip'):raise ValueError('判断无效')
+        if decision not in ('want','probe','skip','irrelevant'):raise ValueError('判断无效')
         if not isinstance(reason,str) or len(reason)>2000:raise ValueError('原因格式无效')
         reason=reason.strip()
         if decision=='skip' and not reason:raise ValueError('选择不要时必须填写原因')
@@ -104,12 +109,49 @@ class Store:
                 listed_price,total_price,rule_version,decided_at,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (iid,decision,reason,fair,row['currency'],row['agent_decision'],row['agent_reason'],row['listed_price'],row['total_price'],version,now(),request_id))
             return cur.lastrowid
+    def block(self, iid, word, request_id, version, config):
+        if not isinstance(word,str) or not 1<=len(word.strip())<=100:
+            raise ValueError('请从商品标题或描述中选择1至100字的屏蔽词')
+        word=word.strip()
+        if not isinstance(request_id,str) or not 1<=len(request_id)<=100:
+            raise ValueError('请求编号无效')
+        payload=json.dumps([iid,word,version],ensure_ascii=False)
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            previous=c.execute('SELECT * FROM block_requests WHERE request_id=?',(request_id,)).fetchone()
+            if previous:
+                if previous['payload']!=payload:raise ValueError('重复请求内容不同')
+                return json.loads(previous['result'])
+            row=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
+            if not row or type(version) is not int or row['rule_version']!=version:
+                raise ValueError('商品已更新，请刷新后重试')
+            if not any(word.casefold() in (row[field] or '').casefold() for field in ('title','description')):
+                raise ValueError('屏蔽词必须来自这件商品的标题或描述')
+            existing=c.execute('SELECT word FROM blocked_words').fetchall()
+            if not any(r[0].casefold()==word.casefold() for r in existing):
+                c.execute('INSERT INTO blocked_words VALUES(?,?)',(word,now()))
+            c.execute('INSERT INTO cases(item_id,decision,reason,currency,agent_decision,agent_reason,listed_price,total_price,rule_version,decided_at,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                (iid,'irrelevant','屏蔽词：'+word,row['currency'],row['agent_decision'],row['agent_reason'],row['listed_price'],row['total_price'],version,now(),request_id))
+            cfg=dict(config,blocked_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')])
+            rows=c.execute('SELECT * FROM items').fetchall()
+            changed=matched=0
+            for r in rows:
+                result=evaluate(dict(r),cfg)
+                matched+=result['reason'].startswith('屏蔽词：')
+                if (r['agent_decision'],r['agent_reason'],r['fair_price'] or '')!=(result['decision'],result['reason'],result.get('fair','')):
+                    c.execute('UPDATE items SET agent_decision=?,agent_reason=?,fair_price=?,rule_version=rule_version+1 WHERE item_id=?',
+                        (result['decision'],result['reason'],result.get('fair',''),r['item_id']))
+                    changed+=1
+            result=dict(checked=len(rows),changed=changed,blocked=matched,word=word)
+            c.execute('INSERT INTO block_requests VALUES(?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False)))
+            return result
+
     def page(self,tab='pending',page=1,size=30):
         if tab not in ('pending','excluded','reviewed'):raise ValueError('标签无效')
         if page<1 or not 1<=size<=100:raise ValueError('分页参数无效')
         clauses={
-          'pending':"i.status='active' AND i.agent_decision IN ('want','probe') AND NOT EXISTS(SELECT 1 FROM cases c WHERE c.item_id=i.item_id)",
-          'excluded':"i.agent_decision='skip'",
+          'pending':"NOT EXISTS(SELECT 1 FROM market_decisions md WHERE md.item_id=i.item_id AND md.platform=i.platform AND md.irrelevant=1) AND i.status='active' AND i.agent_decision IN ('want','probe') AND NOT EXISTS(SELECT 1 FROM cases c WHERE c.item_id=i.item_id)",
+          'excluded':"(i.agent_decision='skip' OR EXISTS(SELECT 1 FROM market_decisions md WHERE md.item_id=i.item_id AND md.platform=i.platform AND md.irrelevant=1))",
           'reviewed':"EXISTS(SELECT 1 FROM cases c WHERE c.item_id=i.item_id)"}
         with self.connect() as c:
             count=c.execute('SELECT COUNT(*) FROM items i WHERE '+clauses[tab]).fetchone()[0]

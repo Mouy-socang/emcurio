@@ -333,14 +333,18 @@ func (c *Client) GetBotQRCode(ctx context.Context, req *GetBotQRCodeRequest) (*G
 	urlStr := fmt.Sprintf("%s?bot_type=%s", baseURL, url.QueryEscape(botType))
 
 	// Build headers
-	headers := c.buildHeaders(0)
+	body := []byte(`{"local_token_list":[]}`)
+	headers := c.buildHeaders(len(body))
+	headers.Del("Authorization")
+	headers.Set("iLink-App-Id", "bot")
+	headers.Set("iLink-App-ClientVersion", "65536")
 	routeTag := loadRouteTag()
 	if routeTag != "" {
 		headers.Set("SKRouteTag", routeTag)
 	}
 
 	// Create request
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, urlStr, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -389,7 +393,11 @@ func (c *Client) GetQRCodeStatus(ctx context.Context, req *GetQRCodeStatusReques
 
 	// Build headers
 	headers := c.buildHeaders(0)
-	headers.Set("iLink-App-ClientVersion", "1")
+	headers.Del("Authorization")
+	headers.Del("AuthorizationType")
+	headers.Del("X-WECHAT-UIN")
+	headers.Set("iLink-App-Id", "bot")
+	headers.Set("iLink-App-ClientVersion", "65536")
 	routeTag := loadRouteTag()
 	if routeTag != "" {
 		headers.Set("SKRouteTag", routeTag)
@@ -419,7 +427,7 @@ func (c *Client) GetQRCodeStatus(ctx context.Context, req *GetQRCodeStatusReques
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get status failed: status=%d, body=%s", resp.StatusCode, string(respData))
+		return nil, fmt.Errorf("get status failed: status=%d", resp.StatusCode)
 	}
 
 	// Parse response

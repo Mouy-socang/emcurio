@@ -1,0 +1,448 @@
+Curio 瓷器商品分类字段 V1
+中文字段说明与英文编码建议
+版本日期  2026年10月7日文档状态  V1 维护稿  可编辑  待真实商品验证
+用途与核心结构
+本文件把当前讨论中的器型、造型、图案、风格、装饰、色地与尺寸整理为一套可维护字段，供人工录入、文字抽取、图片核对和后续匹配使用。器型树只保留“是什么、作何用途”的层级；尺寸和外观特征分别记录。
+本版将讨论中的分维度方向落实为字段建议。具体英文代码、补充器型、状态语义和关联结构是本次整理方案，不代表已经部署到 Curio，也不声称是行业统一标准。
+字段组
+回答的问题
+本文件位置
+Object Type 与 subtype
+是什么器物及用途
+第 2 节
+Form Features
+形状、耳柄、足与盖
+第 3 节
+Motif Subject 与 Style
+画了什么与表现风格
+第 4—5 节
+Decoration 与 Location
+如何装饰及所在部位
+第 5—6 节
+Gilding 与 Ground/Color
+金饰细分、色地和颜色
+第 7—8 节
+Dimensions
+哪个组件有多大
+第 9 节
+状态与数据结构
+未知、多标签、命名和 JSON
+第 10—12 节
+自检与维护
+冲突修正和扩展边界
+第 13 节
+
+依据与适用边界
+依据 A：对话《解释方差概念》中用户提出的分类清单，以及随后器型、题材、风格、技法和尺寸拆分讨论。依据 B：用户上传的《Curio商品初筛规则表V1.docx》，正文标注“当前执行版 V1，2026年10月6日”。
+本次只整理分类字段。品牌、厂标、年代、厂家等级、当前品相、价格、客户需求、订单和初筛结论仍属于各自业务字段；分类不替代鉴定、估价或购买判断。
+阅读方式：第 2—9 节用于选词；第 10—12 节用于录入和开发对接；第 13 节用于复核和版本维护。
+
+2  器型分类与用途子类
+统一使用 object_type → object_subtype 两层。前序讨论中的 family 在本方案中对应 object_type，不再增设含义重复的 family 层。每个对象只填一个主类和一个子类；无法判定用途时保留已知主类。
+object_type
+建议 object_subtype
+边界
+cup_and_saucer 杯碟
+coffee / tea / mocha / breakfast / mug / teabowl
+以杯与配碟为一个组合；单杯用 cup。
+cup 单杯
+coffee / tea / mocha / breakfast / mug / teabowl
+没有出售配碟的杯；不是自动认定缺碟。
+saucer 单碟
+不设固定子类
+明确为杯托碟；不可与小餐盘混用。
+pot 壶
+coffee / tea / mocha / chocolate
+记录用途；大小和盖另填。
+sugar_bowl 糖罐
+不设固定子类
+有盖与无盖均可；不是尺寸级别。
+milk_cream_jug 奶罐
+milk / cream
+无法区分奶壶与奶油罐时主类保留。
+plate 盘
+dinner / dessert / side / charger / display
+用途子类须有依据；直径不能单独定用途。
+dish 盛器
+serving / condiment
+浅盛器等；与 plate 不确定时待核。
+tray 托盘
+serving / dressing_table
+独立主类；圆形、方形另填。
+vase 花瓶
+不设固定子类
+瓶形、耳数、高度分别记录。
+jar 罐
+storage / ginger / potpourri
+“盖罐”显示名由 jar 与盖结构组合。
+bowl 碗
+serving / waste / individual
+有盖无盖属于造型；糖罐优先归专门主类。
+
+词义与歧义处理
+摩卡杯碟采用 mocha。Demitasse 保留在原文或别名表中，不能仅因容量小就自动等同 mocha；只有明确用途依据时才映射。不得同时建立 mocha 与 demitasse 两个重复小杯类。
+“摩卡茶壶”用途含混，记录原词，object_type = pot、object_subtype = null，并标记 needs_review。天鹅颈杯碟拆为杯碟用途与 swan_neck 柄形；不据商品昵称推断用途。
+本表列出的“不设固定子类”统一写 null，状态为 not_applicable；有子类但暂不知属于哪一项，写 null，状态为 unknown。
+
+3  扩展器型与造型特征
+补充 object_type
+建议 subtype 或说明
+figurine 塑像
+human / animal / bird / group；复合场景选 group，具体题材另标。
+tureen 带盖汤盛器
+soup / sauce / serving；实际是否有盖另记录。
+basket 篮
+不设固定子类；镂空不是所有篮的必要条件。
+compote_tazza 高足盛器
+不设固定子类；普通有足碗不自动归入此类。
+box 盒
+snuff / trinket / dressing_table
+candlestick 烛具
+single / candelabrum
+service 套组
+coffee / tea / dinner / mixed_service；只描述多类器物构成的销售套组。
+
+一对花瓶仍是 vase，对应组件 quantity = 2；整套茶具才用 service，并在 components 中记录壶、杯、碟等。组件数量与订单购买数量分开，不将盖重复计为一件商品。成套原配与完整度需要独立证据。
+form 字段
+类型与建议值
+录入规则
+plan_shape
+枚举：round / oval / square / rectangular / shaped / other
+俯视轮廓；异形用 shaped，并备注 shell 等具体形状。
+body_shape
+枚举：baluster / bottle / beaker / amphora / urn / ovoid / cylindrical / trumpet / gourd / other
+整体体态；不确定不用强选。
+handle_count
+非负整数或 null
+0 表示确认无耳柄；未知用 null。双耳填 2。
+handle_style
+多标签：swan_neck / high_loop / scroll / other
+“高柄”须明确为高环柄；不等于高足。
+foot_type
+枚举：flat / ring / raised_foot / stemmed / other
+有足细分；stemmed 表示明显高足或柄状支承。
+lid_design
+布尔或 null
+结构原本是否配盖；缺盖不改变原设计。
+lid_present
+布尔或 null
+本次出售实物是否包含盖；不能由设计字段推断。
+
+这些字段均属于 form 对象。尺寸小不改变用途类；size_class 另存于尺寸说明。器型特殊性和稀有度属于后续判断，不能写进 object_type。
+
+4  图案题材多标签
+motif_subjects 为去重的代码数组。按可辨认的题材分别记录，不用 Mixed 抹去细节。以下是 Curio V1 的录入边界，不是生物学或艺术史的唯一分类法。
+代码与中文
+本版边界
+floral 花卉
+花朵、花束、花枝；附属叶片不必重复加 botanical。
+botanical 植物
+以树、叶、草或非花卉植株为独立主体。
+bird 鸟类
+鸟与禽类；不再重复加 animal。
+animal 动物
+本词表中指非鸟、非昆虫的动物；鱼亦先归此项。
+insect 昆虫
+蝴蝶、甲虫等；蜘蛛等不确定题材不要硬填。
+figurative 人物
+人物、肖像或人物场景；器型是塑像不等于一定是人物。
+landscape 风景
+陆地自然景观；建筑作为独立主体可加 architectural。
+architectural 建筑
+建筑、城市、宫殿等主体。
+marine 海景港口
+船、港口与海景；鱼纹本身不自动算 marine。
+fruit 水果
+水果及果实组合；伴随花可同时 floral。
+still_life 静物
+器物、食品等静物构图；单一果纹不必重复加此项。
+heraldic 纹章
+家徽、王室纹章等；一般装饰盾形不能直接认定。
+mythological 神话
+明确神话人物或故事；可与 figurative 并用。
+religious 宗教
+明确宗教主体；可与人物标签并用。
+geometric 几何
+格纹、条纹等明确几何图案。
+ornamental 装饰纹
+卷草、阿拉伯式等装饰性纹样；可辨叶纹视情况加 botanical。
+abstract 抽象
+可辨为抽象构成；无法看清的图案不能填 abstract。
+text_inscription 文字
+作为装饰的铭文、字母；厂标和编码不纳入。
+other 其他已识别题材
+确已辨认但词表不覆盖，必须记录 other_text。
+
+多标签示例：花鸟填 [floral, bird]；有人物、建筑的港口场景可填 [figurative, architectural, marine]。不要对背景里的每个微小元素机械加标签。unknown 用状态表达，不放入标签数组。
+
+5  图案风格与装饰技法
+Motif Style
+motif_styles 为多标签数组，表达图案的风格归属或表现方式。风格不能直接证明产地、年代、品牌或作者。器形呈洛可可风格，也不意味着图案自动标 rococo；器形风格可另设扩展字段。
+候选代码
+中文与限定
+chinoiserie
+中国风；不等于中国制造。Oriental 过宽，保留原词并待核。
+kakiemon / imari / japonisme
+柿右卫门风格／伊万里风格／日本主义；须有风格依据。
+european_floral / naturalistic
+欧洲花绘／自然主义表现；不能只看到花便赋前者。
+rococo / neoclassical
+洛可可／新古典主义
+art_nouveau / art_deco / modernist
+新艺术／装饰艺术／现代主义
+other
+已辨识的其他风格，须备注；证据不足用 unknown 状态。
+
+上述风格均为可维护的候选受控词，不在本文件中作鉴定定义。具体花样名称如“蓝洋葱”“德国花”另存 pattern_name_raw；核对后再关联 pattern_id 和品牌词表。floral 的交集不等于具体花样匹配。
+Decoration Technique
+techniques 建议代码
+中文与使用边界
+hand_painted / transfer_printed / decal
+手绘／转印／贴花；无依据不从照片强判，原词保留。
+underglaze / overglaze_enamel
+釉下装饰／釉上彩；可与施画方式同时记录。
+gilding / lustre
+金饰／虹彩或金属光泽装饰；两者不自动互相推导。
+openwork / relief / applied_decoration
+镂空／浮雕／贴塑；relief 记录可见效果，不直接断言成型方法。
+applied_flowers / raised_enamel
+贴塑花／凸起珐琅彩；前者为细分类，可推导 applied_decoration。
+other
+确认有技法而当前词表不覆盖，附说明。
+
+techniques 保存于每条 decorations 记录，不能只维护一个与位置无关联的全局数组。手绘与贴花可在同一商品并存，应分别定位；金饰也不能单凭金色反光确认。
+
+6  装饰位置与关联结构
+每一组可定位装饰使用一条 decorations[] 记录，将组件、题材、风格、技法、金饰和色地绑定。同一组件上若不同部位的装饰不同，拆成多条；允许多个位置共享同一条特征。
+locations 代码
+中文及范围
+interior
+内壁或内表面；具体边缘与中心可更细标注。
+center / well
+中心／凹下的盘心或碗腹区域；无法区分时用 interior。
+rim / border
+口沿／口沿附近的装饰带；两者不可无条件互换。
+body
+外壁主体；局部或整体范围另用 coverage。
+handle / spout
+耳柄／壶嘴
+lid / finial
+盖／盖钮
+foot / base
+足／器底；厂标仍属于标识字段。
+panel_background
+开光内背景；不等于整个器身色地。
+other
+明确其他部位；附 other_text。
+
+装饰记录的最小字段
+字段
+类型
+作用
+decoration_id
+string
+本件商品内唯一标识。
+component_id
+string
+引用 components 中的组件。
+locations
+string[] 或 null
+位置集合；未知不能用空数组代替。
+coverage
+枚举或 null
+local / partial / full，表示这些位置上的覆盖范围。
+motif_subjects / motif_styles
+string[] 或 null
+本条装饰的题材与风格。
+techniques
+string[] 或 null
+本条装饰的技法。
+gilding / ground
+object
+第 7—8 节定义。
+color_mode / palette_colors
+枚举 / string[] 或 null
+本条装饰的色彩表现及颜色。
+
+示例：杯外壁红色地填 locations = [body]、coverage = partial；杯口宽金带另建 rim 记录；碟边叶形金饰指向 saucer 组件。禁止把“外壁色地”和“口沿鎏金”混成两个无对应关系的全局列表。
+商品级搜索标签可由各条装饰求并集生成；它是派生索引，不回写为第二套人工维护字段。
+
+7  鎏金细分
+界面沿用用户习惯的“鎏金”；gilding 在本文件中泛指瓷器金饰，不以该字段断言具体金料或工艺。只看出金色时保留 gold_tone 色彩观察，gilding.present 仍可为 null。
+gilding 字段
+建议值与含义
+present
+true / false / null；分别为有依据确认有、确认无、未知。
+types
+多标签：simple_line 简单线金；wide_band 宽金带；special_border 特殊边饰；foliate 叶形；ornamental 装饰纹；complex_ornamental 复杂装饰纹；other。
+extent
+minimal / moderate / extensive 或 null；本条所述区域的相对覆盖程度，仅作人工描述。
+band_width_mm
+正数或 null；实际金带宽度，不凭照片估测。
+note
+string 或 null；特殊边饰形状、复杂度依据、未确认工艺等。
+
+从用户原词到标准字段
+原词
+结构化表达
+圈口简单鎏金
+locations = [rim]；types = [simple_line]
+圈口宽鎏金
+locations = [rim]；types = [wide_band]
+圈口特殊鎏金
+locations = [rim]；types = [special_border]；note 必填具体形态
+鎏金叶子
+types = [foliate]；位置单独填写；金叶纹不是贴金箔工艺结论
+鎏金装饰纹
+types = [ornamental]；如可识别具体题材另标 motif_subjects
+复杂鎏金装饰纹
+types = [complex_ornamental]；note 记录复杂构成
+
+同一部位有宽金带与叶形纹可并列。complex_ornamental 可在检索时推导 ornamental，不要求人工重复录入。simple_line 与 wide_band 不设未经验证的毫米阈值；有实测值先记数值，边界案例进入复核。
+一致性与品相边界
+gilding.present = true 时 techniques 应包含 gilding；present = false 时 types 应为空数组，extent 与 band_width_mm 为 null 且标记 not_applicable。局部照片没看到金不能证明整件无金。
+磨金、补金、重描金属于品相或修复记录，不属于 gilding.types。装饰复杂度不等于价值或稀有度。
+
+8  色地与颜色
+色地是承托图案的背景色区，图案中出现红花不等于“红色地”。同一件商品可有白瓷底、彩色外壁、另一颜色边带和金饰，需要按部位分别记录。
+字段
+类型与建议值
+规则
+ground.present
+布尔或 null
+是否确认存在色地；自然白瓷底不自动算色地。
+ground.colors
+string[] 或 null
+色地颜色，多色逐项记录，不使用 multiple。
+ground.note
+string 或 null
+颜色原词、局部色区或待核说明。
+body_color
+组件字段，枚举或 null
+瓷体外观底色：white / ivory / cream / other；不据此断定胎料。
+palette_colors
+string[] 或 null
+本条装饰可见颜色；与色地分开。
+color_mode
+monochrome / polychrome / undecorated 或 null
+装饰的色彩表现，不放进题材数组。
+
+V1 颜色词表
+white 白、ivory 象牙白、cream 奶油色、blue 蓝、cobalt_blue 钴蓝色调、turquoise 松石色、green 绿、yellow 黄、pink 粉、purple 紫、red 红、orange 橙、black 黑、brown 棕、grey 灰、gold_tone 金色、silver_tone 银色、other 其他。
+cobalt_blue 是颜色描述，不证明使用钴颜料。只知“蓝”则填 blue，不强行细化；也不同时人工填 blue 与 cobalt_blue。不同颜色的圈口：locations = [rim] 或 [border]，再记录 ground.colors。
+单色与多色的口径
+本版建议 color_mode 描述该装饰单元的非金属装饰用色，不计自然白瓷底与金银色装饰；多种明确非金属色归 polychrome。同色深浅可归 monochrome。故“单色蓝绘加金”仍可记 monochrome，同时独立记录 gilding。此口径须随版本保存。
+undecorated 仅用于已检查且确无装饰的范围，不能因为题材为空便推导。纯色地器物可无具象题材，但仍有色彩装饰。
+未知或无色地
+确认无色地时 ground.present = false、colors = []；看不到相应区域时 present = null、colors = null。多色分布位置不同就拆记录；颜色与位置不能用两组平行数组猜配。
+
+9  尺寸字段与组件
+尺寸只记录数值与测量范围，不进入器型树。统一长度单位 cm、容量 ml、重量 g；毫米或英寸原始值保留在 raw_text，转换后再存标准字段。
+measurements 字段
+单位与类型
+测量口径
+height_cm
+正数或 null
+实际测量高度；注明是否含盖、底座。
+diameter_cm
+正数或 null
+圆形器物直径；口径、底径优先用专门字段。
+mouth_diameter_cm / base_diameter_cm
+正数或 null
+口部直径／底部直径。
+length_cm / width_cm
+正数或 null
+最长轴／与其垂直的宽；说明是否含耳柄、壶嘴。
+depth_cm
+正数或 null
+内部深度；不能与外部高度混用。
+capacity_ml / weight_g
+正数或 null
+容量注明满口或使用容量；重量注明组件范围。
+
+每个测量记录的共同字段
+dimensions[] 每条包含 component_id、measurements、measurement_scope、raw_text、evidence_ids。measurement_scope 用文字说明“杯体含柄不含盖”“整器含盖”等。不同口径或冲突值分为不同记录，不强行平均。
+卖家写“23.5厘米”但没写维度时，raw_text 保留原文，measurements = {}，并将该字段标为 unknown 与 needs_review；不可自行填入 diameter_cm。圆盘也不能跳过这一检查。
+大小与迷你
+size_class 建议枚举 small / medium / large / miniature 或 null，属于可选派生字段。必须同时保存 size_rule_id、适用 object_type / subtype 和规则版本；尚无经验证阈值时保持 null。卖家写“大号”或“迷你”先保存 size_label_raw。
+不得用统一高度阈值横跨杯、壶、花瓶。摩卡杯小不等于微缩器；微缩用途也不能只凭一张照片确认。本版不制定“大中小”或“迷你”的数值分界。
+杯碟与套组
+杯碟使用组件 cup、saucer，各自记录高度、直径或容量。不能把杯高与碟径当成一个物件的两个尺寸；同一套组中不同规格的杯需分组件记录。组件 quantity 是该组件的数量，不是订单行购买数量。
+quantity 未确认时填 null。缺盖、混配和套组完整度留在相关商品事实或品相记录；只根据图片里出现几个物体，不能自动确认出售范围。
+
+10  多标签与未知值规则
+字段名采用 lower_snake_case，枚举代码用英文小写；中文作为显示标签。null 是未知数值或未知单值，[] 只表示已检查后确认没有标签。不要存中文“未知”、空字符串或 0 来代替缺失。
+状态 status
+值的写法
+解释
+known
+实际值；确认不存在可用 false 或 []
+有证据支持当前记录；不等于已鉴定真伪。
+partial
+仅保存已确认的部分值
+例如只拍到杯外壁，已知 floral，背面未见。
+unknown
+null；组合对象用字段级状态
+证据不足、无法区分或还未核对。
+not_applicable
+null；关联数组可 []
+字段对该对象不适用，并注明原因。
+
+Other 不是缺失状态。确知某题材、造型或用途但词表无对应项时才用 other，并在 field_meta 对应路径中填写 other_text。既有已知标签也有未覆盖题材时，可以 [floral, other]。
+相互排斥的候选不是多标签：杯的用途可能为茶或咖啡时，object_subtype = null；两个候选放到 field_meta.candidates 并标 needs_review。多标签只表达确实并存的内容。
+字段级证据与推断
+结构或字段
+约定
+evidence[]
+id、kind、locator、raw_text；kind 用 seller_text / image / catalog / measurement / human_note。
+field_meta
+以 JSON Pointer 路径为键；数组位置从 0 起。保存 status、basis、evidence_ids、needs_review，必要时附 candidates、other_text、note。
+basis
+seller_statement / image_observation / measurement / reference / inference；推断必须写依据，不混成卖家事实。
+缺省行为
+未写 field_meta 的非空字段仅表示待核录入，不能自动升级为已核实；未知字段默认 unknown。关键类型、风格、尺寸须显式给证据。
+
+brand、pattern_id、年代、修复等字段的证据口径沿用各自业务规范。商品信息不足应产生补资料任务，不能直接推出低价值。卖家文字、图像观察与 AI 推断须可分开追溯。
+
+11  字段命名与完整示例
+推荐用 taxonomy_version、record_id、object_type、object_subtype、components、decorations、dimensions、field_meta、evidence 作为顶层。下面是一条虚构的杯碟记录，所有数值与来源仅演示结构，不对应真实在售商品。JSON 从本页连续到下一页，合并为一个对象。
+components[]：component_id 为本件内唯一键；component_type 使用单件器型代码；quantity 为正整数或 null；form 用第 3 节字段。装饰和尺寸通过 component_id 引用组件。record_id 只作示例标识。
+{  "taxonomy_version": "curio_porcelain_v1", "record_id": "demo_001",  "object_type": "cup_and_saucer", "object_subtype": "mocha",  "pattern_name_raw": null, "pattern_id": null,  "size_class": null, "size_rule_id": null, "size_label_raw": null,  "components": [    {"component_id": "cup_1", "component_type": "cup", "quantity": 1,     "body_color": "white", "form": {"plan_shape": "round",       "body_shape": null, "handle_count": 1, "handle_style": null,       "foot_type": "raised_foot", "lid_design": false, "lid_present": false}},    {"component_id": "saucer_1", "component_type": "saucer", "quantity": 1,     "body_color": "white", "form": {"plan_shape": "round",       "handle_count": 0, "foot_type": "ring",       "lid_design": false, "lid_present": false}}  ],  "decorations": [    {"decoration_id": "d1", "component_id": "cup_1",     "locations": ["body"], "coverage": "partial",     "motif_subjects": ["floral", "bird"], "motif_styles": null,     "techniques": null,     "gilding": {"present": false, "types": [], "extent": null,       "band_width_mm": null, "note": null},     "ground": {"present": true, "colors": ["red"], "note": null},     "color_mode": "polychrome", "palette_colors": ["red", "green", "blue"]},    {"decoration_id": "d2", "component_id": "cup_1",     "locations": ["rim"], "coverage": "full",     "motif_subjects": ["geometric"], "motif_styles": null,     "techniques": ["gilding"],     "gilding": {"present": true, "types": ["wide_band"],       "extent": "extensive", "band_width_mm": null,       "note": "卖家称宽金边，宽度未测量"},     "ground": {"present": false, "colors": [], "note": null},     "color_mode": null, "palette_colors": ["gold_tone"]}  ],
+
+12  示例续页与录入要求
+  "dimensions": [    {"component_id": "cup_1", "measurements": {"height_cm": 5.4},     "measurement_scope": "杯体整体高度", "raw_text": "杯高5.4厘米",     "evidence_ids": ["e1"]},    {"component_id": "saucer_1", "measurements": {"diameter_cm": 11.8},     "measurement_scope": "碟外缘直径", "raw_text": "碟直径11.8厘米",     "evidence_ids": ["e1"]}  ],  "field_meta": {    "/object_subtype": {"status": "known", "basis": "seller_statement",      "evidence_ids": ["e1"], "needs_review": true},    "/decorations": {"status": "partial", "basis": "image_observation",      "evidence_ids": ["e2"], "needs_review": true,      "note": "仅示意杯外壁和口沿，内壁与碟面未展示"},    "/decorations/0/motif_styles": {"status": "unknown", "needs_review": true},    "/decorations/1/gilding/present": {"status": "known",      "basis": "seller_statement", "evidence_ids": ["e1"], "needs_review": true},    "/decorations/1/color_mode": {"status": "not_applicable",      "note": "本条只有金色装饰"},    "/size_class": {"status": "unknown", "note": "尚无适用阈值规则"}  },  "evidence": [    {"id": "e1", "kind": "seller_text", "locator": "demo://listing/text",     "raw_text": "摩卡杯碟，宽金边；杯高5.4厘米，碟直径11.8厘米。"},    {"id": "e2", "kind": "image", "locator": "demo://listing/image_1",     "raw_text": "虚构示意图来源，无真实图片"}  ]}
+示例如何使用
+该示例说明：一对杯碟可以只有部分已知装饰；风格、技法或尺寸缺失不需要猜填。known 表示已记录卖家明确说法，与 needs_review = true 并不冲突。未逐字段列出证据的示例值按第 10 节视为待核。
+最少建立 record_id、taxonomy_version、object_type、object_subtype 和一条 components 记录。不明类型写 null 并带 unknown 状态；装饰、尺寸未采集时用 null，不写空数组。对象型字段内部若仅部分已知，保留已知子字段，未知子字段用 null。
+上述 JSON 是交换结构示例，不是已接入程序的 JSON Schema。正式实现时，应把每个器型允许的 subtype、状态语义、引用完整性和正数约束编写为独立校验规则。
+
+13  自检结果与后续维护
+自检事项
+本版处理
+混入器型树的尺寸
+大中小、高度、直径与迷你拆到 dimensions 和 size_class；不设臆测阈值。
+有耳无耳与圆方形
+移至 handle_count、plan_shape、body_shape；有盖无盖移至盖设计与实物状态。
+题材与风格混杂
+Floral、Bird 属题材；Chinoiserie 属风格；Monochrome 属色彩；Mixed 改为多标签。
+原讨论残余冲突
+Dish 的 round/oval 与 Tray 的 shaped/handled 不作 subtype；Covered Bowl 的 covered 移至盖字段。
+有足与高柄混淆
+foot_type 与 handle_style 分开；“高柄”含混时保留原文待核。
+装饰失去部位对应
+采用逐条 decorations 绑定组件和位置；不使用互不关联的技法与位置数组。
+宽金与复杂金饰边界
+保留描述代码、备注和实测宽度；未验证前不设置自动阈值。
+未知与其他混淆
+unknown 是信息状态；other 是已识别但未覆盖的类别，强制说明。
+来源与事实混淆
+卖家陈述、图片观察、推断分别记录；不因标签完整而声称鉴定完成。
+JSON 与字段一致性
+示例的 JSON 语法、组件引用、字段代码和页间连续性已核对；未做生产数据覆盖率测试。
+
+与初筛规则表的衔接
+上传规则表描述的是 2026年10月6日执行快照：破损线索默认排除，器型不明转资料待补，客户匹配依赖标题中的器型、品牌、具体装饰等，价格尚未用于利润排序。本文件不改变这些规则。原对话里的新分层筛选、客户匹配加权与破损放宽仍是方案讨论，不能当作已上线行为。
+新字段可给后续规则提供更精确输入，但 floral 或 blue 等宽泛标签不应自动替代“具体花样”的匹配；需要 pattern_id 或可核对的 pattern_name_raw。厂家一等二等、缺盖、磨金、修复等继续独立保存。
+版本维护与验收
+为每个词条维护 code、label_zh、definition、parent_code、aliases、examples、status、introduced_version。新增词先记录为 other 候选，结合真实商品复核后入表；废弃词保留映射，不静默改写旧数据。pattern_id 的品牌词表独立维护。
+下一轮优先验证：杯碟用途与 Demitasse 映射、盘碗盛器边界、微缩器和大小阈值、宽金与复杂纹判定。以普通品、边界品、未知资料、套组混配四类真实样本逐条回填，记录碰撞和无法表达项。本次完成结构自检，尚未证明市场样本覆盖率。

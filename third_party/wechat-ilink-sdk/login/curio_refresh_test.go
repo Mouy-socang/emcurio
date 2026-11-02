@@ -14,7 +14,14 @@ func TestCurioExpiredQRCodeUpdatesDisplay(t *testing.T) {
 	count := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/ilink/bot/get_bot_qrcode" {
-			count++
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "" || r.Header.Get("iLink-App-Id") != "bot" {
+                t.Errorf("invalid QR request method or headers")
+            }
+            var body struct { Tokens []string `json:"local_token_list"` }
+            if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Tokens == nil {
+                t.Errorf("missing local_token_list")
+            }
+            count++
 			_ = json.NewEncoder(w).Encode(ilink.GetBotQRCodeResponse{QRCode: "code", ImageURL: "https://example.org/login"})
 			return
 		}

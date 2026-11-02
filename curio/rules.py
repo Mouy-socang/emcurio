@@ -21,6 +21,10 @@ def irrelevant_reason(title):
 
 def evaluate(item,config):
     result=judge.judge(item.get('title',''),item.get('listed_price'),item.get('price_text',''),use_legacy_prices=False)
+    for word in config.get('blocked_words', []):
+        for field in ('title', 'description'):
+            if word.casefold() in str(item.get(field, '') or '').casefold():
+                return dict(result, decision='skip', reason='屏蔽词：'+word+'（'+('标题' if field=='title' else '描述')+'）', fair='')
     irrelevant=irrelevant_reason(item.get('title',''))
     if irrelevant:return dict(result,decision='skip',reason='硬过滤：'+irrelevant,fair='')
     text=' '.join(str(item.get(k,'') or '') for k in ('title','description','condition'))

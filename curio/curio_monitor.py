@@ -229,31 +229,57 @@ def collect_ka(store,config):
     return added
 
 def check_existing(store,api,config):
+    """Rotate independently of search ingestion; retain failures as unknown."""
+    from .store import now
+    summary=dict(attempted=0,active=0,gone=0,errors=0,paused=0)
     with store.connect() as c:
-        rows=[dict(r) for r in c.execute("SELECT * FROM items WHERE status='active' ORDER BY checked_at LIMIT ?",(config['status_check_limit'],))]
+        c.executescript("""CREATE TABLE IF NOT EXISTS status_check_events(
+          id INTEGER PRIMARY KEY,item_id TEXT,platform TEXT,checked_at TEXT,outcome TEXT,evidence TEXT);
+          CREATE INDEX IF NOT EXISTS status_check_item ON status_check_events(item_id,id);""")
+        # Search result ingestion updates checked_at even when it never read the detail.
+        # A separate attempt clock prevents those fresh search hits from starving.
+        rows=[dict(r) for r in c.execute("""SELECT i.* FROM items i WHERE i.status='active'
+          ORDER BY COALESCE((SELECT max(e.checked_at) FROM status_check_events e WHERE e.item_id=i.item_id),'') ASC,
+          CASE WHEN i.agent_decision IN ('want','probe') AND NOT EXISTS(SELECT 1 FROM market_decisions m WHERE m.item_id=i.item_id AND m.irrelevant=1) THEN 0 ELSE 1 END,
+          i.checked_at,i.item_id""")]
+    limit=config['status_check_limit'];per_platform=max(1,(limit+1)//2);used={};started=time.monotonic()
     for row in rows:
-        if row['platform']=='ebay':
-            if api is None:continue
-            detail=api.detail(row['item_id'])
-            if detail is None or any(a.get('estimatedAvailabilityStatus')=='OUT_OF_STOCK' for a in detail.get('estimatedAvailabilities',[])):
-                store.mark_gone(row['item_id']);continue
-            row.update(parse(detail,''));row['description']=detail.get('shortDescription',row.get('description',''))
-            store.ingest(row,config)
-        else:
-            if not config['kleinanzeigen_enabled'] or time.time()<float(store.get('ka_pause_until','0')):continue
-            status,raw,url,error=ka_curl(row['url'])
-            if status in (404,410):store.mark_gone(row['item_id']);continue
-            if status in (403,429) or blocked(raw):store.set('ka_pause_until',time.time()+7200);continue
-            if error or status!=200:continue
-            if re.search(r'Anzeige ist nicht mehr verfügbar|Anzeige wurde gelöscht',raw,re.I):
-                store.mark_gone(row['item_id']);continue
-            match=re.search(r'id="viewad-price"[^>]*>([\s\S]*?)</',raw)
-            if match:
-                row['price_text']=_clean(re.sub('<[^>]+>',' ',match.group(1)))
-                row['price']=_ka_price(row['price_text']);store.ingest(row,config)
+        if summary['attempted']>=limit or time.monotonic()-started>=240:break
+        platform=row['platform']
+        if used.get(platform,0)>=per_platform:continue
+        if platform=='ebay' and api is None:continue
+        if platform=='kleinanzeigen' and (not config['kleinanzeigen_enabled'] or time.time()<float(store.get('ka_pause_until','0'))):continue
+        summary['attempted']+=1;used[platform]=used.get(platform,0)+1
+        outcome='error';evidence='status_unverified'
+        try:
+            if platform=='ebay':
+                detail=api.detail(row['item_id'])
+                if detail is None:outcome='gone';evidence='API HTTP 404/410'
+                elif any(a.get('estimatedAvailabilityStatus')=='OUT_OF_STOCK' for a in detail.get('estimatedAvailabilities',[])):outcome='gone';evidence='API OUT_OF_STOCK; sale unknown'
+                else:
+                    row.update(parse(detail,''));row['description']=detail.get('shortDescription',row.get('description',''))
+                    store.ingest(row,config);outcome='active';evidence='API detail available; no out-of-stock marker'
             else:
-                from .store import now
-                with store.connect() as c:c.execute('UPDATE items SET checked_at=? WHERE item_id=?',(now(),row['item_id']))
+                status,raw,url,error=ka_curl(row['url'])
+                if status in (403,429) or blocked(raw):
+                    store.set('ka_pause_until',time.time()+7200);outcome='paused';evidence='HTTP challenge/rate limit'
+                elif error or status not in (200,404,410):evidence='network/HTTP failure; state retained'
+                elif status in (404,410):outcome='gone';evidence='HTTP '+str(status)
+                elif re.search(r'Anzeige ist nicht mehr verfügbar|Anzeige wurde gelöscht',raw,re.I):outcome='gone';evidence='explicit unavailable/deleted text; sale unknown'
+                elif '/s-anzeige/' not in url or row['item_id'].removeprefix('ka:') not in url:evidence='redirect; original listing not verified'
+                else:
+                    match=re.search(r'id="viewad-price"[^>]*>([\s\S]*?)</',raw)
+                    if match:
+                        row['price_text']=_clean(re.sub('<[^>]+>',' ',match.group(1)));row['price']=_ka_price(row['price_text']);store.ingest(row,config)
+                    else:
+                        with store.connect() as c:c.execute('UPDATE items SET checked_at=? WHERE item_id=?',(now(),row['item_id']))
+                    outcome='active';evidence='original listing HTTP 200; no unavailable marker'
+            if outcome=='gone':store.mark_gone(row['item_id'])
+        except Exception:evidence='detail request failed; state retained'
+        summary['errors' if outcome=='error' else outcome]+=1
+        with store.connect() as c:c.execute('INSERT INTO status_check_events(item_id,platform,checked_at,outcome,evidence) VALUES(?,?,?,?,?)',(row['item_id'],platform,now(),outcome,evidence))
+    with store.connect() as c:summary['remaining_active']=c.execute("SELECT count(*) FROM items WHERE status='active'").fetchone()[0]
+    return summary
 
 def run(root):
     from .config import load
@@ -283,13 +309,13 @@ def run(root):
                 if store.get('ka_error'):result['kleinanzeigen_error']=store.get('ka_error')
             except Exception:result['kleinanzeigen_status']='error'
         else:result['kleinanzeigen_status']='disabled'
-        try:check_existing(store,api,config)
+        try:result['status_check_summary']=check_existing(store,api,config)
         except Exception:result['status_checks']='本轮状态检查未完成，将在后续轮次重试'
         store.archive();store.set('last_collection',now())
         import json
         store.set('last_collection_result',json.dumps(result,ensure_ascii=False))
         with store.connect() as c:
-            status='ok' if result.get('ebay_status')=='ok' and result.get('kleinanzeigen_status') in ('ok','disabled') and 'status_checks' not in result else 'partial'
+            status='ok' if result.get('ebay_status')=='ok' and result.get('kleinanzeigen_status') in ('ok','disabled') and 'status_checks' not in result and not result.get('status_check_summary',{}).get('errors') else 'partial'
             c.execute('UPDATE collection_runs SET finished_at=?,status=?,result=? WHERE id=?',
                       (now(),status,json.dumps(result,ensure_ascii=False),run_id))
         return result
