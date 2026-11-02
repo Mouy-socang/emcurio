@@ -87,8 +87,8 @@ class Store:
             else:
                 p['first_seen']=ts
                 c.execute('INSERT INTO items('+','.join(p)+') VALUES('+','.join('?' for _ in p)+')',list(p.values()))
-            # AD-26：系统只在未经人工决定的货上落位（new / auto_removed）。
-            triage.system_place(c,p['item_id'])
+            # AD-26：系统只在未经人工决定的货上落位（new / auto_removed）；未变化的货不重放。
+            if changed:triage.system_place(c,p['item_id'])
         return 'new' if old is None else 'changed' if changed else 'unchanged'
     def mark_gone(self,iid):
         with self.connect() as c:c.execute("UPDATE items SET status='gone',gone_at=?,checked_at=? WHERE item_id=? AND status='active'",(now(),now(),iid))
@@ -118,16 +118,14 @@ class Store:
             return cur.lastrowid
     @staticmethod
     def _triage_review(c,iid,decision,reason):
-        # 审核结果经拣选状态机落位（AD-26）：want→留下，skip/irrelevant→去掉，probe→留在新货。
-        current=triage._row(c,iid)
-        if decision in ('want','probe') and current=='auto_removed':
-            triage.rescue(c,iid,reason or None);current='new'
-        if decision=='want' and current=='out_of_pool':triage.back_to_pool(c,iid,reason or None)
-        elif decision=='want':triage.keep(c,iid,reason or None)
-        elif decision in ('skip','irrelevant'):triage.remove(c,iid,reason or None)
-        elif current=='new' and not triage.has_human(c,iid):
-            # 询市不改状态，但记一条人工事件，之后重判不再移动它。
-            triage._event(c,iid,'new','new','probe','human',c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone(),reason or None)
+        # 审核结果经拣选状态机落位（AD-26）：want→留下（自动移出/移出商品池的一并处理，一次撤销全回退），
+        # skip/irrelevant→去掉，probe→自动移出的先捞回，并记一条询市事件（不改状态）。
+        reason=reason or None
+        if decision=='want':triage.keep(c,iid,reason,source='review')
+        elif decision in ('skip','irrelevant'):triage.remove(c,iid,reason,source='review')
+        else:
+            if triage.current(c,iid)=='auto_removed':triage.rescue(c,iid,reason,source='review')
+            triage.note_probe(c,iid,reason,source='review')
     def block(self, iid, word, request_id, version, config):
         if not isinstance(word,str) or not 1<=len(word.strip())<=100:
             raise ValueError('请从商品标题或描述中选择1至100字的屏蔽词')
@@ -151,7 +149,7 @@ class Store:
                 c.execute('INSERT INTO blocked_words VALUES(?,?)',(word,now()))
             c.execute('INSERT INTO cases(item_id,decision,reason,currency,agent_decision,agent_reason,listed_price,total_price,rule_version,decided_at,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                 (iid,'irrelevant','屏蔽词：'+word,row['currency'],row['agent_decision'],row['agent_reason'],row['listed_price'],row['total_price'],version,now(),request_id))
-            triage.remove(c,iid,'屏蔽词：'+word)
+            triage.remove(c,iid,'屏蔽词：'+word,source='block')
             cfg=dict(config,blocked_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')])
             rows=c.execute('SELECT * FROM items').fetchall()
             changed=matched=0

@@ -14,6 +14,8 @@ def main(argv=None):
     ap=argparse.ArgumentParser(description='迁移拣选状态与货号')
     ap.add_argument('db',nargs='?',default=str(ROOT/'data/curio.db'))
     args=ap.parse_args(argv)
+    if not Path(args.db).is_file():
+        raise SystemExit('数据库不存在：'+args.db)
     store=Store(args.db)
     with store.connect() as c:
         added=triage.migrate(c)

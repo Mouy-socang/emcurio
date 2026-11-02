@@ -78,20 +78,22 @@ want / probe 进入 cheap / deep 记录。`daily_budget: 0` 时不调用任何 p
 
 - 状态：`new` 新货、`kept` 留下、`removed` 去掉、`auto_removed` 自动移出、`out_of_pool` 移出商品池。
 - 系统（规则归口）：入库时判断 `skip` → `auto_removed`，其余 → `new`；重判（改价、屏蔽词全量重判）只在**没有任何人工事件**的货上于 `new` / `auto_removed` 间移动。有人工事件的货只更新分数与理由，不改状态。
-- 人工动作：留下（`new`/`removed` → `kept`）、去掉（`new`/`kept`/`auto_removed`/`out_of_pool` → `removed`）、捞回（`auto_removed` → `new`，排新货队列最前）、移出商品池（`kept` → `out_of_pool`）、放回商品池（`out_of_pool` → `kept`）、撤销上一步（`undo`：撤销最近一个未撤销的人工动作，可连续多步，系统动作不进撤销栈）。非法转换抛中文 `TriageError`。
-- 现有入口已接入：`Store.review` 的 want → 留下（自动移出的先捞回、移出商品池的放回）、skip/irrelevant → 去掉、probe → 留在新货并记一条人工事件；`Store.block` 的那件货 → 去掉；`market.set_decision` 无关 → 去掉、取消无关 → 撤销那次去掉。`cases`、`market_decisions` 照旧写入，旧读者不变。
+- `cases` / `market_decisions` 仍是决定日志（追加/覆盖照旧，旧读者不变），**拣选状态以 `triage` 为准**；撤销只写 `triage_events`，不改写 cases。
+- 人工动作：留下（`new`/`removed` → `kept`）、去掉（`new`/`kept`/`auto_removed`/`out_of_pool` → `removed`）、捞回（`auto_removed` → `new`，排新货队列最前）、移出商品池（`kept` → `out_of_pool`）、放回商品池（`out_of_pool` → `kept`）、撤销上一步（`undo`：撤销最近一个未撤销的人工动作，可连续多步，系统动作不进撤销栈；之后又有人工动作时抛「状态已变化」）。任何人工转换与撤销都清除 `backlog`。非法转换抛中文 `TriageError`。
+- 现有入口已接入（事件 `source` 记来源）：`Store.review` 的 want → `triage.keep`（自动移出的捞回+留下记为同一组 `grp`，一次撤销全部回退；移出商品池的放回）、skip/irrelevant → 去掉、probe → 自动移出的先捞回，再 `triage.note_probe` 记一条不改状态的人工询市事件（任何状态都记）；`Store.block` 的那件货 → 去掉；`market.set_decision` 无关 → 去掉（`source='market'`，事件时间等于 `market_decisions.updated_at`），取消无关 → 只撤销最近一次未撤销的市场页去掉，没有则不动，之后有过其他人工动作则报「状态已变化」；只在 `market_items`、不在 `items` 的货跳过拣选。
 - 每条事件记：UTC 时间、旧/新状态、动作、执行者（human/system）、当时的 `agent_decision`、分数（`items` 尚无分数列时为空）、`rule_version`、理由。
-- 货号 `CO-` + 至少 4 位序号（`CO-0001`…`CO-9999`、`CO-10000`…），首次进入 `kept` 时在 `BEGIN IMMEDIATE` 事务内分配；`code`、`item_id` 各自唯一；再次留下返回原货号；撤销、去掉、移出都不释放，号码永不复用。
-- 新货队列 `triage.queue`：捞回的在前（最近捞回优先），其余按 `first_seen` 新到旧，不含 `backlog`。
+- 货号 `CO-` + 至少 4 位序号（`CO-0001`…`CO-9999`、`CO-10000`…），首次进入 `kept` 时在写事务内分配（未开事务时本模块执行 `BEGIN IMMEDIATE`；调用方自己开事务须用 `BEGIN IMMEDIATE` 或已写过，即已持有写锁；代码断言 `in_transaction`，`code`/`item_id` 唯一约束兜底）；`code`、`item_id` 各自唯一；再次留下返回原货号；撤销、去掉、移出都不释放，号码永不复用。
+- 新货队列 `triage.queue`：只含 `items.status='active'` 的货；捞回的在前（最近捞回优先），其余按 `first_seen` 新到旧，不含 `backlog`。
+- 采集 `ingest` 只在新货或改价/改文后调用 `system_place`。
 
 ### 迁移
 
 ```sh
 sqlite3 data/curio.db ".backup data/backups/curio-before-triage-<UTC时间>.db"
-uv run python scripts/migrate_triage.py      # 幂等，可重跑；打印各状态计数
+uv run python scripts/migrate_triage.py      # 幂等，可重跑；打印各状态计数；数据库路径不存在时报错退出
 ```
 
-规则：`cases` / `market_decisions` 中最新的 irrelevant/skip → `removed`（human，沿用原时间；两表都有时取时间较新者）；`cases` 的 want → `kept` 并按决定时间顺序分配货号；probe → `new`（human）；其余按判断结果入 `new`/`auto_removed`。迁移时刻（kv `triage_migrated_at`，首次运行写入，重跑沿用）前 7 天以上入库、未经人工的 `new` 货标 `backlog=1`，不进新货队列（待故事 7 处理）。已有人工事件的货重跑时跳过，所以不会重复写事件或货号。`scripts/import_desktop.py`、`market.migrate_legacy` 仍直接写 `cases` / `market_decisions`，用它们导入后需再跑一次本迁移。
+规则：两表都有决定时按解析后的时间取较新者：市场页较新则它说了算（无关 → `removed`，取消无关 → 无人工决定）；否则看 `cases` 最新一条：irrelevant/skip → `removed`（human，沿用原时间）；`cases` 的 want → `kept` 并按决定时间顺序分配货号；probe → `new`（human）；其余按判断结果入 `new`/`auto_removed`。迁移时刻（kv `triage_migrated_at`，首次运行写入，重跑沿用，无法解析时报「迁移时刻无效」）前 7 天以上入库、未经人工的 `new` 货标 `backlog=1`（`first_seen` 为空或无法解析的不标），不进新货队列（待故事 7 处理）。已有人工事件的货，重跑时只应用比它最近一次人工事件**更新**的决定（记为 `migrate` 事件），所以不会重复写事件或货号。`scripts/import_desktop.py`、`market.migrate_legacy` 仍直接写 `cases` / `market_decisions`，用它们导入后需再跑一次本迁移，新导入的较新决定会被应用。重跑还会给早期迁移的市场页去掉补 `source='market'`。
 
 2026-11-02 真实库迁移结果：items 21996 = triage 21996；`removed` 195（cases 180 件 + market_decisions 15 件，全为人工无关/不要）、`auto_removed` 10539、`new` 11262（其中 backlog 7050，新货队列 4212）；无 want，货号 0 个。备份在 `data/backups/curio-before-triage-20261102T200445Z.db`。第二次运行新增事件 0、货号 0。
 

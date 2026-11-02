@@ -26,6 +26,10 @@ def raw_insert(c, iid, agent='probe', first_seen='2026-11-01T00:00:00+00:00'):
               "VALUES(?,'ebay','Meissen Tasse','','active',?,'https://www.ebay.de/itm/x',?,1)", (iid, agent, first_seen))
 
 
+def sk(r):
+    return r['state'], r['code']
+
+
 def st(db, iid):
     with db.connect() as c:
         return triage.state(c, iid)
@@ -44,12 +48,12 @@ def test_ingest_places_new_or_auto_removed(db, cfg):
 def test_first_keep_then_rekeep_keeps_code(db, cfg):
     db.ingest(item('a'), cfg); db.ingest(item('b'), cfg)
     with db.connect() as c:
-        assert triage.keep(c, 'a') == dict(state='kept', code='CO-0001')
+        assert sk(triage.keep(c, 'a')) == ('kept', 'CO-0001')
     with db.connect() as c:
         assert triage.keep(c, 'b')['code'] == 'CO-0002'
         triage.remove(c, 'a', '不要了')
         assert triage.state(c, 'a') == 'removed'
-        assert triage.keep(c, 'a') == dict(state='kept', code='CO-0001')
+        assert sk(triage.keep(c, 'a')) == ('kept', 'CO-0001')
         assert triage.keep(c, 'a')['code'] == 'CO-0001'  # 重复留下不写事件
         assert c.execute('SELECT count(*) FROM item_codes').fetchone()[0] == 2
         ev = c.execute("SELECT * FROM triage_events WHERE item_id='a' AND action='remove'").fetchone()
@@ -155,7 +159,7 @@ def test_pool_out_and_back(db):
     with db.connect() as c:
         raw_insert(c, 'a')
         triage.keep(c, 'a'); triage.out_of_pool(c, 'a')
-        assert triage.back_to_pool(c, 'a') == dict(state='kept', code='CO-0001')
+        assert sk(triage.back_to_pool(c, 'a')) == ('kept', 'CO-0001')
 
 
 def test_review_and_block_go_through_triage(db, cfg):
@@ -214,3 +218,162 @@ def test_migration_idempotent(tmp_path, capsys):
         assert backlog == {'old'}
     second = migrate_triage.main([str(store.path)])
     assert second['new_events'] == 0 and second['new_codes'] == 0 and second['states'] == first['states']
+
+
+def test_block_rescreen_moves_untouched_to_auto_removed(db, cfg):
+    db.ingest(item('one', title='Meissen Mietangebot'), cfg)
+    db.ingest(dict(item('two'), description='Mietangebot in Meißen'), cfg)
+    assert st(db, 'two') == 'new'
+    db.block('one', 'Mietangebot', 'b1', 1, cfg)
+    with db.connect() as c:
+        assert triage.state(c, 'two') == 'auto_removed'
+        ev = c.execute("SELECT * FROM triage_events WHERE item_id='two' ORDER BY id DESC").fetchone()
+        assert (ev['action'], ev['actor'], ev['old_state']) == ('rejudge', 'system', 'new')
+
+
+def test_review_want_on_out_of_pool_keeps_code(db, cfg):
+    db.ingest(item(), cfg)
+    db.review('one', 'want', '', None, 'r1', 1)
+    with db.connect() as c:
+        triage.out_of_pool(c, 'one')
+    db.review('one', 'want', '', None, 'r2', 1)
+    with db.connect() as c:
+        assert triage.state(c, 'one') == 'kept' and triage.code(c, 'one') == 'CO-0001'
+        assert c.execute('SELECT count(*) FROM item_codes').fetchone()[0] == 1
+
+
+def test_review_probe_on_auto_removed_enters_queue(db, cfg):
+    db.ingest(item(title='Meissen defekt Tasse'), cfg)
+    assert st(db, 'one') == 'auto_removed'
+    db.review('one', 'probe', '', None, 'r1', 1)
+    with db.connect() as c:
+        assert triage.state(c, 'one') == 'new'
+        assert [r['item_id'] for r in triage.queue(c)] == ['one']
+        assert c.execute("SELECT count(*) FROM triage_events WHERE item_id='one' AND action='probe'").fetchone()[0] == 1
+
+
+def test_one_undo_reverts_want_on_auto_removed(db, cfg):
+    db.ingest(item(title='Meissen defekt Tasse'), cfg)
+    db.review('one', 'want', '', None, 'r1', 1)
+    with db.connect() as c:
+        assert triage.state(c, 'one') == 'kept'
+        triage.undo(c)
+        assert triage.state(c, 'one') == 'auto_removed' and triage.code(c, 'one') == 'CO-0001'
+        with pytest.raises(triage.TriageError, match='没有可撤销的操作'):
+            triage.undo(c)
+
+
+def test_undo_rejects_changed_state(db):
+    with db.connect() as c:
+        raw_insert(c, 'a')
+        triage.keep(c, 'a'); triage.out_of_pool(c, 'a')
+        ev = c.execute("SELECT * FROM triage_events WHERE item_id='a' AND action='keep'").fetchone()
+        with pytest.raises(triage.TriageError, match='状态已变化'):
+            triage.undo_event(c, ev)
+
+
+def test_gone_item_not_in_queue(db):
+    with db.connect() as c:
+        raw_insert(c, 'live'); raw_insert(c, 'gone')
+        c.execute("UPDATE items SET status='gone' WHERE item_id='gone'")
+        for i in ('live', 'gone'):
+            triage.system_place(c, i)
+        assert [r['item_id'] for r in triage.queue(c)] == ['live']
+
+
+def test_human_transition_clears_backlog(db):
+    with db.connect() as c:
+        raw_insert(c, 'a')
+        triage.system_place(c, 'a')
+        c.execute("UPDATE triage SET backlog=1 WHERE item_id='a'")
+        triage.keep(c, 'a'); triage.undo(c)
+        assert [r['item_id'] for r in triage.queue(c)] == ['a']
+
+
+def market_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(market, 'DB', tmp_path / 'curio.db')
+    store = Store(tmp_path / 'curio.db')
+    with store.connect() as c:
+        c.execute("INSERT INTO items(item_id,platform,title,description,status,agent_decision,listed_price,currency,url,first_seen,rule_version) "
+                  "VALUES('one','ebay','Meissen Tasse','','active','want',100,'EUR','https://www.ebay.de/itm/1','2026-10-19',1)")
+    market.init(store)
+    return store
+
+
+def test_market_cancel_does_not_restore_review_skip(tmp_path, monkeypatch):
+    store = market_store(tmp_path, monkeypatch)
+    store.review('one', 'skip', '太贵', None, 'r1', 1)
+    market.set_decision('ebay', 'one', True, '无关')
+    market.set_decision('ebay', 'one', False, '恢复')
+    assert st(store, 'one') == 'removed'
+
+
+def test_market_cancel_restores_market_remove(tmp_path, monkeypatch):
+    store = market_store(tmp_path, monkeypatch)
+    market.set_decision('ebay', 'one', True, '无关')
+    with store.connect() as c:
+        assert c.execute("SELECT source FROM triage_events WHERE action='remove'").fetchone()[0] == 'market'
+    market.set_decision('ebay', 'one', False, '恢复')
+    assert st(store, 'one') == 'new'
+    market.set_decision('ebay', 'one', True, '无关')
+    with store.connect() as c:
+        triage.keep(c, 'one')
+    with pytest.raises(ValueError, match='状态已变化'):
+        market.set_decision('ebay', 'one', False, '恢复')
+
+
+def test_market_item_missing_from_items_skips_triage(tmp_path, monkeypatch):
+    store = market_store(tmp_path, monkeypatch)
+    with store.connect() as c:
+        c.execute('DROP VIEW market_items')
+        c.execute('CREATE TABLE market_items(platform TEXT,item_id TEXT)')
+        c.execute("INSERT INTO market_items VALUES('ebay','ghost')")
+    market.set_decision('ebay', 'ghost', True, '无关')
+    with store.connect() as c:
+        assert c.execute("SELECT irrelevant FROM market_decisions WHERE item_id='ghost'").fetchone()[0] == 1
+        assert triage.state(c, 'ghost') is None
+
+
+def seed_case(c, iid, decision, when, rid):
+    c.execute("INSERT INTO cases(item_id,decision,reason,agent_decision,rule_version,decided_at,request_id) "
+              "VALUES(?,?,'x','probe',1,?,?)", (iid, decision, when, rid))
+
+
+def test_migration_newer_market_cancel_beats_older_case(db):
+    with db.connect() as c:
+        raw_insert(c, 'a')
+        seed_case(c, 'a', 'irrelevant', '2026-10-01T00:00:00+00:00', 'q1')
+        c.execute("INSERT INTO market_decisions VALUES('ebay','a',0,'恢复','2026-10-02T00:00:00.500000+00:00')")
+        c.execute("INSERT INTO kv VALUES('triage_migrated_at','2026-11-02T00:00:00+00:00')")
+        triage.migrate(c)
+        assert triage.state(c, 'a') == 'new' and not triage.has_human(c, 'a')
+
+
+def test_migration_rerun_applies_newer_imported_case(db):
+    with db.connect() as c:
+        raw_insert(c, 'a')
+        seed_case(c, 'a', 'skip', '2026-10-01T00:00:00+00:00', 'q1')
+        c.execute("INSERT INTO kv VALUES('triage_migrated_at','2026-11-02T00:00:00+00:00')")
+        triage.migrate(c)
+        assert triage.state(c, 'a') == 'removed'
+        seed_case(c, 'a', 'want', '2026-10-05T00:00:00+00:00', 'q2')
+        assert triage.migrate(c) == dict(events=1, codes=1)
+        assert triage.state(c, 'a') == 'kept' and triage.code(c, 'a') == 'CO-0001'
+        assert triage.migrate(c) == dict(events=0, codes=0)
+
+
+def test_migration_bad_first_seen_and_time(db):
+    with db.connect() as c:
+        raw_insert(c, 'a', first_seen=None)
+        c.execute("INSERT INTO kv VALUES('triage_migrated_at','2026-11-02T00:00:00+00:00')")
+        triage.migrate(c)
+        assert c.execute("SELECT backlog FROM triage WHERE item_id='a'").fetchone()[0] == 0
+        c.execute("UPDATE kv SET v='坏' WHERE k='triage_migrated_at'")
+        with pytest.raises(triage.TriageError, match='迁移时刻无效'):
+            triage.migrate(c)
+
+
+def test_migrate_script_rejects_missing_db(tmp_path):
+    with pytest.raises(SystemExit):
+        migrate_triage.main([str(tmp_path / 'nope.db')])
+    assert not (tmp_path / 'nope.db').exists()

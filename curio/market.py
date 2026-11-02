@@ -51,12 +51,12 @@ def set_decision(platform,item_id,irrelevant,reason):
   if not c.execute('select 1 from market_items where platform=? and item_id=?',(platform,item_id)).fetchone():raise ValueError('商品不存在')
  stamp=datetime.now(timezone.utc).isoformat()
  with connect() as c:
-  # AD-26：无关 → 去掉；取消无关 → 撤销那次去掉，回到之前的状态。
+  # AD-26：无关 → 去掉（来源 market）；取消无关 → 只撤销来自市场页的那次去掉，没有则不动。
+  # 状态已变化而无法撤销时抛中文错误。只在 market_items、不在 items 的货跳过拣选。
   c.execute('BEGIN IMMEDIATE')
-  if irrelevant:triage.remove(c,item_id,reason or '无关')
-  elif triage.state(c,item_id)=='removed':
-   try:triage.undo(c,item_id,actions=('remove','migrate'))
-   except triage.TriageError:pass
+  if c.execute('select 1 from items where item_id=?',(item_id,)).fetchone():
+   if irrelevant:triage.remove(c,item_id,reason or '无关',at=stamp,source='market')
+   else:triage.undo_market(c,item_id)
   c.execute('insert into market_decisions values(?,?,?,?,?) on conflict(platform,item_id) do update set irrelevant=excluded.irrelevant,reason=excluded.reason,updated_at=excluded.updated_at',(platform,item_id,int(irrelevant),reason,stamp))
   c.execute('insert into market_events(platform,item_id,irrelevant,reason,created_at) values(?,?,?,?,?)',(platform,item_id,int(irrelevant),reason,stamp))
 def connect():

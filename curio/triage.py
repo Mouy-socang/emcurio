@@ -6,7 +6,10 @@
 - 每次状态变化追加一条 triage_events；货号在首次进入 kept 时分配，永不释放、永不复用。
 
 本模块的函数都接收一个 sqlite3 连接，在调用方的事务里工作；若连接尚未开启事务，
-写操作会先执行 BEGIN IMMEDIATE（货号分配必须在 BEGIN IMMEDIATE 事务内完成）。
+写操作会先执行 BEGIN IMMEDIATE。调用方自己开事务时须用 BEGIN IMMEDIATE（或已在事务里写过，
+即已持有 RESERVED 写锁）。货号分配只在写事务内进行（断言 in_transaction），并由
+item_codes.code / item_id 的唯一约束兜底，不会产生重复货号。
+`cases` / `market_decisions` 是决定日志，拣选状态以 `triage` 为准；撤销不改写 cases。
 """
 import sqlite3
 import time
@@ -53,6 +56,11 @@ def ensure(c):
     CREATE INDEX IF NOT EXISTS triage_events_item ON triage_events(item_id,id);
     CREATE INDEX IF NOT EXISTS triage_events_actor ON triage_events(actor,id);
     ''')
+    # source：动作来源（review / block / market / cases …）；grp：一起撤销的动作组。
+    cols = {r[1] for r in c.execute('PRAGMA table_info(triage_events)')}
+    for col, typ in (('source', 'TEXT'), ('grp', 'INTEGER')):
+        if col not in cols:
+            c.execute('ALTER TABLE triage_events ADD COLUMN %s %s' % (col, typ))
 
 
 def _begin(c):
@@ -77,11 +85,11 @@ def _snapshot(item):
     return (item['agent_decision'], item['score'] if 'score' in keys else None, item['rule_version'])
 
 
-def _event(c, iid, old, new, action, actor, item, reason=None, at=None, undoes=None):
+def _event(c, iid, old, new, action, actor, item, reason=None, at=None, undoes=None, source=None, grp=None):
     agent, score, version = _snapshot(item)
     cur = c.execute('''INSERT INTO triage_events(item_id,at,old_state,new_state,action,actor,agent_decision,score,
-        rule_version,reason,undoes) VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
-        (iid, at or now(), old, new, action, actor, agent, score, version, reason, undoes))
+        rule_version,reason,undoes,source,grp) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        (iid, at or now(), old, new, action, actor, agent, score, version, reason, undoes, source, grp))
     return cur.lastrowid
 
 
@@ -111,6 +119,12 @@ def _row(c, iid, item=None):
     return s
 
 
+def current(c, iid):
+    """取该货当前拣选状态；还没有记录时先由系统按判断结果落位。"""
+    _begin(c)
+    return _row(c, iid)
+
+
 def system_place(c, iid):
     """入库或重新判断后调用：未经人工决定时按判断结果放入 new / auto_removed；有人工事件则不改状态。"""
     _begin(c)
@@ -133,6 +147,7 @@ def _assign_code(c, iid, at=None):
     existing = code(c, iid)
     if existing:
         return existing
+    assert c.in_transaction, '货号必须在写事务内分配'
     seq = c.execute("SELECT seq FROM sqlite_sequence WHERE name='item_codes'").fetchone()
     nxt = (seq[0] if seq else 0) + 1
     value = CODE_PREFIX + '%04d' % nxt
@@ -140,8 +155,8 @@ def _assign_code(c, iid, at=None):
     return value
 
 
-def transition(c, iid, action, reason=None, at=None, actor='human'):
-    """执行一个人工动作。返回 dict(state=..., code=...)。非法转换抛 TriageError。"""
+def transition(c, iid, action, reason=None, at=None, actor='human', source=None, grp=None):
+    """执行一个人工动作。返回 dict(state=..., code=..., event=事件id或None)。非法转换抛 TriageError。"""
     if action not in HUMAN:
         raise TriageError('未知的拣选动作')
     _begin(c)
@@ -150,28 +165,46 @@ def transition(c, iid, action, reason=None, at=None, actor='human'):
     sources, target = HUMAN[action]
     if cur == target and action in ('keep', 'remove'):
         # 重复留下/去掉：不写事件；再次留下返回原货号。
-        return dict(state=cur, code=code(c, iid))
+        return dict(state=cur, code=code(c, iid), event=None)
     if cur not in sources:
         raise TriageError('「%s」状态的货不能%s' % (LABELS[cur], ACTION_LABELS[action]))
     ts = at or now()
     assigned = _assign_code(c, iid, ts) if target == 'kept' else code(c, iid)
     rescued = ts if action == 'rescue' else None
-    c.execute('UPDATE triage SET state=?,updated_at=?,backlog=CASE WHEN ? IS NULL THEN backlog ELSE 0 END,rescued_at=COALESCE(?,rescued_at) WHERE item_id=?',
-              (target, ts, rescued, rescued, iid))
-    _event(c, iid, cur, target, action, actor, item, reason, at=ts)
-    return dict(state=target, code=assigned)
+    # 任何人工转换都清除 backlog。
+    c.execute('UPDATE triage SET state=?,updated_at=?,backlog=0,rescued_at=COALESCE(?,rescued_at) WHERE item_id=?',
+              (target, ts, rescued, iid))
+    eid = _event(c, iid, cur, target, action, actor, item, reason, at=ts, source=source, grp=grp)
+    return dict(state=target, code=assigned, event=eid)
 
 
-def keep(c, iid, reason=None):
-    return transition(c, iid, 'keep', reason)
+def keep(c, iid, reason=None, source=None):
+    """留下。自动移出的货先捞回再留下、移出商品池的货放回，两步记为同一组，一次撤销全部回退。"""
+    _begin(c)
+    cur = _row(c, iid)
+    if cur == 'out_of_pool':
+        return transition(c, iid, 'back_to_pool', reason, source=source)
+    if cur == 'auto_removed':
+        first = transition(c, iid, 'rescue', reason, source=source)['event']
+        c.execute('UPDATE triage_events SET grp=? WHERE id=?', (first, first))
+        return transition(c, iid, 'keep', reason, source=source, grp=first)
+    return transition(c, iid, 'keep', reason, source=source)
 
 
-def remove(c, iid, reason=None):
-    return transition(c, iid, 'remove', reason)
+def remove(c, iid, reason=None, at=None, source=None):
+    return transition(c, iid, 'remove', reason, at=at, source=source)
 
 
-def rescue(c, iid, reason=None):
-    return transition(c, iid, 'rescue', reason)
+def note_probe(c, iid, reason=None, source=None):
+    """询市：任何状态下都只记一条人工 probe 事件，不改状态；之后系统重判不再移动这件货。"""
+    _begin(c)
+    item = _item(c, iid)
+    cur = _row(c, iid, item)
+    return _event(c, iid, cur, cur, 'probe', 'human', item, reason, source=source)
+
+
+def rescue(c, iid, reason=None, source=None):
+    return transition(c, iid, 'rescue', reason, source=source)
 
 
 def out_of_pool(c, iid, reason=None):
@@ -180,6 +213,32 @@ def out_of_pool(c, iid, reason=None):
 
 def back_to_pool(c, iid, reason=None):
     return transition(c, iid, 'back_to_pool', reason)
+
+
+def _later_human(c, ev):
+    return c.execute('''SELECT 1 FROM triage_events WHERE item_id=? AND id>? AND actor='human' AND undone_by IS NULL
+        AND action NOT IN ('undo','probe') AND (grp IS NULL OR grp IS NOT ?) LIMIT 1''', (ev['item_id'], ev['id'], ev['grp'])).fetchone()
+
+
+def undo_event(c, ev):
+    """撤销指定的人工事件（连同同组事件），回到动作前状态；货号保留。状态已变化时抛 TriageError。"""
+    _begin(c)
+    if ev['grp'] is not None:
+        group = c.execute('SELECT * FROM triage_events WHERE grp=? AND undone_by IS NULL ORDER BY id DESC', (ev['grp'],)).fetchall()
+    else:
+        group = [ev]
+    if state(c, ev['item_id']) != group[0]['new_state'] or any(e['old_state'] is None for e in group) or _later_human(c, group[0]):
+        raise TriageError('这件货的状态已变化，不能撤销')
+    item = _item(c, ev['item_id'])
+    for e in group:
+        cur = state(c, e['item_id'])
+        ts = now()
+        c.execute("UPDATE triage SET state=?,updated_at=?,backlog=0,rescued_at=CASE WHEN ?='rescue' THEN NULL ELSE rescued_at END WHERE item_id=?",
+                  (e['old_state'], ts, e['action'], e['item_id']))
+        uid = _event(c, e['item_id'], cur, e['old_state'], 'undo', 'human', item, at=ts, undoes=e['id'])
+        c.execute('UPDATE triage_events SET undone_by=? WHERE id=?', (uid, e['id']))
+    last = group[-1]
+    return dict(item_id=last['item_id'], state=last['old_state'], code=code(c, last['item_id']), undid=ev['action'])
 
 
 def undo(c, iid=None, actions=UNDOABLE):
@@ -194,16 +253,15 @@ def undo(c, iid=None, actions=UNDOABLE):
     ev = c.execute(sql + ' ORDER BY id DESC LIMIT 1', args).fetchone()
     if not ev:
         raise TriageError('没有可撤销的操作')
-    cur = state(c, ev['item_id'])
-    if cur != ev['new_state'] or ev['old_state'] is None:
-        raise TriageError('这件货的状态已变化，不能撤销')
-    item = _item(c, ev['item_id'])
-    ts = now()
-    c.execute('UPDATE triage SET state=?,updated_at=?,rescued_at=CASE WHEN ?=\'rescue\' THEN NULL ELSE rescued_at END WHERE item_id=?',
-              (ev['old_state'], ts, ev['action'], ev['item_id']))
-    uid = _event(c, ev['item_id'], cur, ev['old_state'], 'undo', 'human', item, at=ts, undoes=ev['id'])
-    c.execute('UPDATE triage_events SET undone_by=? WHERE id=?', (uid, ev['id']))
-    return dict(item_id=ev['item_id'], state=ev['old_state'], code=code(c, ev['item_id']), undid=ev['action'])
+    return undo_event(c, ev)
+
+
+def undo_market(c, iid):
+    """取消「无关」：只撤销该货最近一次未撤销、来自市场页的去掉；没有则不做任何事。"""
+    _begin(c)
+    ev = c.execute("""SELECT * FROM triage_events WHERE item_id=? AND actor='human' AND undone_by IS NULL
+        AND action IN ('remove','migrate') AND new_state='removed' AND source='market' ORDER BY id DESC LIMIT 1""", (iid,)).fetchone()
+    return undo_event(c, ev) if ev else None
 
 
 def queue(c, limit=100, offset=0):
@@ -211,7 +269,7 @@ def queue(c, limit=100, offset=0):
     return [dict(r) for r in c.execute('''SELECT i.*,t.state triage_state,t.rescued_at,
         (SELECT code FROM item_codes k WHERE k.item_id=i.item_id) code
         FROM triage t JOIN items i ON i.item_id=t.item_id
-        WHERE t.state='new' AND t.backlog=0
+        WHERE t.state='new' AND t.backlog=0 AND i.status='active'
         ORDER BY t.rescued_at IS NULL, t.rescued_at DESC, i.first_seen DESC, i.item_id
         LIMIT ? OFFSET ?''', (limit, offset))]
 
@@ -243,12 +301,20 @@ def run(path, fn, attempts=5):
             c.close()
 
 
+MIN = datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _ts(value):
+    """解析 ISO 时间；空值或无法解析返回 None。"""
     try:
         t = datetime.fromisoformat(value)
         return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return None
+
+
+def _key(value):
+    return _ts(value) or MIN
 
 
 def migrate(c, at=None):
@@ -263,10 +329,18 @@ def migrate(c, at=None):
         at = at or now()
         c.execute("INSERT INTO kv VALUES('triage_migrated_at',?)", (at,))
     at = _ts(at)
+    if at is None:
+        raise TriageError('迁移时刻无效')
     cutoff = at.timestamp() - BACKLOG_DAYS * 86400
     ev0 = c.execute('SELECT count(*) FROM triage_events').fetchone()[0]
     code0 = c.execute('SELECT count(*) FROM item_codes').fetchone()[0]
-    human = {r[0] for r in c.execute("SELECT DISTINCT item_id FROM triage_events WHERE actor='human'")}
+    # 早期迁移的市场去掉补上来源标记，供「取消无关」识别。
+    c.execute("""UPDATE triage_events SET source='market' WHERE action='migrate' AND source IS NULL AND EXISTS(
+        SELECT 1 FROM market_decisions md WHERE md.item_id=triage_events.item_id AND md.updated_at=triage_events.at AND md.irrelevant=1)""")
+    last_human = {}
+    for r in c.execute("SELECT item_id,at FROM triage_events WHERE actor='human'"):
+        t = _ts(r[1])
+        last_human[r[0]] = max(filter(None, [last_human.get(r[0]), t]), default=None)
     latest = {}
     for r in c.execute('SELECT * FROM cases ORDER BY id'):
         latest[r['item_id']] = r
@@ -276,18 +350,25 @@ def migrate(c, at=None):
     for iid in set(latest) | set(market):
         case, md = latest.get(iid), market.get(iid)
         pick = None
-        if md and (case is None or _ts(md['updated_at']) >= _ts(case['decided_at'])) and md['irrelevant'] == 1:
-            pick = ('removed', md['updated_at'], md['reason'] or '无关', None)
+        if md and (case is None or _key(md['updated_at']) >= _key(case['decided_at'])):
+            # 市场页的决定较新：无关 → 去掉；取消无关 → 没有人工决定。
+            if md['irrelevant'] == 1:
+                pick = ('removed', md['updated_at'], md['reason'] or '无关', None, 'market')
         elif case is not None:
             target = dict(want='kept', probe='new', skip='removed', irrelevant='removed').get(case['decision'])
             if target:
-                pick = (target, case['decided_at'], case['reason'], case)
+                pick = (target, case['decided_at'], case['reason'], case, 'cases')
         if pick:
-            decisions.append((pick[1] or '', iid, pick))
-    decisions.sort()
-    for _, iid, (target, when, reason, case) in decisions:
-        if iid in human or not c.execute('SELECT 1 FROM items WHERE item_id=?', (iid,)).fetchone():
+            decisions.append((_key(pick[1]), iid, pick))
+    decisions.sort(key=lambda d: (d[0], d[1]))
+    for _, iid, (target, when, reason, case, source) in decisions:
+        if not c.execute('SELECT 1 FROM items WHERE item_id=?', (iid,)).fetchone():
             continue
+        if iid in last_human:
+            # 已有人工事件：只应用比最近一次人工事件更新的决定（如之后再导入的记录），保持幂等。
+            seen, t = last_human[iid], _ts(when)
+            if t is None or (seen is not None and t <= seen):
+                continue
         item = _item(c, iid)
         cur = _row(c, iid, item)
         snap = dict(item)
@@ -295,14 +376,15 @@ def migrate(c, at=None):
             snap.update(agent_decision=case['agent_decision'], rule_version=case['rule_version'])
         if target == 'kept':
             _assign_code(c, iid, when)
-        c.execute('UPDATE triage SET state=?,updated_at=? WHERE item_id=?', (target, when or now(), iid))
-        _event(c, iid, cur, target, 'migrate', 'human', snap, reason, at=when or now())
-        human.add(iid)
+        c.execute('UPDATE triage SET state=?,updated_at=?,backlog=0 WHERE item_id=?', (target, when or now(), iid))
+        _event(c, iid, cur, target, 'migrate', 'human', snap, reason, at=when or now(), source=source)
+        last_human[iid] = _ts(when)
     # 其余货：补齐系统落位；未经人工、迁移前 7 天以上的新货进 backlog。
     for item in c.execute('SELECT i.* FROM items i LEFT JOIN triage t ON t.item_id=i.item_id WHERE t.item_id IS NULL').fetchall():
         _row(c, item['item_id'], item)
     for r in c.execute("SELECT t.item_id,i.first_seen FROM triage t JOIN items i ON i.item_id=t.item_id WHERE t.state='new' AND t.backlog=0 AND t.rescued_at IS NULL").fetchall():
-        if r['item_id'] not in human and _ts(r['first_seen']).timestamp() < cutoff:
+        seen = _ts(r['first_seen'])
+        if r['item_id'] not in last_human and seen is not None and seen.timestamp() < cutoff:
             c.execute('UPDATE triage SET backlog=1 WHERE item_id=?', (r['item_id'],))
     return dict(events=c.execute('SELECT count(*) FROM triage_events').fetchone()[0] - ev0,
                 codes=c.execute('SELECT count(*) FROM item_codes').fetchone()[0] - code0)
