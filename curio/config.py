@@ -14,7 +14,8 @@ def load(root=ROOT):
     defaults.update(settings)
     # AD-27：每平台每日接口调用预算；缺省项用默认值，未知平台或非法数值直接报错。
     from .schedule import DEFAULT_BUDGET
-    budget=settings.get('api_budget') or {}
+    budget=settings.get('api_budget')
+    if budget is None:budget={}
     if not isinstance(budget,dict):raise ValueError('api_budget 必须为 平台: 次数 的映射')
     unknown=set(budget)-set(DEFAULT_BUDGET)
     if unknown:raise ValueError('api_budget 含未知平台：'+','.join(sorted(map(str,unknown))))

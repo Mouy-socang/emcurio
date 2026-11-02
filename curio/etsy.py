@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from .curio_monitor import CollectionError
+from .errors import CollectionError
 from .schedule import BudgetExhausted
 
 API = 'https://openapi.etsy.com/v3/application'
@@ -74,6 +74,8 @@ class EtsyAPI:
                 data = r.json()
             except ValueError:
                 raise CollectionError('Etsy 响应无效') from None
+            if not isinstance(data, dict):
+                raise CollectionError('Etsy 响应无效')
             self._header = header
             return data
         if auth_failed:
@@ -138,73 +140,92 @@ def parse(listing, keyword):
 def fetch_batch(api, ids):
     """按 listing_id 批量取详情（含图片和状态），每批最多 100。
 
-    返回 ({listing_id: listing}, error)：某一批失败时停止，error 为该异常，
-    已取到的批次照常返回——调用方只能对返回里出现的编号下结论。
+    返回 ({listing_id: listing}, error, done)：某一批失败时停止，error 为该异常，
+    done 是请求成功的批次里的编号——调用方只能对 done 里的编号下结论。
     """
-    out = {}
+    out, done = {}, set()
     ids = [str(i) for i in ids]
     for i in range(0, len(ids), BATCH):
         chunk = ids[i:i + BATCH]
         try:
             data = api.get('/listings/batch', {'listing_ids': ','.join(chunk), 'includes': 'Images'})
         except (CollectionError, BudgetExhausted) as error:
-            return out, error
+            return out, error, done
+        done.update(chunk)
         for listing in data.get('results') or []:
-            out[str(listing.get('listing_id'))] = listing
-    return out, None
+            if isinstance(listing, dict):
+                out[str(listing.get('listing_id'))] = listing
+    return out, None, done
 
 
 def collect_etsy(store, api, config, max_per_keyword=MAX_PER_KEYWORD):
     """按最新上架翻页；一页全是已知货即停（续上架的旧货不会挡住后面的新货）。只为新货补取图片。"""
     known = store.known()
-    added = 0
+    added, failures = 0, []
     for keyword in config['keywords']:
-        fresh, offset = [], 0
-        while offset < max_per_keyword:
-            limit = min(100, max_per_keyword - offset)
-            data = api.get('/listings/active', {'keywords': keyword, 'limit': limit, 'offset': offset,
-                                                'sort_on': 'created', 'sort_order': 'desc'})
-            batch = data.get('results') or []
-            seen = {str(l['listing_id']) for l in fresh}
-            unseen = [l for l in batch if f"etsy:{l['listing_id']}" not in known and str(l['listing_id']) not in seen]
-            fresh.extend(unseen)
-            if not unseen or len(batch) < limit:
-                break
-            offset += len(batch)
-        if not fresh:
+        # 一个关键词失败不挡后面的关键词；预算用完则整轮停。
+        try:
+            added += _collect_keyword(store, api, config, keyword, known, max_per_keyword)
+        except CollectionError as error:
+            failures.append(f'{keyword}: {error}')
+    if failures:
+        raise CollectionError('Etsy 部分关键词未完成：' + '；'.join(failures))
+    return added
+
+
+def _collect_keyword(store, api, config, keyword, known, max_per_keyword):
+    added = 0
+    fresh, offset = [], 0
+    while offset < max_per_keyword:
+        limit = min(100, max_per_keyword - offset)
+        data = api.get('/listings/active', {'keywords': keyword, 'limit': limit, 'offset': offset,
+                                            'sort_on': 'created', 'sort_order': 'desc'})
+        batch = data.get('results') or []
+        seen = {str(l['listing_id']) for l in fresh}
+        unseen = [l for l in batch if f"etsy:{l['listing_id']}" not in known and str(l['listing_id']) not in seen]
+        fresh.extend(unseen)
+        if not unseen or len(batch) < limit:
+            break
+        offset += len(batch)
+    if not fresh:
+        return 0
+    # 搜索结果不带图片 → 批量补；补图失败的货本轮不入库，下一轮仍是新货会重试。
+    detail, error, _ = fetch_batch(api, [l['listing_id'] for l in fresh])
+    for listing in fresh:
+        d = detail.get(str(listing['listing_id']))
+        if d is None:
             continue
-        # 搜索结果不带图片 → 批量补；补图失败的货本轮不入库，下一轮仍是新货会重试。
-        detail, error = fetch_batch(api, [l['listing_id'] for l in fresh])
-        for listing in fresh:
-            d = detail.get(str(listing['listing_id']))
-            if d is None:
-                continue
-            listing['images'] = d.get('images') or []
-            row = parse(listing, keyword)
-            if store.ingest(row, config) == 'new':
-                added += 1
-            known.add(row['item_id'])
-        if error is not None:
-            raise error
+        listing['images'] = d.get('images') or []
+        row = parse(listing, keyword)
+        if store.ingest(row, config) == 'new':
+            added += 1
+        known.add(row['item_id'])
+    if error is not None:
+        raise error
     return added
 
 
 def judge_listings(api, item_ids):
     """在售检查：批量查 Etsy 详情。返回 ({item_id: (outcome, evidence, listing)}, error)。
 
-    未取到详情的编号（批次失败、或响应里没有它）判为 error、保持原状态，绝不判下架。
+    outcome：active / gone / unknown（请求成功但响应里没有该货或没有 state，保持原状态）/
+    skipped（所在批次没请求成功或没轮到，未检查，不应写检查记录）。绝不对没拿到详情的货判下架。
     """
     ids = [iid.split(':', 1)[1] for iid in item_ids]
-    detail, error = fetch_batch(api, ids)
+    detail, error, done = fetch_batch(api, ids)
     out = {}
     for iid, lid in zip(item_ids, ids):
         listing = detail.get(lid)
-        if listing is None:
-            out[iid] = ('error', 'Etsy detail not fetched; state retained', None)
+        if lid not in done:
+            out[iid] = ('skipped', 'batch not fetched', None)
+        elif listing is None:
+            out[iid] = ('unknown', 'Etsy detail not returned; state retained', None)
+        elif not listing.get('state'):
+            out[iid] = ('unknown', 'Etsy state missing; state retained', None)
         elif listing.get('state') != 'active':
             out[iid] = ('gone', f"Etsy state={listing.get('state')}; sale unknown", listing)
         elif (q := _quantity(listing)) is not None and q <= 0:
-            out[iid] = ('gone', 'Etsy quantity 0; sold out', listing)
+            out[iid] = ('gone', 'Etsy quantity 0; unavailable, sale unknown', listing)
         else:
             out[iid] = ('active', 'Etsy listing active', listing)
     return out, error

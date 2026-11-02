@@ -6,7 +6,8 @@ from unittest.mock import Mock,patch
 import pytest
 import requests
 from curio.config import load,etsy_credentials
-from curio.curio_monitor import CollectionError,check_existing
+from curio.errors import CollectionError
+from curio.curio_monitor import check_existing
 from curio.etsy import EtsyAPI,collect_etsy,parse,judge_listings
 from curio.schedule import BERLIN,Budget
 from curio.store import Store
@@ -82,7 +83,8 @@ def test_price_change_recorded(db,cfg):
     (listing(1,quantity=None),'active'),            # 库存未知 ≠ 0
     (listing(1,quantity=2),'active'),
     (listing(1,state='sold_out'),'gone'),
-    (listing(1,state='inactive'),'gone')])
+    (listing(1,state='inactive'),'gone'),
+    ({k:v for k,v in listing(1).items() if k!='state'},'unknown')])   # 没有 state：保持原状态
 def test_judge_quantity_and_state(detail,outcome):
     verdicts,error=judge_listings(FakeEtsy(details={'1':detail}),['etsy:1'])
     assert error is None and verdicts['etsy:1'][0]==outcome
@@ -95,16 +97,15 @@ def test_check_partial_batch_failure_keeps_rest(db,cfg):
     details={str(i):listing(i,quantity=0 if i%2 else 1) for i in range(1,151)}
     etsy=FakeEtsy(details=details,fail_batch=2)
     summary=check_existing(db,None,dict(cfg,kleinanzeigen_enabled=False),None,etsy)
-    assert etsy.batches==2 and summary['attempted']==150 and summary['etsy_error']
+    assert etsy.batches==2 and summary['attempted']==100 and summary['etsy_error']
+    assert summary['gone']==50 and summary['active']==50 and summary['errors']==0
     with db.connect() as c:
-        rows=c.execute("SELECT item_id,status FROM items WHERE platform='etsy'").fetchall()
+        status=dict(c.execute("SELECT item_id,status FROM items WHERE platform='etsy'").fetchall())
         events=dict(c.execute("SELECT item_id,outcome FROM status_check_events").fetchall())
-    status={r[0]:r[1] for r in rows}
-    fetched=[k for k,v in events.items() if v!='error']
-    assert len(fetched)==100 and summary['gone']==50 and summary['active']==50 and summary['errors']==50
-    for iid,outcome in events.items():
-        if outcome=='error':assert status[iid]=='active'          # 未取到详情：保持原状态
-        else:assert status[iid]==('gone' if outcome=='gone' else 'active')
+    assert len(events)==100                                   # 失败批次的货不写检查记录，保持轮换位置
+    for iid,state in status.items():
+        if iid not in events:assert state=='active'           # 未取到详情：保持原状态
+        else:assert state==('gone' if events[iid]=='gone' else 'active')
 
 def test_check_sold_out_marked_gone(db,cfg):
     seed(db,cfg,1)
@@ -203,7 +204,8 @@ def test_etsy_disabled_or_403_does_not_block_others(tmp_path,etsy_env):
          patch('curio.etsy.requests.Session',return_value=session),patch('curio.etsy.time.sleep'):
         result=run(tmp_path,lambda:NOON)
     assert result['etsy_status']==('error' if etsy_env else 'disabled')
-    if etsy_env:assert '鉴权失败' in result['etsy'] and result['api_usage']['etsy']['fetch']==2
+    # 每个关键词各试两种 key 写法：2 × 2 次请求；一个关键词失败不挡下一个。
+    if etsy_env:assert '鉴权失败' in result['etsy'] and result['api_usage']['etsy']['fetch']==4
     assert result['ebay_status']=='ok' and result['kleinanzeigen_status']=='ok'
     assert result['ebay_new']==1 and result['kleinanzeigen_new']==1
 
@@ -214,3 +216,52 @@ def test_placeholder_secret_skipped(db):
     assert [c.kwargs['headers']['x-api-key'] for c in session.get.call_args_list]==['KEY']
     with pytest.raises(CollectionError) as error:EtsyAPI('钥匙 x','',None,session).get('/a',{})
     assert '格式无效' in str(error.value)
+
+def test_judge_quantity_zero_evidence():
+    verdicts,_=judge_listings(FakeEtsy(details={'1':listing(1,quantity=0)}),['etsy:1'])
+    assert verdicts['etsy:1'][1]=='Etsy quantity 0; unavailable, sale unknown'
+
+def test_check_missing_state_kept(db,cfg):
+    seed(db,cfg,1)
+    summary=check_existing(db,None,dict(cfg,kleinanzeigen_enabled=False),None,FakeEtsy(details={'1':{'listing_id':1,'quantity':0}}))
+    assert summary['unknown']==1 and summary['gone']==0
+    with db.connect() as c:assert c.execute("SELECT status FROM items WHERE item_id='etsy:1'").fetchone()[0]=='active'
+
+def test_check_active_new_price_updates(db,cfg):
+    seed(db,cfg,1)
+    check_existing(db,None,dict(cfg,kleinanzeigen_enabled=False),None,FakeEtsy(details={'1':listing(1,price=2500)}))
+    with db.connect() as c:
+        assert c.execute("SELECT listed_price FROM items WHERE item_id='etsy:1'").fetchone()[0]==25.0
+        assert [r[0] for r in c.execute("SELECT price FROM price_history WHERE item_id='etsy:1' ORDER BY rowid")]==[40.0,25.0]
+
+def test_non_object_json_is_collection_error():
+    session=Mock();session.get.return_value=response(200,['not','a','dict'])
+    with pytest.raises(CollectionError) as error:EtsyAPI('k','s',None,session).get('/a',{})
+    assert '响应无效' in str(error.value)
+
+def test_one_keyword_failure_does_not_stop_next(db):
+    cfg=dict(load(),keywords=['Meissen','KPM Berlin'])
+    items=[listing(5)]
+    class Api(FakeEtsy):
+        def get(self,path,params):
+            if path=='/listings/active' and params['keywords']=='Meissen':raise CollectionError('Etsy 网络请求失败')
+            return super().get(path,params)
+    with pytest.raises(CollectionError) as error:collect_etsy(db,Api(items,{'5':items[0]}),cfg)
+    assert 'Meissen' in str(error.value) and 'etsy:5' in db.known()
+
+def test_unexpected_etsy_check_error_does_not_stop_other_platforms(db,cfg):
+    seed(db,cfg,1)
+    db.ingest({'item_id':'e1','platform':'ebay','title':'Meissen Tasse','price':40,'currency':'EUR'},cfg)
+    etsy=Mock();etsy.get.side_effect=RuntimeError('boom')
+    api=Mock();api.detail.return_value=None
+    summary=check_existing(db,api,dict(cfg,kleinanzeigen_enabled=False),None,etsy)
+    assert summary['etsy_error'] and summary['gone']==1 and api.detail.called
+
+def test_collection_error_is_single_class_under_module_entry():
+    """launchd 以 `python -m curio.curio_monitor` 运行，模块代码在新命名空间里执行；
+    其中的 CollectionError 必须与 etsy 抛出的是同一个类，run() 的 except 才接得住。"""
+    import subprocess,sys
+    probe=("import runpy,curio.etsy as e;"
+           "ns=runpy.run_module('curio.curio_monitor',run_name='probe');"
+           "assert ns['CollectionError'] is e.CollectionError")
+    subprocess.run([sys.executable,'-c',probe],cwd=ROOT,check=True)

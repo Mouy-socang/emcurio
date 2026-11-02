@@ -201,3 +201,138 @@ def test_status_check_skips_exhausted_platform(db):
     summary=check_existing(db,api,dict(cfg,kleinanzeigen_enabled=False),b)
     api.detail.assert_not_called()
     assert summary['budget_exhausted']==['ebay'] and summary['attempted']==0
+
+# ---- 评审补充 ----
+
+from curio.schedule import check_rounds_left,KV_LAST_CHECK
+
+def test_wake_20s_early_counts_as_due(db):
+    clock=Clock(at(2,12));s=Scheduler(db,clock);db.set(KV_BASE,5);s.mark_fetch_started();s.mark_check_started()
+    clock.ts+=5*60-20;assert s.fetch_due()
+    clock.ts=at(2,12)+30*60-20;assert s.check_due()
+
+def test_clock_moved_back_is_due(db):
+    clock=Clock(at(2,12));s=Scheduler(db,clock);s.mark_fetch_started();s.mark_check_started()
+    clock.ts-=3600;assert s.fetch_due() and s.check_due()
+
+def test_corrupt_usage_counts_reset(db):
+    db.set('api_usage',json.dumps({'date':'2026-11-02','ebay':{'fetch':'lots','check':None},'etsy':{'fetch':3,'check':0}}))
+    b=Budget(db,{'ebay':10,'etsy':10,'kleinanzeigen':10},Clock(at(2,12)))
+    assert b.snapshot()['ebay']['used']==0 and b.snapshot()['etsy']['used']==3
+    b.spend('ebay','fetch')
+
+@pytest.mark.parametrize('value',[[],0,'',False])
+def test_falsy_non_mapping_budget_rejected(tmp_path,value):
+    shutil.copytree(ROOT/'config',tmp_path/'config')
+    settings=yaml.safe_load((tmp_path/'config/settings.yaml').read_text());settings['api_budget']=value
+    (tmp_path/'config/settings.yaml').write_text(yaml.safe_dump(settings))
+    with pytest.raises(ValueError):load(tmp_path)
+
+def test_check_rounds_left():
+    assert check_rounds_left(at(2,12))==24 and check_rounds_left(at(2,23,50))==1
+
+def statuses(root):
+    with Store(root/'data/curio.db').connect() as c:return [r[0] for r in c.execute('SELECT status FROM collection_runs ORDER BY id')]
+
+def test_run_status_ok_for_check_only_and_etsy_disabled(root):
+    clock=Clock(at(2,12));run_with(root,clock)
+    Store(root/'data/curio.db').set(KV_BASE,60);clock.ts+=30*60;run_with(root,clock)
+    assert statuses(root)==['ok','ok']
+
+@pytest.mark.parametrize('case',['etsy_error','ebay_budget'])
+def test_run_status_partial(root,case):
+    store=Store(root/'data/curio.db')
+    if case=='etsy_error':
+        with open(root/'.env','a') as f:f.write('ETSY_API_KEY=k\n')
+        with patch('curio.etsy.collect_etsy',side_effect=__import__('curio.errors').errors.CollectionError('x')):
+            result,*_=run_with(root,Clock(at(2,12)))
+        assert result['etsy_status']=='error'
+    else:
+        store.set('api_usage',json.dumps({'date':'2026-11-02','ebay':{'fetch':2700,'check':0}}))
+        result,*_=run_with(root,Clock(at(2,12)))
+        assert result['ebay_status']=='budget_exhausted'
+    assert statuses(root)==['partial']
+
+def test_no_ok_platform_keeps_interval(root):
+    from curio.curio_monitor import run
+    store=Store(root/'data/curio.db');store.set(KV_BASE,20)
+    def ka(store,config,budget=None):store.set('ka_status','paused')
+    with patch('curio.curio_monitor.collect_ebay',side_effect=RuntimeError('down')),\
+         patch('curio.curio_monitor.collect_ka',side_effect=ka),\
+         patch('curio.curio_monitor.check_existing',return_value={'errors':0}):
+        result=run(root,Clock(at(2,12)))
+    assert result['ebay_status']=='error' and result['fetch_base_interval_min']==20
+
+def test_check_only_without_ebay_credentials_is_error(root):
+    clock=Clock(at(2,12));run_with(root,clock)
+    Store(root/'data/curio.db').set(KV_BASE,60);(root/'.env').write_text('')
+    clock.ts+=30*60
+    result,*_=run_with(root,clock)
+    assert not result['fetch_ran'] and result['ebay_status']=='error' and statuses(root)[-1]=='partial'
+
+def test_ebay_token_cached_until_60s_before_expiry(tmp_path,db):
+    from curio.curio_monitor import EbayAPI
+    (tmp_path/'.env').write_text('EBAY_CLIENT_ID=dummy\nEBAY_CLIENT_SECRET=dummy\n')
+    ok=lambda data:Mock(status_code=200,json=lambda:data)
+    b=Budget(db,{'ebay':100,'etsy':10,'kleinanzeigen':10},Clock(at(2,12)))
+    first=EbayAPI(tmp_path,b,db);first.session=Mock()
+    first.session.request.side_effect=[ok({'access_token':'t1','expires_in':7200}),ok({'itemSummaries':[]})]
+    first.search('Meissen',0,200)
+    second=EbayAPI(tmp_path,b,db);second.session=Mock();second.session.request.return_value=ok({'itemSummaries':[]})
+    second.search('Meissen',0,200)
+    assert second.session.request.call_count==1 and b.snapshot()['ebay']['used']==3   # 第二次不再换令牌
+    db.set('ebay_oauth',json.dumps({'token':'t1','expires_at':__import__('time').time()+30}))
+    third=EbayAPI(tmp_path,b,db);assert third.token is None                               # 60 秒内到期：重换
+
+def items_for(db,cfg):
+    from curio.etsy import parse as etsy_parse
+    for i in range(3):
+        db.ingest({'item_id':f'e{i}','platform':'ebay','title':'Meissen Tasse','price':40,'currency':'EUR','url':'u'},cfg)
+        db.ingest({'item_id':f'ka:{i}','platform':'kleinanzeigen','title':'Meissen Tasse','price':40,'currency':'EUR','url':f'https://www.kleinanzeigen.de/s-anzeige/x/{i}'},cfg)
+        db.ingest(etsy_parse({'listing_id':i,'title':'Meissen Tasse','price':{'amount':4000,'divisor':100,'currency_code':'EUR'}},''),cfg)
+
+def test_checks_spend_check_share_after_fetch_share_used(tmp_path,db):
+    from curio.curio_monitor import EbayAPI,check_existing
+    from curio.etsy import EtsyAPI
+    cfg=load();items_for(db,cfg)
+    b=Budget(db,{'ebay':1000,'etsy':1000,'kleinanzeigen':1000},Clock(at(2,12)))
+    for p in ('ebay','etsy','kleinanzeigen'):
+        for _ in range(600):b.spend(p,'fetch')
+        assert not b.available(p,'fetch')
+    (tmp_path/'.env').write_text('EBAY_CLIENT_ID=dummy\nEBAY_CLIENT_SECRET=dummy\n')
+    ebay=EbayAPI(tmp_path,b,db);ebay.session=Mock()
+    ebay.session.request.side_effect=[Mock(status_code=200,json=lambda:{'access_token':'t','expires_in':7200})]+[Mock(status_code=404)]*3
+    session=Mock();session.get.return_value=Mock(status_code=200,json=lambda:{'results':[{'listing_id':i,'state':'removed'} for i in range(3)]})
+    etsy=EtsyAPI('k','',b,session)
+    page='<div id="viewad-price">40 €</div>'
+    with patch('curio.curio_monitor.ka_curl',side_effect=lambda url:(200,page,url,None)):
+        summary=check_existing(db,ebay,cfg,b,etsy)
+    snap=b.snapshot()
+    assert snap['ebay']['check']==4 and snap['etsy']['check']==1 and snap['kleinanzeigen']['check']==3
+    assert summary['gone']==6 and summary['active']==3 and summary['errors']==0
+
+def test_budget_runs_out_mid_check_round(db):
+    from curio.curio_monitor import check_existing
+    cfg=load()
+    for i in range(5):db.ingest({'item_id':f'e{i}','platform':'ebay','title':'Meissen Tasse','price':40,'currency':'EUR'},cfg)
+    # 23:50 只剩 1 轮检查，份额 = 剩余预算 3；每次检查要 2 个请求（换令牌 + 详情），第 2 件查到一半预算用完。
+    b=Budget(db,{'ebay':3,'etsy':0,'kleinanzeigen':0},Clock(at(2,23,50)))
+    api=Mock()
+    def detail(iid):b.spend('ebay','check');b.spend('ebay','check');return None
+    api.detail.side_effect=detail
+    summary=check_existing(db,api,dict(cfg,kleinanzeigen_enabled=False),b)
+    assert summary['budget_exhausted']==['ebay'] and summary['errors']==0
+    assert summary['gone']==1 and summary['budget_skipped']==1 and summary['attempted']==1
+    assert api.detail.call_count==2                          # 之后的货不再尝试
+    with db.connect() as c:
+        assert c.execute("SELECT count(*) FROM status_check_events").fetchone()[0]==1
+        assert c.execute("SELECT count(*) FROM items WHERE status='active'").fetchone()[0]==4
+
+def test_check_share_spread_over_day(db):
+    from curio.curio_monitor import check_existing
+    cfg=load()
+    for i in range(60):db.ingest({'item_id':f'e{i}','platform':'ebay','title':'Meissen Tasse','price':40,'currency':'EUR'},cfg)
+    b=Budget(db,{'ebay':1200,'etsy':0,'kleinanzeigen':0},Clock(at(2,12)))   # 剩余 1200 ÷ 24 轮 = 50
+    api=Mock();api.detail.return_value=None
+    summary=check_existing(db,api,dict(cfg,kleinanzeigen_enabled=False),b)
+    assert summary['attempted']==50 and api.detail.call_count==50

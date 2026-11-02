@@ -2,6 +2,7 @@
 import base64, html, re, subprocess, time, urllib.parse, json
 from datetime import datetime, timezone, timedelta
 import requests
+from .errors import CollectionError
 KA_UA = "Curio/1.0"
 def parse(it, search_name):
     price = it.get("currentBidPrice") or it.get("price") or {}
@@ -128,16 +129,22 @@ def fetch_kleinanzeigen(keyword, page=1):
         })
     return (items, None) if items else (None, "搜索页结构变化，未能解析商品")
 
-class CollectionError(Exception):
-    """Sanitized error: response bodies, headers and credentials are never exposed."""
 
 class EbayAPI:
-    def __init__(self,root,budget=None):
+    def __init__(self,root,budget=None,store=None):
         from .config import credentials
         self.client_id,self.secret=credentials(root)
         self.session=requests.Session();self.token=None
         # AD-27：每个外部请求（含 OAuth）先计入当日预算；purpose 为 fetch（新货）或 check（在售检查）。
         self.budget=budget;self.purpose='fetch'
+        # OAuth 令牌缓存在 kv（ebay_oauth），到期前 60 秒内都复用，避免每次唤醒都换令牌。
+        self.store=store;self._cached=False
+        if store is not None:
+            try:
+                cache=json.loads(store.get('ebay_oauth') or '{}')
+                if cache.get('token') and float(cache.get('expires_at',0))-60>time.time():
+                    self.token=cache['token'];self._cached=True
+            except (ValueError,TypeError,AttributeError):pass
     def _request(self,method,url,**kwargs):
         if self.budget is not None:self.budget.spend('ebay',self.purpose)
         try:return self.session.request(method,url,timeout=30,**kwargs)
@@ -146,12 +153,21 @@ class EbayAPI:
         r=self._request('POST','https://api.ebay.com/identity/v1/oauth2/token',
             auth=(self.client_id,self.secret),data={'grant_type':'client_credentials','scope':'https://api.ebay.com/oauth/api_scope'})
         if r.status_code!=200:raise CollectionError('eBay 授权失败，请检查本地凭据')
-        try:self.token=r.json()['access_token']
-        except (ValueError,KeyError):raise CollectionError('eBay 授权响应无效') from None
+        try:
+            data=r.json();self.token=data['access_token'];expires=float(data.get('expires_in',7200))
+        except (ValueError,KeyError,TypeError):raise CollectionError('eBay 授权响应无效') from None
+        self._cached=False
+        if self.store is not None:
+            self.store.set('ebay_oauth',json.dumps({'token':self.token,'expires_at':time.time()+expires}))
     def get(self,path,params=None):
         if not self.token:self._authorize()
         r=self._request('GET','https://api.ebay.com/buy/browse/v1/'+path,
             headers={'Authorization':'Bearer '+self.token,'X-EBAY-C-MARKETPLACE-ID':'EBAY_DE'},params=params)
+        if r.status_code==401 and self._cached:
+            # 缓存的令牌被提前作废：换一次新令牌再试。
+            self._authorize()
+            r=self._request('GET','https://api.ebay.com/buy/browse/v1/'+path,
+                headers={'Authorization':'Bearer '+self.token,'X-EBAY-C-MARKETPLACE-ID':'EBAY_DE'},params=params)
         if r.status_code in (404,410):return None
         if r.status_code!=200:raise CollectionError('eBay 请求失败，HTTP '+str(r.status_code))
         try:return r.json()
@@ -242,10 +258,13 @@ def collect_ka(store,config,budget=None):
 def check_existing(store,api,config,budget=None,etsy=None):
     """Rotate independently of search ingestion; retain failures as unknown.
 
-    每平台平分 status_check_limit；Etsy 按 100 个编号一批查询。预算用完的平台本轮跳过并写入 budget_exhausted。"""
+    每轮上限 status_check_limit 在还有检查预算的平台间平分；有预算时每平台本轮份额再不超过
+    "剩余检查预算 ÷ 到柏林午夜还剩的检查轮数"（至少 1），让检查份额撑满一整天。Etsy 按 100 个编号一批查询。
+    预算用完而没发出的检查不写检查记录、不算错误，计入 budget_skipped。"""
     from .store import now
-    from .schedule import BudgetExhausted
-    summary=dict(attempted=0,active=0,gone=0,errors=0,paused=0)
+    from .schedule import BudgetExhausted,check_rounds_left
+    from .etsy import BATCH
+    summary=dict(attempted=0,active=0,gone=0,errors=0,paused=0,unknown=0,budget_skipped=0)
     exhausted=set()
     for client in (api,etsy):
         if client is not None:client.purpose='check'
@@ -263,34 +282,43 @@ def check_existing(store,api,config,budget=None,etsy=None):
           CASE WHEN i.agent_decision IN ('want','probe') AND NOT EXISTS(SELECT 1 FROM market_decisions m WHERE m.item_id=i.item_id AND m.irrelevant=1) THEN 0 ELSE 1 END,
           i.checked_at,i.item_id""")]
     ka_usable=config['kleinanzeigen_enabled'] and time.time()>=float(store.get('ka_pause_until','0'))
-    usable=[p for p,ok in (('ebay',api is not None),('kleinanzeigen',ka_usable),('etsy',etsy is not None)) if ok]
-    limit=config['status_check_limit'];per_platform=max(1,-(-limit//max(1,len(usable))));used={};started=time.monotonic()
-    if etsy is not None and limit>0:
-        picks=[r for r in rows if r['platform']=='etsy'][:min(per_platform,limit)]
-        if picks and budget is not None and not budget.available('etsy','check'):
-            exhausted.add('etsy');picks=[]
-        if picks:
+    candidates=[p for p,ok in (('ebay',api is not None),('kleinanzeigen',ka_usable),('etsy',etsy is not None)) if ok]
+    if budget is not None:exhausted.update(p for p in candidates if not budget.available(p,'check'))
+    usable=[p for p in candidates if p not in exhausted]
+    limit=config['status_check_limit'];base=max(1,-(-limit//max(1,len(usable))))
+    share={}
+    for p in usable:
+        share[p]=base
+        if budget is not None:
+            per_round=max(1,budget.check_remaining(p)//check_rounds_left(budget.clock()))
+            share[p]=min(base,per_round*BATCH if p=='etsy' else per_round)
+    used={};started=time.monotonic()
+    if 'etsy' in share and limit>0:
+        try:
             from .etsy import judge_listings,parse as etsy_parse
-            verdicts,error=judge_listings(etsy,[r['item_id'] for r in picks])
+            picks=[r for r in rows if r['platform']=='etsy'][:min(share['etsy'],limit)]
+            verdicts,error=judge_listings(etsy,[r['item_id'] for r in picks]) if picks else ({},None)
             if isinstance(error,BudgetExhausted):exhausted.add('etsy')
             elif error is not None:summary['etsy_error']=str(error)
             for row in picks:
                 outcome,evidence,listing=verdicts[row['item_id']]
+                if outcome=='skipped':
+                    # 所在批次没查成：不写检查记录，保持原状态与轮换位置。
+                    if isinstance(error,BudgetExhausted):summary['budget_skipped']+=1
+                    continue
                 summary['attempted']+=1;used['etsy']=used.get('etsy',0)+1
                 try:
                     if outcome=='gone':store.mark_gone(row['item_id'])
                     elif outcome=='active':store.ingest(etsy_parse(listing,''),config)
                 except Exception:outcome,evidence='error','status update failed; state retained'
                 event(row['item_id'],'etsy',outcome,evidence)
+        except Exception:summary['etsy_error']='Etsy 在售检查未完成，将在后续轮次重试'
     for row in rows:
         if summary['attempted']>=limit or time.monotonic()-started>=240:break
         platform=row['platform']
-        if platform=='etsy' or platform in exhausted:continue
-        if used.get(platform,0)>=per_platform:continue
-        if platform=='ebay' and api is None:continue
-        if platform=='kleinanzeigen' and (not config['kleinanzeigen_enabled'] or time.time()<float(store.get('ka_pause_until','0'))):continue
-        if budget is not None and platform in ('ebay','kleinanzeigen') and not budget.available(platform,'check'):
-            exhausted.add(platform);continue
+        if platform=='etsy' or platform in exhausted or platform not in share:continue
+        if used.get(platform,0)>=share[platform]:continue
+        if platform=='kleinanzeigen' and time.time()<float(store.get('ka_pause_until','0')):continue
         summary['attempted']+=1;used[platform]=used.get(platform,0)+1
         outcome='error';evidence='status_unverified'
         try:
@@ -319,7 +347,9 @@ def check_existing(store,api,config,budget=None,etsy=None):
                     outcome='active';evidence='original listing HTTP 200; no unavailable marker'
             if outcome=='gone':store.mark_gone(row['item_id'])
         except BudgetExhausted:
-            exhausted.add(platform);outcome='error';evidence='daily API budget exhausted; state retained'
+            # 预算中途用完：这件没查，不写记录、不算错误，本平台本轮其余货也不再查。
+            exhausted.add(platform);summary['attempted']-=1;used[platform]-=1;summary['budget_skipped']+=1
+            continue
         except Exception:outcome='error';evidence='detail request failed; state retained'
         event(row['item_id'],platform,outcome,evidence)
     if exhausted:summary['budget_exhausted']=sorted(exhausted)
@@ -354,7 +384,7 @@ def run(root,clock=time.time):
             c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
               id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,status TEXT,result TEXT)''')
             run_id=c.execute('INSERT INTO collection_runs(started_at,status) VALUES(?,?)',(now(),'running')).lastrowid
-        try:api=EbayAPI(root,budget)
+        try:api=EbayAPI(root,budget,store)
         except Exception:api=None
         etsy_keys=etsy_credentials(root)
         etsy=EtsyAPI(*etsy_keys,budget=budget) if etsy_keys else None
@@ -387,9 +417,12 @@ def run(root,clock=time.time):
                 counts=dict(c.execute('SELECT platform,count(*) FROM items WHERE first_seen>=? GROUP BY platform',(fetch_started,)).fetchall())
             for platform in ('ebay','kleinanzeigen','etsy'):result[platform+'_new']=counts.get(platform,0)
             result['new_total']=sum(result[p+'_new'] for p in ('ebay','kleinanzeigen','etsy'))
-            sched.record_fetch(result['new_total'])
+            # 没有任何平台成功（都出错、暂停或预算用完）时不调间隔，免得把故障当成"没上新"。
+            if any(result.get(p+'_status')=='ok' for p in ('ebay','kleinanzeigen','etsy')):
+                sched.record_fetch(result['new_total'])
         else:
-            result['ebay_status']='not_due'
+            result['ebay_status']='not_due' if api is not None else 'error'
+            if api is None:result['ebay']='缺少 eBay 凭据：检查 .env'
             result['kleinanzeigen_status']='not_due' if config['kleinanzeigen_enabled'] else 'disabled'
             result['etsy_status']='not_due' if etsy is not None else 'disabled'
         if do_check:
@@ -401,7 +434,8 @@ def run(root,clock=time.time):
         store.set('last_collection_result',json.dumps(result,ensure_ascii=False))
         with store.connect() as c:
             ok=all(result.get(p+'_status') in FETCH_OK for p in ('ebay','kleinanzeigen','etsy'))
-            status='ok' if ok and 'status_checks' not in result and not result.get('status_check_summary',{}).get('errors') else 'partial'
+            summary=result.get('status_check_summary',{})
+            status='ok' if ok and 'status_checks' not in result and not summary.get('errors') and not summary.get('etsy_error') else 'partial'
             c.execute('UPDATE collection_runs SET finished_at=?,status=?,result=? WHERE id=?',
                       (now(),status,json.dumps(result,ensure_ascii=False),run_id))
         return result

@@ -6,7 +6,7 @@ launchd 每 5 分钟唤醒一次 `curio.curio_monitor`；本模块按 kv 里的�
 import json
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 BERLIN = ZoneInfo('Europe/Berlin')
@@ -62,8 +62,16 @@ def effective_interval(base, ts):
     return min(MAX_INTERVAL, base * 2) if is_night(ts) else base
 
 
+def check_rounds_left(ts):
+    """到柏林午夜（预算归零）前还剩几轮在售检查，至少 1。"""
+    now = berlin(ts)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(1, math.ceil((midnight - now).total_seconds() / (STATUS_CHECK_MINUTES * 60)))
+
+
 def _due(last, minutes, ts):
-    return last is None or ts - last >= minutes * 60 - JITTER_SECONDS
+    # 记录时间晚于现在（系统时钟被调回）时视为到期，避免抓取停摆。
+    return last is None or last > ts or ts - last >= minutes * 60 - JITTER_SECONDS
 
 
 class Scheduler:
@@ -151,7 +159,10 @@ class Budget:
             state = {'date': today}
         for p in PLATFORMS:
             counts = state.get(p) if isinstance(state.get(p), dict) else {}
-            state[p] = {k: int(counts.get(k, 0)) for k in self.PURPOSES}
+            try:
+                state[p] = {k: int(counts.get(k, 0)) for k in self.PURPOSES}
+            except (TypeError, ValueError):
+                state[p] = {k: 0 for k in self.PURPOSES}   # 计数损坏：该平台归零，不让每轮崩溃
         return state
 
     def limit(self, platform):
@@ -169,6 +180,10 @@ class Budget:
         if self._used(counts) >= self.limit(platform):
             return False
         return purpose != 'fetch' or counts['fetch'] < self.fetch_cap(platform)
+
+    def check_remaining(self, platform):
+        """在售检查当天还可用的请求数（可用到预算上限）。"""
+        return max(0, self.limit(platform) - self._used(self._load()[platform]))
 
     def available(self, platform, purpose):
         return self._allowed(self._load(), platform, purpose)
