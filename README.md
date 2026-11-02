@@ -76,17 +76,19 @@ launchctl bootout gui/$(id -u)/com.curiobject.collect
 
 安装文件：`~/Library/LaunchAgents/com.curiobject.collect.plist`。登录后加载；电脑关机或睡眠时不保证执行。不要移动本仓库和 `.venv`，移动后需重新运行 `uv sync` 与安装脚本。
 
-从旧任务切换（一次性）：
+从旧任务切换（一次性；已于 2026-11-02 完成，以下仅作记录）：
 
 ```sh
+cd ~/Desktop/curiobject
+mkdir -p data/launcher-backups
 launchctl bootout gui/$(id -u)/com.curio.collect.phase1
-launchctl bootout gui/$(id -u)/com.curio.visual.phase1   # 若已加载
+launchctl bootout gui/$(id -u)/com.curio.visual.phase1 || true   # 未加载时会报错，可忽略
 mv ~/Library/LaunchAgents/com.curio.*.phase1.plist data/launcher-backups/
 uv run python scripts/install_hourly.py
 launchctl kickstart gui/$(id -u)/com.curiobject.collect
 ```
 
-回退：`launchctl bootout gui/$(id -u)/com.curiobject.collect`，再把 `data/launcher-backups/com.curio.collect.phase1.plist` 放回 `~/Library/LaunchAgents/` 并 `launchctl bootstrap gui/$(id -u)` 该文件（原仓库与数据未被改动）。
+回退：`launchctl bootout gui/$(id -u)/com.curiobject.collect`，再把 `data/launcher-backups/com.curio.collect.phase1.plist` 放回 `~/Library/LaunchAgents/` 并 `launchctl bootstrap gui/$(id -u)` 该文件（原仓库只多了一次「合并前快照」提交，其数据只被读取、未被改动）。
 
 该任务只运行采集与规则判断，不负责启动审核网页。每轮结果、开始/结束时间存储在同一数据库的 `collection_runs` 和 `kv` 表。失败时不会把现有商品误标为已售；下一轮重试。Kleinanzeigen 被拦暂停2小时，会明确记录 paused，而不是当成“没有新货”。旧置顶广告不会导致整页新货漏抓；eBay 增量中断时保留原去重边界，重试会继续收取未完成的新货。
 
@@ -102,7 +104,7 @@ uv run pytest -q
 
 测试使用模拟API和临时数据库，不连接商品平台，不消耗模型额度。测试结果见 `VALIDATION.txt`。原仓库基线验收仍待拿到 main 和案例后运行；目标计数为店主「要」21件：6/15/0，店主「不要」289件：4/245/40，当前未验证。
 
-## 2026-10-05 本机部署结果
+## 2026-10-05 本机部署结果（历史记录（迁移前））
 
 已安装每小时任务 `com.curio.collect.phase1`。首次实采 eBay 新增1000、Kleinanzeigen新增509；随后通过 launchd 执行第二轮，两个平台均成功、新增均为0，确认已知编号不会重复入库。31个本地测试通过。新版 `.env` 已从桌面旧版安全配置，旧项目未修改。
 

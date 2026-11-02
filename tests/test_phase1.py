@@ -176,6 +176,10 @@ def test_hourly_launchd_configuration():
     assert data['RunAtLoad'] is False
     assert data['Label']=='com.curiobject.collect'
     assert data['StandardOutPath'].endswith('data/logs/collect.log')
+    assert data['StandardErrorPath'].endswith('data/logs/collect-error.log')
+    from scripts import desktop_background,install_hourly
+    assert desktop_background.LABEL==install_hourly.LABEL
+    assert desktop_background.PROJECT==install_hourly.ROOT
 
 @pytest.mark.parametrize('title',['Baugrundstück in Meißen','Terrassenplatten Meissen Beton 2.0','KPM Berlin Gutschein','Meissen Wohnung zu vermieten','Meissen Job Vollzeit'])
 def test_irrelevant_hidden_but_retained(db,cfg,title):

@@ -1,11 +1,14 @@
-"""Finder launcher: ensure the hourly collector is loaded, without opening a browser."""
+"""Finder 启动入口：确保每 30 分钟采集任务已加载，不打开浏览器。"""
 import fcntl
 import os
 from pathlib import Path
 import subprocess
+import sys
 
-PROJECT = Path(__file__).resolve().parents[1]
-LABEL = 'com.curiobject.collect'
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.install_hourly import LABEL, ROOT
+
+PROJECT = ROOT
 
 
 def start():
