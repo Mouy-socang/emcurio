@@ -215,11 +215,74 @@ def minutes(seconds):
     return max(1, math.ceil(seconds / 60))
 
 
+# ---------- 纯渲染入口（服务器路由与 Mac 预览共用，AD-28） ----------
+
+def make_env():
+    """客人页模板环境（server/templates）。Mac 预览经 server/preview.py 用同一个环境渲染。"""
+    env = Environment(loader=FileSystemLoader(str(TEMPLATES)), autoescape=select_autoescape(['html']))
+    env.globals.update(price_text=price_text, filter_href=filter_href)
+    return env
+
+
+def render_page(env, name, title, status=200, **ctx):
+    """返回 (status, html)。"""
+    return status, env.get_template(name).render(title=title, msg=MSG, **ctx)
+
+
+def pool_state(view, params):
+    options = snapshot.filter_options(view.pool)
+    chosen = chosen_filters(params, options)
+    shown = snapshot.apply_filters(view.pool, chosen)
+    return options, chosen, shown
+
+
+def home_page(env, view, params):
+    """首页：今日榜 + 全部藏品（筛选、首批卡片）。返回 (status, html)。"""
+    options, chosen, shown = pool_state(view, params)
+    n = _int(params.get('n'), PAGE_SIZE, PAGE_SIZE, MAX_SHOWN)
+    first = shown[:n]
+    labels = summary_labels(options, chosen)
+    more = filter_query(chosen)
+    more = (more + '&' if more else '') + f'n={len(first) + PAGE_SIZE}'
+    return render_page(env, 'home.html', '今日榜', view=view, rank=view.rank, pool_total=len(view.pool),
+                       options=options, chosen=chosen, cards=first, shown_total=len(shown), labels=labels,
+                       next_offset=len(first) if len(first) < min(len(shown), MAX_SHOWN) else None,
+                       query=filter_query(chosen),
+                       more_href='/?' + more + '#pool', updated=updated_text(view.received_at),
+                       chosen_labels={k: label_of(options, k, v) for k, v in chosen.items()},
+                       filter_labels=FILTER_LABELS)
+
+
+def item_view_page(env, view, code):
+    """单件页。返回 (status, html)。"""
+    state = view.item_state(code)
+    it = view.items.get(code)
+    if state == 'show':
+        return render_page(env, 'item.html', it['title'], state=state, it=it, code=code)
+    if state in ('sold', 'removed'):
+        return render_page(env, 'item.html', '已售出' if state == 'sold' else '已移出', state=state, it=None, code=code)
+    return render_page(env, 'item.html', '此件已不在展出', 404, state=None, it=None, code=code)
+
+
+def pool_batch(env, view, params):
+    """自动续载的下一批卡片（HTML 片段，与首页同一模板）。返回 JSON 字典。"""
+    _, _, shown = pool_state(view, params)
+    # 最多显示 MAX_SHOWN 件：到上限就停，不再给下一批（否则会反复返回同一批）。
+    limit = min(len(shown), MAX_SHOWN)
+    offset = _int(params.get('offset'), 0, 0, limit)
+    batch = shown[offset:min(offset + PAGE_SIZE, limit)]
+    cards = env.get_template('_pool.html').module
+    html_ = ''.join(str(cards.card(it)) for it in batch)
+    end = offset + len(batch)
+    return {'ok': True, 'html': html_, 'count': len(batch), 'shown': end, 'total': len(shown),
+            'next_offset': end if end < limit else None}
+
+
 def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie_secure=True,
                           public_url=None, terms_path=None):
     clock = clock or time.time
     terms_version, terms_html = load_terms(terms_path or DEFAULT_TERMS)
-    env = Environment(loader=FileSystemLoader(str(TEMPLATES)), autoescape=select_autoescape(['html']))
+    env = make_env()
     send_mail = mailer if mailer is not None else mailer_mod.from_env()
     app.state.terms_version = terms_version
 
@@ -230,7 +293,7 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         return c
 
     def page(name, title, status=200, **ctx):
-        body = env.get_template(name).render(title=title, msg=MSG, **ctx)
+        status, body = render_page(env, name, title, status, **ctx)
         return HTMLResponse(body, status_code=status)
 
     def set_session(resp, token):
@@ -522,8 +585,6 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
 
     # ----- 首页、单件页、快照数据与图片（AD-6：只经会话鉴权） -----
 
-    env.globals.update(price_text=price_text, filter_href=filter_href)
-
     def api_gate(request):
         """快照数据与图片的会话鉴权：返回 None（放行）或错误响应。"""
         state, account = current(request)
@@ -539,13 +600,6 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
             return snapshot.current_view(c, db_path)
         finally:
             c.close()
-
-    def pool_state(params):
-        view = load_view()
-        options = snapshot.filter_options(view.pool)
-        chosen = chosen_filters(params, options)
-        shown = snapshot.apply_filters(view.pool, chosen)
-        return view, options, chosen, shown
 
     @app.get('/img/{name}')
     def image(name: str, request: Request):
@@ -565,43 +619,15 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         denied = api_gate(request)
         if denied:
             return denied
-        params = request.query_params
-        _, options, chosen, shown = pool_state(params)
-        # 最多显示 MAX_SHOWN 件：到上限就停，不再给下一批（否则会反复返回同一批）。
-        limit = min(len(shown), MAX_SHOWN)
-        offset = _int(params.get('offset'), 0, 0, limit)
-        batch = shown[offset:min(offset + PAGE_SIZE, limit)]
-        cards = env.get_template('_pool.html').module
-        html_ = ''.join(str(cards.card(it)) for it in batch)
-        end = offset + len(batch)
-        return JSONResponse({'ok': True, 'html': html_, 'count': len(batch), 'shown': end, 'total': len(shown),
-                             'next_offset': end if end < limit else None},
-                            headers={'Cache-Control': 'no-store'})
+        return JSONResponse(pool_batch(env, load_view(), request.query_params), headers={'Cache-Control': 'no-store'})
 
     def home(params):
-        view, options, chosen, shown = pool_state(params)
-        n = _int(params.get('n'), PAGE_SIZE, PAGE_SIZE, MAX_SHOWN)
-        first = shown[:n]
-        labels = summary_labels(options, chosen)
-        more = filter_query(chosen)
-        more = (more + '&' if more else '') + f'n={len(first) + PAGE_SIZE}'
-        return page('home.html', '今日榜', view=view, rank=view.rank, pool_total=len(view.pool),
-                    options=options, chosen=chosen, cards=first, shown_total=len(shown), labels=labels,
-                    next_offset=len(first) if len(first) < min(len(shown), MAX_SHOWN) else None,
-                    query=filter_query(chosen),
-                    more_href='/?' + more + '#pool', updated=updated_text(view.received_at),
-                    chosen_labels={k: label_of(options, k, v) for k, v in chosen.items()},
-                    filter_labels=FILTER_LABELS)
+        status, body = home_page(env, load_view(), params)
+        return HTMLResponse(body, status_code=status)
 
     def item_page(code):
-        view = load_view()
-        state = view.item_state(code)
-        it = view.items.get(code)
-        if state == 'show':
-            return page('item.html', it['title'], state=state, it=it, code=code)
-        if state in ('sold', 'removed'):
-            return page('item.html', '已售出' if state == 'sold' else '已移出', state=state, it=None, code=code)
-        return page('item.html', '此件已不在展出', 404, state=None, it=None, code=code)
+        status, body = item_view_page(env, load_view(), code)
+        return HTMLResponse(body, status_code=status)
 
     # ----- 客人路径（须登录）：放在最后，兜住其它所有 GET -----
 

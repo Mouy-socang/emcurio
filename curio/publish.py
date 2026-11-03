@@ -64,6 +64,10 @@ class PublishBusy(PublishError):
     """另一个发布正在进行。"""
 
 
+class PublishStale(PublishError):
+    """预览之后榜或内容有变化（须重新预览）。"""
+
+
 def now_z():
     return sync.utc_now()
 
@@ -87,6 +91,13 @@ def ensure(c):
         rank TEXT NOT NULL, pool_size INTEGER NOT NULL, tombstones INTEGER NOT NULL, images INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending', tomb_json TEXT NOT NULL DEFAULT '[]');
     ''')
+    # 故事 11：发布当时的内容指纹（status_fingerprint），用于"有未发布的修改"。
+    if 'status_fp' not in {r[1] for r in c.execute('PRAGMA table_info(publishes)')}:
+        try:
+            c.execute('ALTER TABLE publishes ADD COLUMN status_fp TEXT')
+        except sqlite3.OperationalError as e:
+            if 'duplicate column' not in str(e):
+                raise
 
 
 # ---------- 入选与榜 ----------
@@ -123,9 +134,11 @@ def rank(c):
     return [r[0] for r in c.execute('SELECT code FROM publish_rank ORDER BY pos')]
 
 
-def set_rank(c, codes):
-    """设置榜（按名次，至多 10 件，须都在商品池内）。不提交。"""
+def set_rank(c, codes, keep_stale=False):
+    """设置榜（按名次，至多 10 件，须都在商品池内）。不提交。
+    keep_stale：已在榜上、之后下架或不再合格的货允许原样留在榜里（后台排序时不因它卡住；发布时仍会拒绝）。"""
     codes = [str(x).strip().upper() for x in codes]
+    stale = set(rank(c)) if keep_stale else set()
     if len(codes) > RANK_SIZE:
         raise PublishError(f'榜最多 {RANK_SIZE} 件')
     for code in codes:
@@ -134,7 +147,7 @@ def set_rank(c, codes):
     if len(set(codes)) != len(codes):
         raise PublishError('榜里有重复的货号')
     for code in codes:
-        reason = why_not(c, code)
+        reason = None if code in stale else why_not(c, code)
         if reason:
             raise PublishError(reason)
     c.execute('DELETE FROM publish_rank')
@@ -190,8 +203,11 @@ def _lang(text):
 # ---------- 图片：sips 转码，内容哈希命名 ----------
 
 def _sips_dims(path, sips):
-    r = subprocess.run([sips, '-g', 'pixelWidth', '-g', 'pixelHeight', str(path)],
-                       capture_output=True, text=True, timeout=60)
+    try:
+        r = subprocess.run([sips, '-g', 'pixelWidth', '-g', 'pixelHeight', str(path)],
+                           capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise PublishError('读取图片超时') from None
     w = re.search(r'pixelWidth:\s*(\d+)', r.stdout)
     h = re.search(r'pixelHeight:\s*(\d+)', r.stdout)
     if r.returncode != 0 or not w or not h:
@@ -272,11 +288,17 @@ def transcode(src, longest, out_dir, sips='sips'):
         cmd = [sips, '-s', 'format', 'jpeg', '-s', 'formatOptions', JPEG_QUALITY]
         if max(w, h) > longest:
             cmd += ['-Z', str(longest)]
-        r = subprocess.run(cmd + [str(src), '--out', str(out)], capture_output=True, timeout=120)
+        try:
+            r = subprocess.run(cmd + [str(src), '--out', str(out)], capture_output=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise PublishError('图片转码超时') from None
         if r.returncode != 0 or not out.is_file():
             raise PublishError('图片转码失败')
         for op in _ORIENT.get(orientation, []):
-            r = subprocess.run([sips] + op + [str(out)], capture_output=True, timeout=120)
+            try:
+                r = subprocess.run([sips] + op + [str(out)], capture_output=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                raise PublishError('图片转正超时') from None
             if r.returncode != 0:
                 raise PublishError('图片转正失败')
         data = strip_metadata(out.read_bytes())
@@ -480,12 +502,8 @@ def _tombstones(c, pool_codes, now):
     return [out[k] for k in sorted(out)]
 
 
-def build_and_enqueue(c, root, out_dir, attempted, now=None):
-    """在调用方的写事务里生成完整快照、分配发布编号并入发件箱（记为待送达）。返回摘要。"""
-    assert c.in_transaction, '快照必须在写事务内生成'
-    now = time.time() if now is None else now
-    items = eligible(c)
-    codes = [it['code'] for it in items]
+def check_rank(c):
+    """榜须恰好 10 件且都能发布；否则抛 PublishError。返回榜（货号按名次）。"""
     ranked = rank(c)
     if len(ranked) < RANK_SIZE:
         raise PublishError(f'榜需满 {RANK_SIZE} 件才能发布（现在 {len(ranked)} 件）')
@@ -493,7 +511,38 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None):
         reason = why_not(c, code)
         if reason:
             raise PublishError(f'榜里第 {pos} 名 {code} 已不能发布（{reason}），请换一件后再发布')
+    return ranked
+
+
+def content_fingerprint(rank_, pool, items):
+    """候选快照的内容指纹（榜、商品池与每件货的全部快照字段；不含发布编号、水位、墓碑与时间）。"""
+    text = json.dumps({'rank': rank_, 'pool': pool, 'items': items}, ensure_ascii=False, sort_keys=True,
+                      separators=(',', ':'))
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def status_fingerprint(c):
+    """"有未发布的修改"用的轻量指纹（不转码图片）：榜、入选的货号（含顺序）、欧元价、点评与替代文字原文。"""
+    rows = c.execute("""SELECT e.code, e.listed_price,
+        (SELECT text FROM comments m WHERE m.item_id=e.item_id) comment,
+        (SELECT json_group_array(json_array(a.image_key, a.text)) FROM
+            (SELECT image_key, text FROM alt_texts WHERE item_id=e.item_id ORDER BY image_key) a) alts
+        FROM (""" + ELIGIBLE_SQL + """) e""").fetchall()
+    data = {'rank': rank(c), 'pool': [list(r) for r in rows]}
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=None):
+    """在调用方的写事务里生成完整快照、分配发布编号并入发件箱（记为待送达）。返回摘要。
+    expect_fingerprint：预览时的 content_fingerprint；内容已不同则抛 PublishStale（不分配编号、不入队）。"""
+    assert c.in_transaction, '快照必须在写事务内生成'
+    now = time.time() if now is None else now
+    items = eligible(c)
+    codes = [it['code'] for it in items]
+    ranked = check_rank(c)
     payload_items = [_item_payload(c, it, root, out_dir, attempted) for it in items]
+    if expect_fingerprint is not None and content_fingerprint(ranked, codes, payload_items) != expect_fingerprint:
+        raise PublishStale('内容在预览后有变化，请重新预览')
     at = _iso(now)
     tombstones = _tombstones(c, set(codes), now)
     publish_no = sync.next_publish_seq(c)
@@ -507,12 +556,12 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None):
                   [(publish_no, it['code'], it['item_id']) for it in items])
     images = sum(len(i['images']) for i in payload_items)
     no_images = [i['code'] for i in payload_items if not i['images']]
-    c.execute('INSERT INTO publishes(publish_no,event_id,created_at,rank,pool_size,tombstones,images,status,tomb_json) '
-              "VALUES(?,?,?,?,?,?,?,'pending',?)",
+    c.execute('INSERT INTO publishes(publish_no,event_id,created_at,rank,pool_size,tombstones,images,status,tomb_json,'
+              "status_fp) VALUES(?,?,?,?,?,?,?,'pending',?,?)",
               (publish_no, event_id, at, json.dumps(ranked), len(codes), len(tombstones), images,
-               json.dumps(tombstones, ensure_ascii=False)))
+               json.dumps(tombstones, ensure_ascii=False), status_fingerprint(c)))
     return dict(publish_no=publish_no, event_id=event_id, rank=len(ranked), pool=len(codes),
-                tombstones=len(tombstones), images=images, no_images=no_images)
+                tombstones=len(tombstones), images=images, no_images=no_images, published_at=at)
 
 
 def _prune(c):
@@ -560,6 +609,34 @@ def discard_pending(c, publish_no):
     _prune(c)
 
 
+def candidate(store, root=ROOT, fetch=None, sips='sips'):
+    """预览用的候选快照（AD-28）：与发布同样的入选、榜校验、字段白名单与图片（Mac 本地转码，必要时先转码），
+    但不分配发布编号、不写发件箱、不改 published / publishes，也不取发布锁。
+    返回 (payload, 转码失败张数)；payload 的结构同 snapshot.v1（publish_no、hide_watermark 为 0，无墓碑）。"""
+    with store.connect() as c:
+        check_rank(c)
+        items = eligible(c)
+    attempted, failures = prepare_images(store, items, root, fetch, sips)
+    with store.connect() as c:
+        ranked = check_rank(c)
+        items = eligible(c)
+        payload_items = [_item_payload(c, it, root, sync.image_dir(store), attempted) for it in items]
+    payload = {'schema_version': 1, 'publish_no': 0, 'hide_watermark': 0, 'rank': ranked,
+               'pool': [it['code'] for it in items], 'items': payload_items, 'tombstones': []}
+    return payload, failures
+
+
+def payload_fingerprint(payload):
+    """候选快照（candidate 的 payload）的内容指纹，与发布时 build_and_enqueue 的比较口径相同。"""
+    return content_fingerprint(payload['rank'], payload['pool'], payload['items'])
+
+
+def last_publish(c):
+    """最近一次入队（待送达或已送达）的发布；从未发布或都被丢弃时 None。"""
+    row = c.execute("SELECT * FROM publishes WHERE status!='dropped' ORDER BY publish_no DESC LIMIT 1").fetchone()
+    return dict(row) if row else None
+
+
 # ---------- 发布锁 ----------
 
 def _held(raw):
@@ -603,9 +680,19 @@ def _unlock(store, owner):
             c.execute("DELETE FROM kv WHERE k='publish_lock'")
 
 
-def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time):
+REPLY_KEYS = ('publish_no', 'published_at', 'pool', 'image_failures')
+
+
+def request_payload(expect_rank):
+    return json.dumps(['publish', list(expect_rank or [])], ensure_ascii=False)
+
+
+def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_rank=None, expect_fingerprint=None,
+            request_id=None):
     """生成并入队一份完整快照（持发布锁）。返回摘要（no_images：没有可用图片的货号）；
-    榜不足、榜里有不能发布的货、另一发布进行中时抛 PublishError。"""
+    榜不足、榜里有不能发布的货、另一发布进行中时抛 PublishError。
+    后台从预览发布时：expect_rank / expect_fingerprint 为预览所见的榜与内容指纹，入队前（同一写事务）已不同则抛
+    PublishStale；request_id 的结果（REPLY_KEYS）与快照在同一事务里记入 triage_requests，重放返回该结果（replayed=True）。"""
     owner = uuid.uuid4().hex
     _lock(store, owner, clock)
     try:
@@ -619,8 +706,20 @@ def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time):
         with store.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             _check_owner(c, owner)
-            result = build_and_enqueue(c, root, sync.image_dir(store), attempted, clock())
-        result['image_failures'] = failures
+            if request_id is not None:
+                prev = c.execute('SELECT * FROM triage_requests WHERE request_id=?', (request_id,)).fetchone()
+                if prev:
+                    if prev['payload'] != request_payload(expect_rank):
+                        raise PublishError('重复请求内容不同')
+                    return dict(json.loads(prev['result']), replayed=True)
+            if expect_rank is not None and rank(c) != list(expect_rank):
+                raise PublishStale('排序在预览之后有变化，请重新预览后再发布')
+            result = build_and_enqueue(c, root, sync.image_dir(store), attempted, clock(), expect_fingerprint)
+            result['image_failures'] = failures
+            if request_id is not None:
+                c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',
+                          (request_id, request_payload(expect_rank),
+                           json.dumps({k: result[k] for k in REPLY_KEYS}, ensure_ascii=False), now_z()))
         return result
     finally:
         _unlock(store, owner)

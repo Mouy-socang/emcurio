@@ -1,7 +1,9 @@
 """本机后台服务（只绑定本机；手机经 tailscale serve 访问，AD-4）。打开页面不触发采集或模型调用。
 
-`/` 为后台一页拣选（CAP-6，curio/triage.html + triage.js）；旧审核页在 `/old`。"""
-import argparse,ipaddress,json,logging,secrets,threading
+`/` 为后台一页拣选（CAP-6，curio/triage.html + triage.js）：01 新货、02 商品池与 03 榜（故事 11，ranking.js）；
+旧审核页在 `/old`。`/preview/…` 为发布前预览（AD-28）：Mac 用客人页同一份模板渲染候选快照，只在后台可见，
+页内只引用本机地址（CSP 同客人页），不上传、不入发件箱、不记录行为；发布只从预览横条发起。"""
+import argparse,html as htmlmod,ipaddress,json,logging,re,secrets,threading
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from urllib.parse import urlparse,parse_qs
 from .config import ROOT,load
@@ -23,8 +25,43 @@ def host_allowed(value):
     name=_hostname(value)
     return name in LOCAL_HOSTS or (name.endswith('.ts.net') and len(name)>len('.ts.net'))
 
-def server(store,host='127.0.0.1',port=8788):
+GUEST_CSP=("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; form-action 'self'; "
+           "frame-ancestors 'none'; base-uri 'none'")
+PREVIEW_IMAGE=re.compile(r'[0-9a-f]{16}\.jpg')
+PREVIEW_ITEM=re.compile(r'/item/CO-[0-9]{4,8}')
+
+def _preview_names(payload):
+    return {n for it in payload['items'] for im in it['images'] for n in (im['name'],im['thumb'])}
+
+def preview_shell(page,token,rank):
+    """在客人页 HTML 里加上预览横条（反色，置顶）：返回修改 / 发布。"""
+    bar=('<div class="pvbar" id="pvbar" role="region" aria-label="预览" data-token="%s" data-rank="%s">'
+         '<span class="pvt">预览 · 客人看到的样子</span><a class="pvlnk" href="/#rank">返回修改</a>'
+         '<button class="pvbtn" id="pvPublish" type="button">发布</button></div>'
+         '<p class="pvmsg" id="pvMsg" role="alert" hidden></p>')%(htmlmod.escape(token),htmlmod.escape(json.dumps(rank)))
+    head='<link rel="stylesheet" href="/preview/bar.css"><script src="/preview/bar.js" defer></script></head>'
+    page=page.replace('</head>',head,1)
+    return page.replace('<body>','<body class="pv">'+bar,1)
+
+def message_page(title,text,status=200):
+    return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>%s · 后台</title><link rel="stylesheet" href="/preview/bar.css"></head><body class="pvempty"><main><h1>%s</h1><p>%s</p>'
+            '<p><a href="/#rank">回到 03 榜</a></p></main></body></html>')%(htmlmod.escape(title),htmlmod.escape(title),htmlmod.escape(text))
+
+def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
+    """root：.env 与本机已下载图片所在（测试传临时目录）；fetch：卖家图片下载函数（测试注入）；
+    flush：发布入队后在后台线程触发一次同步（默认 sync.flush(store, root)）。"""
     if host not in LOCAL_HOSTS:raise ValueError('后台只监听本机地址（AD-4）；手机请经 tailscale serve 访问')
+    from . import ranking,publish,sync
+    if flush is None:flush=lambda:sync.flush(store,root)
+    # 当前预览的候选快照：payload、rank、names、fp（内容指纹）、at、pages（渲染结果缓存）。只在内存，不落库、不上传。
+    # gen：每次作废加一；生成中途被作废的预览不保存。build_lock：同一时刻只生成一个预览。
+    preview={};state={'gen':0}
+    preview_lock=threading.Lock();build_lock=threading.Lock()
+    def drop_preview():
+        with preview_lock:state['gen']+=1;preview.clear()
+    # 发布请求（request_id）进行中时，同一 request_id 的重试等第一次的结果。
+    inflight={};flight_out={};flight_lock=threading.Lock()
     from . import market
     market.init(store)
     from .archive_review import init as init_archive_review
@@ -37,6 +74,47 @@ def server(store,host='127.0.0.1',port=8788):
             body=(json.dumps(data,ensure_ascii=False) if kind.startswith('application/json') else data).encode()
             self.send_response(status);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(body)))
             self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(body)
+        def send_raw(self,status,body,kind,headers=None):
+            self.send_response(status);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(body)))
+            for k,v in (headers or {}).items():self.send_header(k,v)
+            self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(body)
+        def preview_get(self,url):
+            """/preview/…：客人页同一份模板渲染的候选快照（只读内存里的预览），以及它引用的静态资源与本机转码图片。"""
+            path=url.path[len('/preview'):] or '/'
+            if path=='/bar.css':return self.send_raw(200,(ROOT/'curio/preview-bar.css').read_bytes(),'text/css; charset=utf-8',{'Cache-Control':'no-store'})
+            if path=='/bar.js':return self.send_raw(200,(ROOT/'curio/preview-bar.js').read_bytes(),'application/javascript; charset=utf-8',{'Cache-Control':'no-store'})
+            if path=='/static/guest.css':
+                # 同一份客人页样式；站内绝对地址 url(/…) 换到预览路由。
+                css=re.sub(r"url\((['\"]?)/(?!/)",r"url(\1/preview/",(ranking.SERVER_DIR/'static/guest.css').read_text())
+                return self.send_raw(200,css.encode(),'text/css; charset=utf-8',{'Cache-Control':'no-store'})
+            if path=='/static/guest.js':
+                # 同一份客人页脚本；续载接口换到预览路由。找不到要换的地址时明确失败，不悄悄连到错误接口。
+                js=(ranking.SERVER_DIR/'static/guest.js').read_text()
+                if "'/api/pool?'" not in js:
+                    return self.send_raw(503,b'/* preview: guest.js api path not found */','application/javascript; charset=utf-8',{'Cache-Control':'no-store'})
+                return self.send_raw(200,js.replace("'/api/pool?'","'/preview/api/pool?'").encode(),'application/javascript; charset=utf-8',{'Cache-Control':'no-store'})
+            with preview_lock:snap=dict(preview)
+            if path.startswith('/img/'):
+                name=path[len('/img/'):]
+                if not snap or not PREVIEW_IMAGE.fullmatch(name) or name not in snap['names']:return self.reply(404,{'error':'图片不存在'})
+                f=sync.image_dir(store)/name
+                if not f.is_file():return self.reply(404,{'error':'图片不存在'})
+                return self.send_raw(200,f.read_bytes(),'image/jpeg',{'Cache-Control':'no-store'})
+            if not snap:
+                return self.send_raw(200,message_page('预览已失效','排序有变化或后台重启过，请回到 03 榜重新点"预览"。').encode(),'text/html; charset=utf-8',{'Cache-Control':'no-store','Content-Security-Policy':GUEST_CSP})
+            if path not in ('/','/legal','/api/pool') and not PREVIEW_ITEM.fullmatch(path):
+                return self.send_raw(404,message_page('页面不存在','预览里没有这个页面。',404).encode(),'text/html; charset=utf-8',{'Cache-Control':'no-store','Content-Security-Policy':GUEST_CSP})
+            key=(path,url.query)
+            out=snap['pages'].get(key)
+            if out is None:
+                try:out=ranking.render_preview(snap['payload'],path,url.query,snap['at'])
+                except ranking.PreviewError as e:
+                    return self.send_raw(503,message_page('预览不可用',str(e),503).encode(),'text/html; charset=utf-8',{'Cache-Control':'no-store','Content-Security-Policy':GUEST_CSP})
+                with preview_lock:
+                    if state['gen']==snap['gen'] and len(snap['pages'])<200:snap['pages'][key]=out
+            if out['type']=='json':return self.reply(out['status'],out['body'])
+            page=preview_shell(out['body'],token,snap['rank'])
+            return self.send_raw(out['status'],page.encode(),'text/html; charset=utf-8',{'Cache-Control':'no-store','Content-Security-Policy':GUEST_CSP,'X-Frame-Options':'DENY','Referrer-Policy':'same-origin'})
         def _forwarded_host(self):
             """只在对端为本机（tailscale serve 反代）且值为 *.ts.net 时采用 X-Forwarded-Host（逗号列表取第一个）。"""
             raw=self.headers.get('X-Forwarded-Host')
@@ -48,6 +126,69 @@ def server(store,host='127.0.0.1',port=8788):
         def _host_ok(self):
             if host_allowed(self.headers.get('Host')):return True
             self.reply(403,{'error':'主机名不被允许'});return False
+        def make_preview(self,data):
+            """生成候选快照（必要时先转码图片），留在内存供 /preview/ 渲染。榜须与界面所见一致。"""
+            want=data.get('rank')
+            if not isinstance(want,list) or not all(isinstance(x,str) for x in want):return self.reply(400,{'error':'榜须为货号列表'})
+            with build_lock:
+                with preview_lock:gen=state['gen']
+                with store.connect() as c:current=publish.rank(c)
+                if want!=current:return self.reply(409,{'error':'排序已在别处改动，请刷新本页'})
+                try:payload,failures=publish.candidate(store,root,fetch)
+                except publish.PublishError as e:return self.reply(400,{'error':str(e)})
+                with preview_lock:
+                    if state['gen']!=gen:return self.reply(409,{'error':'预览期间内容有变化，请重新预览'})
+                    preview.clear()
+                    preview.update(payload=payload,rank=payload['rank'],names=_preview_names(payload),fp=publish.payload_fingerprint(payload),
+                                   at=sync.utc_now(),gen=gen,pages={})
+            no_images=[it['code'] for it in payload['items'] if not it['images']]
+            return self.reply(200,{'url':'/preview/','rank':payload['rank'],'pool':len(payload['pool']),'image_failures':failures,'no_images':no_images})
+        def publish_from_preview(self,data):
+            """只从预览横条发布：须有当前预览、且榜与内容（指纹）与预览所见一致；调用故事 10 发布模块（发布锁、入队；
+            request_id 的结果与快照同一事务记下），再后台 flush 一次。同一 request_id 进行中的重试等第一次的结果。"""
+            rid=data['request_id'];want=data['rank']
+            if not isinstance(rid,str) or not 1<=len(rid)<=100:raise ValueError('请求编号无效')
+            if not isinstance(want,list) or not all(isinstance(x,str) for x in want):raise ValueError('榜须为货号列表')
+            with store.connect() as c:
+                prev=c.execute('SELECT * FROM triage_requests WHERE request_id=?',(rid,)).fetchone()
+            if prev:
+                if prev['payload']!=publish.request_payload(want):raise ValueError('重复请求内容不同')
+                return self.reply(200,json.loads(prev['result']))
+            with flight_lock:
+                ev=inflight.get(rid);owner=ev is None
+                if owner:ev=inflight[rid]=threading.Event()
+            if not owner:
+                ev.wait(900)
+                with flight_lock:out=flight_out.get(rid)
+                return self.reply(*(out or (409,{'error':'另一个发布正在进行，请稍后再试'})))
+            out=(500,{'error':'未发布，请重试'})
+            try:out=self._publish_once(rid,want)
+            finally:
+                with flight_lock:
+                    if len(flight_out)>200:flight_out.clear()
+                    flight_out[rid]=out;inflight.pop(rid,None)
+                ev.set()
+            return self.reply(*out)
+        def _publish_once(self,rid,want):
+            with preview_lock:
+                snap=dict(preview) if preview else None
+                if snap and snap['rank']==want:state['gen']+=1;preview.clear()     # 发布前即作废预览
+            if snap is None:return 409,{'error':'请先在 03 榜点"预览"，再从预览里发布'}
+            if snap['rank']!=want:return 409,{'error':'排序在预览之后有变化，请重新预览后再发布'}
+            try:r=publish.publish(store,root,fetch=fetch,expect_rank=want,expect_fingerprint=snap['fp'],request_id=rid)
+            except publish.PublishBusy as e:return 409,{'error':str(e)+'；请回到 03 榜重新预览'}
+            except publish.PublishStale as e:return 409,{'error':str(e)}
+            except publish.PublishError as e:return 400,{'error':str(e)}
+            except Exception:
+                log.exception('发布失败')
+                return 500,{'error':'未发布，请重试'}
+            result={k:r[k] for k in publish.REPLY_KEYS}
+            if not r.get('replayed'):
+                def run_flush():
+                    try:flush()
+                    except Exception:log.exception('发布后同步失败（下一轮采集会重试）')
+                threading.Thread(target=run_flush,daemon=True).start()
+            return 200,result
         def _words(self):
             with store.connect() as c:return c.execute("SELECT word FROM blocked_words ORDER BY created_at").fetchall()
         def do_GET(self):
@@ -75,13 +216,23 @@ def server(store,host='127.0.0.1',port=8788):
                 return self.reply(200,page,'text/html; charset=utf-8')
             if url.path=='/triage.js':
                 return self.reply(200,(ROOT/'curio/triage.js').read_text(),'application/javascript; charset=utf-8')
+            if url.path=='/ranking.js':
+                return self.reply(200,(ROOT/'curio/ranking.js').read_text(),'application/javascript; charset=utf-8')
+            if url.path=='/api/pool':return self.reply(200,ranking.pool(store,root))
+            if url.path=='/api/rank':return self.reply(200,ranking.rank_state(store,root))
+            if url.path=='/preview':
+                self.send_response(303);self.send_header('Location','/preview/');self.send_header('Content-Length','0');self.end_headers();return
+            if url.path.startswith('/preview/'):return self.preview_get(url)
             if url.path.startswith('/api/triage'):
                 try:
                     q=parse_qs(url.query)
                     num=lambda k,d:int(q.get(k,[str(d)])[0])
                     if url.path=='/api/triage':return self.reply(200,store.triage_state(num('limit',50),num('offset',0)))
                     if url.path=='/api/triage/auto-removed':return self.reply(200,store.auto_removed_list(num('limit',50),num('offset',0)))
-                    if url.path=='/api/triage/item':return self.reply(200,store.item_detail(q.get('id',[''])[0]))
+                    if url.path=='/api/triage/item':
+                        iid=q.get('id',[''])[0];d=store.item_detail(iid)
+                        d['rank_reason']=ranking.detail_rank_reason(store,iid)      # 能否加入榜（榜满由界面判断）
+                        return self.reply(200,d)
                 except ValueError as e:return self.reply(400,{'error':str(e) or '参数无效'})
             if url.path=='/old':
                 page=(ROOT/'curio/review.html').read_text().replace('__TOKEN__',token).replace('__EDITOR_JS__',(ROOT/'curio/review-editor.js').read_text())
@@ -113,16 +264,29 @@ def server(store,host='127.0.0.1',port=8788):
             hosts={h.lower() for h in (self.headers.get('Host'),self._forwarded_host()) if h}
             if self.headers.get('X-Curio-Token')!=token or (origin and urlparse(origin).netloc.lower() not in hosts):
                 return self.reply(403,{'error':'请刷新本机审核页后重试'})
-            if self.path not in ('/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/recheck','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
+            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/recheck','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<=150000:raise ValueError('请求过大或为空')
                 data=json.loads(self.rfile.read(length))
                 if not isinstance(data,dict):raise ValueError('请求格式无效')
+                if self.path=='/api/rank':
+                    result=ranking.save_rank(store,data['codes'],data['request_id']);drop_preview()
+                    return self.reply(200,dict(ranking.rank_state(store,root),saved=result['rank']))
+                if self.path=='/api/pool/action':
+                    result=ranking.pool_action(store,data['action'],data['item_id'],data['request_id'])
+                    drop_preview()
+                    return self.reply(200,result)
+                if self.path=='/api/rank/preview':return self.make_preview(data)
+                if self.path=='/api/rank/publish':return self.publish_from_preview(data)
                 if self.path=='/api/triage/action':
-                    return self.reply(200,store.triage_act(data['action'],data.get('item_id'),data['request_id']))
-                if self.path=='/api/triage/comment':return self.reply(200,store.save_comment(data['item_id'],data['text']))
-                if self.path=='/api/triage/alt':return self.reply(200,store.save_alt(data['item_id'],data['index'],data['text']))
+                    result=store.triage_act(data['action'],data.get('item_id'),data['request_id']);drop_preview()
+                    return self.reply(200,result)
+                # 点评、替代文字、拣选动作都可能改变预览内容：作废当前预览。
+                if self.path=='/api/triage/comment':
+                    result=store.save_comment(data['item_id'],data['text']);drop_preview();return self.reply(200,result)
+                if self.path=='/api/triage/alt':
+                    result=store.save_alt(data['item_id'],data['index'],data['text']);drop_preview();return self.reply(200,result)
                 if self.path=='/api/triage/recheck':
                     from . import curio_monitor
                     if not isinstance(data['item_id'],str):raise ValueError('商品编号无效')
@@ -152,6 +316,7 @@ def server(store,host='127.0.0.1',port=8788):
                     return self.reply(200,result)
                 case=store.review(data['item_id'],data['decision'],data.get('reason',''),data.get('fair_price'),data['request_id'],data['rule_version'])
                 return self.reply(200,{'case_id':case})
+            except publish.PublishBusy as e:return self.reply(409,{'error':str(e)})
             except (ValueError,KeyError,TypeError) as e:return self.reply(400,{'error':str(e) or '保存失败，请刷新后重试'})
             except Exception:
                 log.exception('后台写入失败：%s',self.path)

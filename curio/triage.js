@@ -408,11 +408,33 @@ async function openDetail(id, mode, opener) {
     f.append(l, inp, msg); alts.append(f);
   });
   $('dPrimary').textContent = mode === 'rescue' ? '捞回' : '留下';
+  setPrimaryReason(null);
+  if ((mode === 'pool' || mode === 'rank') && window.curioRank) {
+    // 02 商品池 / 03 榜打开的货详情：主按钮为"加入榜"（或"移出榜"），不能上榜时 aria-disabled 并写明原因。
+    const p = window.curioRank.primary(d);
+    $('dPrimary').textContent = p.label; setPrimaryReason(p.reason);
+  }
   $('dRecheck').textContent = '复查'; $('dRecheck').removeAttribute('aria-disabled');
   $('dRecheckMsg').hidden = true; $('dPrimaryMsg').hidden = true;
   $('detail').hidden = false; $('app').inert = true; $('detail').scrollTop = 0;
   document.title = d.name + ' · 后台';
   $('dName').focus();
+}
+function setPrimaryReason(reason) {
+  const b = $('dPrimary'), why = $('dPrimaryWhy');
+  if (reason) { b.setAttribute('aria-disabled', 'true'); b.setAttribute('aria-describedby', 'dPrimaryWhy'); why.textContent = reason; why.hidden = false; }
+  else { b.removeAttribute('aria-disabled'); b.removeAttribute('aria-describedby'); why.hidden = true; }
+}
+// 当前分区的页面标题与回落焦点（01 新货 / 已自动移出 / 02 商品池 / 03 榜）。
+function viewTitle() {
+  if (!$('poolView').hidden) return '商品池 · 后台';
+  if (!$('rankView').hidden) return '榜 · 后台';
+  return $('arView').hidden ? '新货 · 后台' : '已自动移出 · 后台';
+}
+function viewFocus() {
+  if (!$('poolView').hidden) return $('h02');
+  if (!$('rankView').hidden) return $('h03');
+  return $('arView').hidden ? $('btnKeep') : $('arTitle');
 }
 // 关闭前等未保存的点评 / 替代文字写完；任一失败则不关闭，字段下保留"未保存 · 重试"。
 async function closeDetail(refocus = true) {
@@ -423,11 +445,12 @@ async function closeDetail(refocus = true) {
   const ok = (await Promise.all(saves)).every(Boolean);
   if (!ok || $('detail').hidden) return false;
   $('detail').hidden = true; $('app').inert = false;
-  document.title = $('arView').hidden ? '新货 · 后台' : '已自动移出 · 后台';
+  document.title = viewTitle();
   if (refocus) {
     const o = detailOpener;
-    if (o && o.isConnected && o.offsetParent !== null) o.focus(); else ($('arView').hidden ? $('btnKeep') : $('arTitle')).focus();
+    if (o && o.isConnected && o.offsetParent !== null) o.focus(); else viewFocus().focus();
   }
+  window.dispatchEvent(new Event('curio:detail-closed'));
   return true;
 }
 function setGi(n) {
@@ -500,6 +523,19 @@ async function recheck() {
 function primaryMsg(text) { const m = $('dPrimaryMsg'); m.textContent = text; m.hidden = false; shout(text); }
 async function primary() {
   const id = detail.item_id;
+  if (detailMode === 'pool' || detailMode === 'rank') {
+    const b = $('dPrimary');
+    if (b.getAttribute('aria-disabled') === 'true') { say($('dPrimaryWhy').textContent); return; }
+    if (b.getAttribute('aria-busy') === 'true' || !window.curioRank) return;
+    b.setAttribute('aria-busy', 'true');
+    const text = await window.curioRank.fromDetail(detail);
+    b.removeAttribute('aria-busy');
+    if (detail && detail.item_id === id) {
+      const m = $('dPrimaryMsg'); m.textContent = text; m.hidden = false;
+      const p = window.curioRank.primary(detail); b.textContent = p.label; setPrimaryReason(p.reason);
+    }
+    return;
+  }
   if (detailMode === 'rescue') {
     const li = [...$('arList').children].find(x => x.dataset.id === id);
     if (li) { if (await closeDetail(false)) { li.querySelector('.rescue').focus(); rescueRow(li); } return; }

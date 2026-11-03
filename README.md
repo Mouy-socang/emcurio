@@ -47,13 +47,21 @@ uv run python -m curio.review
 
 ### 后台 01 新货（CAP-6，故事 7）
 
-- 顶部分区 01–06：01 新货显示待处理件数；02–06 暂不可用。
+- 顶部分区 01–06：01 新货显示待处理件数；02 商品池、03 榜见下节；04–06 暂不可用。
 - 拣选卡一次一件（分数高到低，捞回的在最前）：右滑留下、左滑去掉（拖过卡宽 35% 或快速甩动才生效，否则回弹），或按「去掉」「留下」，电脑上焦点不在输入框时 ← 去掉、→ 留下。界面先切到下一件再保存；保存失败时显示「N 件未保存 · 重试」、该件回到队首；断网显示「网络已断开，操作未保存 · 重试」。每个动作带 `request_id`（表 `triage_requests`），重放返回同一结果、不产生第二个事件。
 - 「撤销上一步」无时限、可连续多步（`triage.undo`，撤最近一次人工事件；货号保留不复用）。
 - 「已自动移出 N 件 · 查看」：列表附理由与移出时间，「捞回」后该件回到新货队首。
 - 点图进入货详情：货号（已留下才有）、名称与标签（外画、仅后台 · Kleinanzeigen）、图库与放大层（图片取 `product_snapshots` 已下载的图，否则 `items.image`）、卖家原文（照录、标 `lang`）、来源与判断、墨墨点评（表 `comments`）、图片替代文字（表 `alt_texts`，默认「标准名称 · 第 N 张 / 共 M 张」），点评与替代文字失焦自动保存。
 - 「复查」按平台即时确认这一件是否在售（`curio_monitor.recheck_item`，与批量在售检查共用单件判定，计入当日在售检查预算，写 `status_check_events`，下架即 `items.status='gone'`）；预算用完、平台暂停或查询失败时显示「暂时无法确认，请稍后再试」。
 - 接口：`GET /api/triage`、`/api/triage/auto-removed`、`/api/triage/item?id=`；`POST /api/triage/action`（keep / remove / rescue / undo）、`/api/triage/comment`、`/api/triage/alt`、`/api/triage/recheck`。
+
+### 后台 02 商品池、03 榜、预览与发布（CAP-7，故事 11；AD-5、AD-22、AD-28）
+
+- **02 商品池**（`/#pool`，计数 = 已留下件数）：拣选状态"留下"的货，按分数高到低；每件显示货号、名称与标签、欧元价、来源平台、在售 / 已下架、在榜第几名。「加入榜」（榜满 10 件或 Kleinanzeigen、已下架、没有欧元标价的货为 `aria-disabled` 并写明原因）/「移出榜」、「移出商品池」（经 `triage.out_of_pool`：已发布的货同一事务入队隐藏；在榜的同时移出榜）；下方「已移出商品池」可「放回商品池」（入队取消隐藏，不自动回榜）。点卡片打开货详情（主按钮为"加入榜 / 移出榜"）。
+- **03 榜**（`/#rank`，计数 `N / 10`）：行 = 名次、缩略图、名称、货号与价格、右侧拖动把手 ≡。只在把手上长按（约 0.35 秒）后拖动，触摸与鼠标一致；把手获得焦点时 ↑/↓ 也能移动。点行其它区域选中并展开「上移 / 下移 / 移出榜 / 查看详情」。播报"已拿起，第 N 名""已放到第 N 名"。每次改动立即保存（`publish.set_rank`，表 `publish_rank`；已在榜上、之后下架或不再合格的货允许原样留着以便先排序再补位），失败时保留当前排序并显示"排序未保存 · 重试"。下架或不再合格的行去色、标"已下架"，并提示移出补位。
+- **预览**：榜不足 10 件、排序尚未保存、或榜里有不能发布的货时「预览」为 `aria-disabled` 并写明原因。点「预览」→ Mac 用 `publish.candidate` 生成候选快照（与发布同样的入选、榜校验、字段白名单与图片：本机转码，必要时先转码；**不分配编号、不写发件箱、不改发布记录、不取发布锁**），存在后台进程内存里，再打开 `/preview/`。页面由 `server/preview.py` 用客人页同一份 `server/templates` 与 `guest.py` 里同一组渲染函数渲染（Mac 端不装 Jinja2：经 `server/.venv/bin/python server/preview.py` 子进程，标准输入 JSON → 标准输出 JSON），页内地址加 `/preview` 前缀，由后台路由提供：`/preview/`、`/preview/item/CO-…`、`/preview/legal`、`/preview/api/pool`（续载）、`/preview/img/<哈希>.jpg`（只限本次候选快照引用的本机转码图）、`/preview/static/…`（同一份 guest.css / guest.js，续载地址换成预览路由）。响应带与客人页相同的 CSP（只许本机资源），不连服务器、不记录任何行为；"退出登录"在预览里只回到预览首页。同一份预览的页面渲染一次后缓存。改排序、移出 / 放回商品池、改点评或替代文字、在 01 留下 / 去掉 / 捞回 / 撤销、以及发布，都会让预览作废（显示"预览已失效"）；生成途中被作废的预览不保存。同一时刻只生成一个预览。有货没有可用图片时，先列出这些货号，再由墨墨点"继续预览"。需先在 `server/` 下 `uv sync`。
+- **发布**：只从预览顶部横条（反色）的「发布」发起：`POST /api/rank/publish` 带预览所见的榜与 `request_id`；须有当前预览且榜未变；后台在调用前即作废该预览，然后调用故事 10 的 `publish.publish`（发布锁、转码、入发件箱）：在发布锁内、入队的同一事务里再核对榜与内容指纹（候选快照的榜、商品池与全部字段的哈希，不含编号与时间），不同则拒绝"内容在预览后有变化，请重新预览"；`request_id` 的结果与快照在同一事务里记下，同一 `request_id` 的重试（含第一次还在进行时）只返回第一次的结果。入队后在后台线程触发一次 `sync.flush`。成功回到 03，显示"已发布 · HH:MM"（最近一次入队的发布时间）；发布时记下内容指纹（榜、入选货号与顺序、欧元价、点评与替代文字，表 `publishes.status_fp`）；当前指纹与之不同即显示"已发布 · HH:MM · 有未发布的修改"（改回原样则消失）。失败（另一个发布进行中、排序已变等）在横条下显示"未发布（原因） · 重试"，排序不动。
+- 接口：`GET /api/pool`、`/api/rank`；`POST /api/rank`（`codes`、`request_id`）、`/api/pool/action`（`out_of_pool` / `back_to_pool`）、`/api/rank/preview`、`/api/rank/publish`。写接口沿用页面令牌、Origin 校验与 `request_id` 幂等（表 `triage_requests`）。命令行 `scripts/publish.py` 保留。
 
 打开网页不会触发采集或模型调用。所有操作数据都在 `data/curio.db`（WAL 模式，连接等待 30 秒；备份请用 `VACUUM INTO`，不要直接复制正在写入的库）：items、price_history、price_drops、cases、screening_jobs、kv。可用 `uv run python scripts/import_desktop.py /旧版路径/curio.db` 只读导入 eBay/Kleinanzeigen 商品与审核记录（不含 Lottissimo）。重复导入不会重复创建记录。旧审核缺失的当时价格快照留空，不拿当前价冒充；原价格历史保留在旧库，不迁移。导入商品需后续重新核验在售状态。采集状态和错误摘要保存在 kv。
 
@@ -414,7 +422,7 @@ uv run python scripts/outbox.py invite MOMO2026 && uv run python -c "from curio.
 
 ## 发布快照与客人页浏览（故事 10，CAP-9；AD-5、AD-6、AD-13、AD-22）
 
-### 发布流程（临时命令；故事 11 用后台排榜与预览替代，命令保留）
+### 发布流程（命令行；日常用后台 03 榜 → 预览 → 发布，见上文"后台 02 商品池、03 榜"）
 
 ```bash
 uv run python scripts/publish.py rank                         # 看当前的榜

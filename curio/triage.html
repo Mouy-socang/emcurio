@@ -128,13 +128,54 @@ img{display:block}
 .zl .ctl{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:12px var(--m) 16px}
 .zl .ctl .btn{padding:0 4px}
 
+/* 02 商品池（故事 11）：行式列表，缩略图 + 货号 + 名称 + 价格与平台 + 在售 / 在榜；两颗等宽次按钮 */
+.muted{color:var(--muted)}
+.reason{font-size:14px;margin-top:8px}
+.poolsum{display:flex;align-items:center;gap:4px;min-height:var(--tap);border-bottom:1px solid var(--hair);flex-wrap:wrap}
+.plist{list-style:none;border-top:1px solid var(--hair)}
+.plist+.sub,.sub{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35;margin:28px 0 8px}
+.prow{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;padding:12px 0;border-bottom:1px solid var(--hair)}
+.prow .th{width:64px;height:64px;background:var(--inset);border:0;padding:0;overflow:hidden;cursor:pointer;-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
+.prow .th img{width:100%;height:100%;object-fit:cover;-webkit-user-drag:none}
+.prow .code{font-family:var(--mono);font-size:12px;letter-spacing:.14em;color:var(--muted);line-height:1.4}
+.prow .t{font-family:var(--serif);font-weight:600;font-size:14px;line-height:1.35;text-align:left;background:none;border:0;padding:0;cursor:pointer;min-height:var(--tap);display:block;width:100%;overflow-wrap:anywhere}
+.prow .p{font-size:14px;overflow-wrap:anywhere}
+.prow .st{font-size:14px;color:var(--muted)}
+.prow .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+.prow.gone .th img{filter:grayscale(1);opacity:.45}
+.prow.gone .t,.prow.gone .p{color:var(--muted)}
+@media (min-width:768px){.scr.wide{max-width:960px}.plist.grid{display:grid;grid-template-columns:1fr 1fr;column-gap:24px}}
+
+/* 03 榜（DESIGN.md rank-row）：名次 + 缩略图 + 标题 + 右侧 44px 拖动把手；选中行展开上移 / 下移 / 移出榜 */
+.pub{padding:14px 0 10px;font-size:14px;overflow-wrap:anywhere}
+.rl{list-style:none;border-top:1px solid var(--hair)}
+.rr{border-bottom:1px solid var(--hair);background:var(--surface)}
+.rr .line{display:grid;grid-template-columns:28px 52px minmax(0,1fr) var(--tap);gap:10px;align-items:center;min-height:64px;padding:6px 0;cursor:pointer}
+.rr .ix{font-family:var(--mono);font-size:14px}
+.rr .th{position:relative;width:52px;height:52px;overflow:hidden;background:var(--inset);-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
+.rr .th img{width:100%;height:100%;object-fit:cover;pointer-events:none;-webkit-user-drag:none}
+.rr .sel{display:block;width:100%;text-align:left;background:none;border:0;padding:0;min-height:var(--tap);cursor:pointer}
+.rr h3{font-family:var(--serif);font-weight:600;font-size:14px;line-height:1.35;overflow-wrap:anywhere}
+.rr .rp{font-size:12px;color:var(--muted);font-family:var(--mono);font-variant-numeric:tabular-nums}
+.rr .why{font-size:14px;color:var(--muted)}
+.hd{width:var(--tap);height:var(--tap);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:20px;background:none;border:0;color:var(--ink);cursor:grab;touch-action:none;-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
+.rr.drag{outline:2px solid var(--ink);outline-offset:-2px;position:relative;z-index:2}
+.rr.drag .hd{cursor:grabbing}
+.mv{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 0 12px 38px}
+.mv .lnk{grid-column:1/-1;justify-self:start}
+.plate{position:absolute;left:0;top:0;background:var(--inv);color:var(--inv-ink);font-size:12px;line-height:18px;padding:0 4px;z-index:1}
+.rr.off .th img{filter:grayscale(1);opacity:.45}
+.rr.off h3,.rr.off .ix{color:var(--muted)}
+.foot{padding-top:16px}
+.foot .btn{width:100%}
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 </style></head><body>
 <div id="app">
 <nav class="tabs" aria-label="后台分区">
-  <a class="tc" aria-current="page" href="/"><span class="ix" aria-hidden="true">01</span><b>新货</b><span class="ct mono" id="cNew">—</span><span class="vh">件待处理</span></a>
-  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">02</span><b>商品池</b><span class="na">暂不可用</span></span>
-  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="na">暂不可用</span></span>
+  <a class="tc" id="tab01" aria-current="page" href="/#new"><span class="ix" aria-hidden="true">01</span><b>新货</b><span class="ct mono" id="cNew">—</span><span class="vh">件待处理</span></a>
+  <a class="tc" id="tab02" href="/#pool"><span class="ix" aria-hidden="true">02</span><b>商品池</b><span class="ct mono" id="cPool">—</span><span class="vh">件已留下</span></a>
+  <a class="tc" id="tab03" href="/#rank"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="ct mono" id="cRank">— / 10</span><span class="vh">件已排</span></a>
   <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="na">暂不可用</span></span>
   <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="na">暂不可用</span></span>
   <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="na">暂不可用</span></span>
@@ -169,6 +210,25 @@ img{display:block}
   <p class="im" id="arErr" role="alert" hidden>未能读取列表 · <button class="lnk lnk-pad" id="arReload">重试</button></p>
   <p><button class="btn" id="arMore" type="button" hidden>加载更多</button></p>
 </section>
+<section id="poolView" hidden aria-labelledby="h02">
+  <h1 class="vh" id="h02" tabindex="-1">商品池</h1>
+  <p class="poolsum">已留下 <span class="mono" id="poolN">—</span> 件 · 榜 <span class="mono" id="poolRankN">—</span> / <span class="mono">10</span></p>
+  <p class="im" id="poolErr" role="alert" hidden>未能读取商品池 · <button class="lnk lnk-pad" id="poolReload" type="button">重试</button></p>
+  <ol class="plist" id="poolList" aria-label="已留下的货，按分数高到低"></ol>
+  <div class="empty" id="poolEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>商品池还没有货</h2><p class="muted">在 01 新货里留下的货会出现在这里。</p></div>
+  <h2 class="sub" id="outH" hidden>已移出商品池 <span class="mono" id="outN"></span></h2>
+  <ol class="plist" id="outList" aria-labelledby="outH" hidden></ol>
+</section>
+<section id="rankView" hidden aria-labelledby="h03">
+  <h1 class="vh" id="h03" tabindex="-1">榜</h1>
+  <p class="pub" id="pubLine" aria-live="polite"></p>
+  <p class="im" id="rankErr" role="alert" hidden></p>
+  <p class="im" id="rankOff" hidden></p>
+  <ol class="rl" id="rankList" aria-label="榜，按名次"></ol>
+  <div class="empty" id="rankEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>榜还是空的</h2><p class="muted">从 02 商品池"加入榜"，排满 10 件后预览、发布。</p><p><a class="btn" href="/#pool">去 02 商品池</a></p></div>
+  <div class="foot"><button class="btn primary" id="btnPreview" type="button">预览</button><p class="reason" id="whyPreview" hidden></p></div>
+  <p class="im" id="previewMsg" role="alert" hidden></p>
+</section>
 </main>
 <p class="vh" id="live" role="status" aria-live="polite"></p>
 <p class="vh" id="alert" role="alert" aria-live="assertive"></p>
@@ -192,6 +252,7 @@ img{display:block}
       <p class="im" id="dCommentMsg" hidden></p></section>
     <section class="ns"><h2><span class="ix" aria-hidden="true">05</span>图片替代文字</h2><div id="dAlts"></div></section>
     <div class="actbar"><button class="btn" id="dRecheck" type="button">复查</button><button class="btn primary" id="dPrimary" type="button">留下</button></div>
+    <p class="reason" id="dPrimaryWhy" hidden></p>
     <p class="im" id="dRecheckMsg" role="status" hidden></p>
     <p class="im" id="dPrimaryMsg" hidden></p>
   </div>
@@ -204,4 +265,5 @@ img{display:block}
 </div>
 <script>const token='__TOKEN__';</script>
 <script src="/triage.js"></script>
+<script src="/ranking.js"></script>
 </body></html>

@@ -1,0 +1,26 @@
+/* 预览横条（故事 11，DESIGN.md preview-banner）：置顶反色窄条；左说明、中"返回修改"、右 button-on-inverse"发布"。
+   只加在 Mac 后台的预览页上；客人页本身的样式来自同一份 server/static/guest.css。 */
+.pvbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:10px;min-height:52px;
+  background:#1F1D1A;color:#F6F4EF;padding:4px 12px 4px 18px;
+  font-family:"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px;line-height:1.35}
+.pvt{flex:1;min-width:0}
+.pvlnk{display:inline-flex;align-items:center;min-height:44px;padding:0 4px;white-space:nowrap;color:#F6F4EF;
+  text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
+.pvbtn{min-height:44px;padding:0 18px;border:0;border-radius:0;background:#F6F4EF;color:#1F1D1A;
+  font-family:inherit;font-size:14px;white-space:nowrap;cursor:pointer}
+.pvbtn:active{padding-top:1px}
+.pvbtn[aria-busy="true"]{cursor:default}
+.pvlnk:focus,.pvbtn:focus{outline:none}
+.pvlnk:focus-visible,.pvbtn:focus-visible{outline:2px solid #F6F4EF;outline-offset:-4px}
+.pvbtn:focus-visible{outline-color:#1F1D1A}
+.pvmsg{margin:12px 18px 0;border-left:2px solid #1F1D1A;padding:2px 0 2px 12px;font-size:14px;color:#1F1D1A;
+  font-family:"PingFang SC","Microsoft YaHei",sans-serif}
+.pvmsg button{background:none;border:0;padding:0 2px;min-height:44px;font:inherit;color:inherit;cursor:pointer;
+  text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
+/* 客人页的吸顶筛选栏让到横条下面；获得焦点的元素不被横条遮住。 */
+body.pv .sticky{top:var(--pvh,52px)}
+html{scroll-padding-top:calc(128px + var(--pvh,52px))}
+body.pvempty{background:#F6F4EF;color:#1F1D1A;font-family:"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px;line-height:1.6;margin:0}
+body.pvempty main{max-width:456px;margin:0 auto;padding:28px 18px}
+body.pvempty h1{font-family:"Noto Serif SC","Songti SC",STSong,serif;font-weight:600;font-size:17px;margin-bottom:8px}
+body.pvempty a{color:#1F1D1A;display:inline-flex;align-items:center;min-height:44px}
