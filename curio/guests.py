@@ -103,6 +103,9 @@ def _read_gc(gc):
             out.append({'customer_id': c['customer_id'], 'display_name': display,
                         'aliases': [a for a in aliases if isinstance(a, str)],
                         'status': c.get('status'),
+                        'merged_into': c.get('merged_into_customer_id')
+                        if isinstance(c.get('merged_into_customer_id'), str)
+                        and GC_ID.fullmatch(c.get('merged_into_customer_id')) else None,
                         'keys': [_norm(n) for n in names if isinstance(n, str) and n.strip()]})
     return sorted(out, key=lambda c: c['customer_id'])
 

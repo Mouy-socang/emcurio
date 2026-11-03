@@ -6,9 +6,13 @@
 - 图片：PUT 上来的 JPEG 核对 sha256 前 16 位与文件名一致后落盘，文件不可变；
   只保留最近 3 份快照（当前 + 之前两次）引用的图与 1 天内新传的图，其余在新快照生效后清理。
 - 客人页读取：current_view() 给出当前快照减去隐藏集合后的榜、商品池与筛选数据（解析结果按 publish_no 缓存）。
+- 千人千面（AD-11，故事 18）：快照可选的 orders（账号编号 → 货号顺序）由 Mac 算好；服务器只照顺序排，
+  View.for_account() 给出该账号的商品池（集合不变 = 商品池 − 隐藏集合；顺序里不在集合的货号忽略，
+  集合里不在顺序中的按墨墨顺序排在末尾）。榜、单件页与筛选项不变。
 - 心跳（AD-10）：只留 sent_at 最新的一份；heartbeat_stale() 判断已发布货下架检查是否超过 2 小时未成功
   （从未发布过快照时不提示；发布过但从未收到心跳、或某平台没有成功时间时提示）。
 """
+import copy
 import datetime
 import hashlib
 import json
@@ -20,6 +24,7 @@ import threading
 from pathlib import Path
 
 CODE_RE = re.compile(r'CO-[0-9]{4,8}')
+ACCOUNT_RE = re.compile(r'[0-9a-f]{32}')
 IMAGE_RE = re.compile(r'[0-9a-f]{16}\.jpg')
 TS_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z')
 MAX_SEQ = 2 ** 63 - 1
@@ -100,6 +105,18 @@ def check_snapshot(payload):
     for t in payload['tombstones']:
         if not TS_RE.fullmatch(t['at']):
             raise BadSnapshot('墓碑时间格式不对')
+    # 故事 18：按账号的顺序——账号编号格式、货号都在本快照商品池、不重复；否则整份拒收。
+    orders = payload.get('orders')
+    if orders is not None:
+        if not isinstance(orders, dict):
+            raise BadSnapshot('orders 格式不对')
+        pool = set(payload['pool'])
+        for account_id, order in orders.items():
+            if not ACCOUNT_RE.fullmatch(account_id):
+                raise BadSnapshot('orders 里的账号编号格式不对')
+            _codes(order, 'orders')
+            if not set(order) <= pool:
+                raise BadSnapshot('orders 里有不在商品池的货号')
     # 汇率与汇率日期同时出现（AD-14）。
     rate, date = payload.get('fx_rate'), payload.get('fx_date')
     if (rate is None) != (date is None):
@@ -312,6 +329,19 @@ class View:
         self.pool = [self.items[c] for c in (payload['pool'] if payload else []) if c not in hidden]
         self.fx_rate = payload.get('fx_rate') if payload else None
         self.fx_date = payload.get('fx_date') if payload else None
+        self.orders = (payload.get('orders') or {}) if payload else {}
+
+    def for_account(self, account_id):
+        """该账号看到的视图：商品池按 Mac 下发的顺序排（AD-11）；没有该账号的顺序时就是本视图（墨墨顺序）。"""
+        order = self.orders.get(account_id) if account_id else None
+        if not order:
+            return self
+        pos = {code: i for i, code in enumerate(order)}
+        end = len(order)
+        view = copy.copy(self)
+        # 稳定排序：顺序里没有的货保持墨墨顺序排在末尾；隐藏的货早已不在 self.pool 里。
+        view.pool = sorted(self.pool, key=lambda it: pos.get(it['code'], end))
+        return view
 
     def item_state(self, code, now=None):
         """'show' / 'sold' / 'removed' / None（不在快照里，或隐藏、离开已超过 90 天）。now：Unix 秒，None 时不判保留期。"""

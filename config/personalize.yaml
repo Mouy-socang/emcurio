@@ -1,0 +1,21 @@
+# 千人千面商品池（故事 18，CAP-12、FR-24、AD-11）：每位已关联客户的商品池排序参数。
+# 本文件只是数据；打分与排序只在 curio/judge.py（personal_order，经 curio/rules.py 调用），不调用 AI。
+# 匹配分级权重（明说想要 > 明说喜欢 > 推算口味）沿用 config/matching.yaml 的 grades。
+#
+# 浏览信号：该客户各账号在行为账本里的每条事件
+#   item_open（点开单件）记 open 分；item_dwell（单件页停留）每秒记 dwell_per_second 分，单条最多算 dwell_cap_seconds 秒；
+#   按事件时间（服务器入箱时间）衰减：每过 half_life_days 天减半。
+# 信号乘以"被浏览那件"与池中每件货的相近度（下列权重相加：同品牌 / 同图案 / 同器型），加到池中那件货的分数上；
+# 被浏览的那件本身不因自己被浏览加分。每件货的浏览加分 = max_score × 信号 / (信号 + 1)，趋近而不超过 max_score，须小于 matching.yaml 分级权重的最小级差
+# （含推算口味与无匹配之差），保证 明说想要 > 明说喜欢 > 推算口味 > 无匹配 不被浏览翻转。
+# 只看最近 10 个半衰期内的事件（更早的几乎不起作用，发布时不再读取）。
+browse:
+  open: 0.5
+  dwell_per_second: 0.01
+  dwell_cap_seconds: 300
+  half_life_days: 14
+  max_score: 0.9
+  same:
+    brand: 0.2
+    pattern: 1.0
+    form: 1.0

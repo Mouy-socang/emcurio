@@ -252,6 +252,45 @@ def match_rules(root=ROOT):
     _MATCH_CACHE[key]=out
     return out
 
+_PERSONALIZE_CACHE={}
+PERSONALIZE_NUMBERS=('open','dwell_per_second','dwell_cap_seconds','half_life_days','max_score')
+PERSONALIZE_SAME=('brand','pattern','form')
+
+def personalize_rules_for(root=ROOT):
+    """按调用方的 root 读千人千面参数：root 下有 config/personalize.yaml 就用它，否则用仓库里的那份。"""
+    return personalize_rules(root if (Path(root)/'config/personalize.yaml').is_file() else ROOT)
+
+def personalize_rules(root=ROOT):
+    """读取并校验 config/personalize.yaml（故事 18，按文件修改时间缓存）。返回
+    {open, dwell_per_second, dwell_cap_seconds, half_life_days, max_score, same{brand, pattern, form}}（都是非负数，
+    半衰期 > 0；max_score 须小于同一 root 下 matching.yaml 分级权重的最小级差，含推算口味与无匹配之差）。
+    格式不对时报错（中文）。"""
+    path=Path(root)/'config/personalize.yaml'
+    st=path.stat()
+    key=(str(path),st.st_mtime_ns,st.st_size)
+    if key in _PERSONALIZE_CACHE:return _PERSONALIZE_CACHE[key]
+    raw=yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+    browse=raw.get('browse') if isinstance(raw,dict) else None
+    if not isinstance(browse,dict):raise ValueError('personalize.browse 必须为映射')
+    unknown=set(browse)-set(PERSONALIZE_NUMBERS)-{'same'}
+    if unknown:raise ValueError('personalize.browse 含未知键：'+','.join(sorted(map(str,unknown))))
+    def num(value,where):
+        if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:
+            raise ValueError(where+' 必须为非负数')
+        return float(value)
+    out={k:num(browse.get(k),'personalize.browse.'+k) for k in PERSONALIZE_NUMBERS}
+    if out['half_life_days']<=0:raise ValueError('personalize.browse.half_life_days 必须大于 0')
+    same=browse.get('same')
+    if not isinstance(same,dict) or set(same)!=set(PERSONALIZE_SAME):
+        raise ValueError('personalize.browse.same 必须恰好有 brand、pattern、form')
+    out['same']={k:num(same[k],'personalize.browse.same.'+k) for k in PERSONALIZE_SAME}
+    w=[match_rules_for(root)['grades'][k]['weight'] for k in MATCH_GRADES]+[0]
+    step=min(a-b for a,b in zip(w,w[1:]))
+    if not out['max_score']<step:
+        raise ValueError(f'personalize.browse.max_score 必须小于分级权重的最小级差（{step}）')
+    _PERSONALIZE_CACHE.clear();_PERSONALIZE_CACHE[key]=out
+    return out
+
 def _env(root,keys):
     """只读项目根目录 .env 中指定的键；不读进程环境变量，避免被系统环境悄悄覆盖。"""
     values={}

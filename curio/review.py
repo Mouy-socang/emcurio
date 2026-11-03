@@ -180,7 +180,8 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 prev=c.execute('SELECT * FROM triage_requests WHERE request_id=?',(rid,)).fetchone()
             if prev:
                 if prev['payload']!=publish.request_payload(want):raise ValueError('重复请求内容不同')
-                return self.reply(200,json.loads(prev['result']))
+                out=json.loads(prev['result']);out['orders']=out.get('orders') or 0      # 故事 18 之前的结果没有 orders
+                return self.reply(200,out)
             with flight_lock:
                 ev=inflight.get(rid);owner=ev is None
                 if owner:ev=inflight[rid]=threading.Event()
@@ -202,14 +203,15 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 if snap and snap['rank']==want:state['gen']+=1;preview.clear()     # 发布前即作废预览
             if snap is None:return 409,{'error':'请先在 03 榜点"预览"，再从预览里发布'}
             if snap['rank']!=want:return 409,{'error':'排序在预览之后有变化，请重新预览后再发布'}
-            try:r=publish.publish(store,root,fetch=fetch,expect_rank=want,expect_fingerprint=snap['fp'],request_id=rid)
+            try:r=publish.publish(store,root,fetch=fetch,expect_rank=want,expect_fingerprint=snap['fp'],request_id=rid,gc=gc_settings())
             except publish.PublishBusy as e:return 409,{'error':str(e)+'；请回到 03 榜重新预览'}
             except publish.PublishStale as e:return 409,{'error':str(e)}
             except publish.PublishError as e:return 400,{'error':str(e)}
             except Exception:
                 log.exception('发布失败')
                 return 500,{'error':'未发布，请重试'}
-            result={k:r[k] for k in publish.REPLY_KEYS}
+            result={k:r.get(k) for k in publish.REPLY_KEYS}
+            result['orders']=result.get('orders') or 0      # 故事 18 之前的发布结果没有 orders
             if not r.get('replayed'):
                 def run_flush():
                     try:flush()

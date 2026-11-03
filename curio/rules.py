@@ -224,6 +224,20 @@ def match_customer(facts,needs,prefs,rules):
     """一位客人与一件货：None（不匹配）或 dict(grade, label, weight, reasons)。"""
     return judge.match_customer(facts,needs,prefs,rules)
 
+# ---- CAP-12 千人千面商品池（AD-11，故事 18）：打分与排序在 judge.personal_order，参数在 config/personalize.yaml。
+def personal_order(pool,needs,prefs,seen,rejected,rules,params):
+    """一位客户的商品池货号顺序与"需求/喜好是否对上"（见 judge.personal_order）。"""
+    return judge.personal_order(pool,needs,prefs,seen,rejected,rules,params)
+
+def personal_scores(pool,needs,prefs,seen,rejected,rules,params):
+    """一位客户对池中每件货的排序键 {货号: (沉底, 分数)} 与"需求/喜好是否对上"（见 judge.personal_scores）。"""
+    return judge.personal_scores(pool,needs,prefs,seen,rejected,rules,params)
+
+def order_by_scores(codes,scores):
+    """按排序键排货号，同分保持墨墨顺序（见 judge.order_by_scores）。"""
+    return judge.order_by_scores(codes,scores)
+
+
 # ---- CAP-8 判断沉淀（AD-15、AD-26，故事 17）：已确认规律的执行只在这里。
 # 规律是 curio.db 里的数据（curio/learning.py 归纳、墨墨确认）：dims 为特征组合，direction 为 keep / remove。
 # 特征只取自标准名称：brand（品牌）、function_id（器型）、pattern_id（图案）、overpaint（外画标记），

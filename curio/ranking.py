@@ -68,15 +68,17 @@ def pool(store, root=ROOT):
 
 
 def publish_status(c, fees=None):
-    """{published_at, publish_no, dirty}：最近一次入队的发布，与其后是否有未发布的修改（内容指纹不同）。"""
+    """{published_at, publish_no, dirty, orders}：最近一次入队的发布，与其后是否有未发布的修改（内容指纹不同）；
+    orders 为该次发布为几位客人（账号）排好了个性化顺序（故事 18）。"""
     last = publish.last_publish(c)
     if last is None:
-        return dict(published_at=None, publish_no=None, dirty=bool(publish.rank(c)))
+        return dict(published_at=None, publish_no=None, dirty=bool(publish.rank(c)), orders=0)
     if last.get('status_fp'):
         dirty = publish.status_fingerprint(c, fees) != last['status_fp']
     else:                       # 故事 11 之前的发布没有指纹：只比较榜
         dirty = json.loads(last['rank']) != publish.rank(c)
-    return dict(published_at=last['created_at'], publish_no=last['publish_no'], dirty=dirty)
+    return dict(published_at=last['created_at'], publish_no=last['publish_no'], dirty=dirty,
+                orders=last.get('orders') or 0)
 
 
 def detail_rank_reason(store, iid):

@@ -374,7 +374,7 @@ def test_publish_only_from_preview_and_status(db, cfg, http):
     iids, codes = kept(db, cfg, 12)
     rank = codes[:10]
     http['save'](rank)
-    assert http['get']('/api/rank')['status'] == {'published_at': None, 'publish_no': None, 'dirty': True}
+    assert http['get']('/api/rank')['status'] == {'published_at': None, 'publish_no': None, 'dirty': True, 'orders': 0}
     status, d = http['post']('/api/rank/publish', {'rank': rank, 'request_id': 'p0'})
     assert status == 409 and '预览' in d['error'] and outbox(db, 'snapshot') == []
     assert http['post']('/api/rank/preview', {'rank': rank})[0] == 200
@@ -389,7 +389,8 @@ def test_publish_only_from_preview_and_status(db, cfg, http):
     assert http['post']('/api/rank/publish', {'rank': rank, 'request_id': 'p2'}) == (200, d)
     assert len(outbox(db, 'snapshot')) == 1
     st = http['get']('/api/rank')['status']
-    assert st == {'published_at': d['published_at'], 'publish_no': d['publish_no'], 'dirty': False}
+    assert st == {'published_at': d['published_at'], 'publish_no': d['publish_no'], 'dirty': False,
+                  'orders': 0}
     # 发布后预览作废：再发布须重新预览。
     assert http['post']('/api/rank/publish', {'rank': rank, 'request_id': 'p3'})[0] == 409
     # 改排序 → 有未发布的修改；改回原顺序 → 没有。

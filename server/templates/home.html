@@ -40,7 +40,7 @@
   <p class="fsum" id="pool-summary" role="status" data-swap>{% if labels %}已选{{ labels|join('、') }}，显示 <span class="mono">{{ shown_total }}</span> 件 · <a class="lnk lnk-pad" href="/#pool" data-filter>清除</a>{% else %}显示 <span class="mono">{{ shown_total }}</span> 件{% endif %}</p>
   <div id="pool-list" data-swap>
     {% if cards %}
-    <ol class="wf" aria-label="全部藏品" data-query="{{ query }}" data-next="{{ next_offset if next_offset is not none else '' }}" data-total="{{ shown_total }}">
+    <ol class="wf" aria-label="全部藏品" data-query="{{ query }}" data-next="{{ next_offset if next_offset is not none else '' }}" data-pn="{{ view.publish_no }}" data-total="{{ shown_total }}">
     {% for it in cards %}{{ card(it, cur) }}
     {% endfor %}</ol>
     <div class="more" data-more>{% if next_offset is not none %}<a class="lnk lnk-pad" href="{{ more_href }}">加载更多</a>{% endif %}</div>

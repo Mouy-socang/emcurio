@@ -247,6 +247,22 @@
         }
       }
     },
+    "orders": {
+      "type": "object",
+      "description": "可选：按账号的商品池顺序（AD-6 按账号部分、AD-11；故事 18）。键为账号编号（32 位小写十六进制），值为该账号的货号顺序（只发到与 pool 顺序最后一处不同的位置为止，其后与 pool 相同的部分省略）：只含本快照 pool 里的货号、不重复（两端都另行核对，否则整份快照拒收）。只随完整发布刷新；没有此字段或账号不在其中时用 pool（墨墨的顺序）。服务器渲染时集合仍 = pool − 隐藏集合：顺序里已隐藏的货号跳过，pool 里不在顺序中的货按墨墨顺序排在末尾。只按当前会话账号使用本人那一份，从不返回给客人页。",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{32}$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^CO-[0-9]{4,8}$"
+        }
+      }
+    },
     "fx_rate": {
       "type": "number",
       "description": "ECB 日参考汇率 D.CNY.EUR（1 欧元兑人民币，AD-14；合理范围 1–50）；Mac 从未取到汇率时不带。与 fx_date 同时出现。",

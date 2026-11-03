@@ -69,7 +69,7 @@ _ANNOTATIONS = {'$schema', '$id', 'title', 'description'}
 # $defs：命名的子 Schema（行为事件按类型的 params），本身不约束实例，由调用方按名取出另行校验。
 _SUPPORTED = _ANNOTATIONS | {'type', 'required', 'properties', 'additionalProperties',
                              'const', 'enum', 'pattern', 'minLength', 'maxLength', 'items', 'minItems', 'maxItems',
-                             'minimum', 'maximum', 'dependentRequired', '$defs'}
+                             'minimum', 'maximum', 'dependentRequired', '$defs', 'propertyNames', 'uniqueItems'}
 
 
 def check_schema(schema, path='$'):
@@ -120,6 +120,10 @@ def check_schema(schema, path='$'):
         raise ContractError(f'Schema {path} 的 additionalProperties 应为布尔或对象')
     if 'items' in schema:
         check_schema(schema['items'], f'{path}[]')
+    if 'propertyNames' in schema:
+        check_schema(schema['propertyNames'], f'{path}.<键>')
+    if 'uniqueItems' in schema and not isinstance(schema['uniqueItems'], bool):
+        raise ContractError(f'Schema {path} 的 uniqueItems 应为布尔')
 
 
 def _same(a, b):
@@ -160,6 +164,10 @@ def _validate(instance, schema, path):
         if 'items' in schema:
             for n, value in enumerate(instance):
                 errors.extend(_validate(value, schema['items'], f'{path}[{n}]'))
+        if schema.get('uniqueItems') is True:
+            seen = [json.dumps(v, sort_keys=True) for v in instance]
+            if len(set(seen)) != len(seen):
+                errors.append(f'{path} 有重复项')
     if isinstance(instance, dict):
         props = schema.get('properties', {})
         for key in schema.get('required', []):
@@ -168,6 +176,9 @@ def _validate(instance, schema, path):
         for key, needs in schema.get('dependentRequired', {}).items():
             if key in instance:
                 errors.extend(f'{path} 有 {key} 时须有 {k}' for k in needs if k not in instance)
+        if 'propertyNames' in schema:
+            for key in instance:
+                errors.extend(_validate(key, schema['propertyNames'], f'{path}.<{key[:40]}>'))
         extra = schema.get('additionalProperties', True)
         for key, value in instance.items():
             if key in props:

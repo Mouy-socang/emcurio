@@ -362,6 +362,7 @@
     let line = '';
     if (status && status.published_at) {
       line = '已发布 · ' + hhmm(status.published_at);
+      if (status.orders > 0) line += ' · 已为 ' + status.orders + ' 位客人排好顺序';
       if (status.dirty || unsaved || !same(order, saved)) line += ' · 有未发布的修改';
     } else if (rankLoaded) line = '尚未发布';
     $('pubLine').textContent = line;

@@ -929,22 +929,33 @@ def _source(pref):
     return src if isinstance(src, str) else None
 
 
-def match_customer(facts, needs, prefs, rules):
-    """一位客人与一件货：不匹配返回 None；匹配返回 dict(grade, label, weight, reasons)。
-    facts：match_facts 的结果；needs / prefs：该客人 needs.jsonl / preferences.jsonl 的行（dict；坏行忽略）。"""
+def customer_dislikes(facts, prefs, rules):
+    """任一 status=active、polarity=dislike 的喜好对上这件货的同一维度（品牌 / 图案 / 器型）即 True。"""
     if not facts.get('brand'):
-        return None
-    prefs = [p for p in prefs if isinstance(p, dict) and p.get('status') == 'active']
+        return False
     for p in prefs:
+        if not isinstance(p, dict) or p.get('status') != 'active' or p.get('polarity') != 'dislike':
+            continue
         dim = _pref_dim(p, rules)
-        if not dim or p.get('polarity') != 'dislike':
+        if not dim:
             continue
         text = _norm(_pref_text(p))
         hit = (_brand_hit(text, facts['brand'], rules, negate=False) if dim == 'brand'
                else _pattern_hit(text, facts, rules) if dim == 'pattern'
                else bool(_form_groups(text, rules) & facts['forms']))
         if hit:
-            return None
+            return True
+    return False
+
+
+def match_customer(facts, needs, prefs, rules):
+    """一位客人与一件货：不匹配返回 None；匹配返回 dict(grade, label, weight, reasons)。
+    facts：match_facts 的结果；needs / prefs：该客人 needs.jsonl / preferences.jsonl 的行（dict；坏行忽略）。"""
+    if not facts.get('brand'):
+        return None
+    prefs = [p for p in prefs if isinstance(p, dict) and p.get('status') == 'active']
+    if customer_dislikes(facts, prefs, rules):
+        return None
     grades = rules['grades']
     wanted = [r for r in (_need_hit(n, facts, rules) for n in needs) if r]
     if wanted:
@@ -987,3 +998,79 @@ def match_customer(facts, needs, prefs, rules):
     shown = list(dict.fromkeys(shown))
     text = '、'.join(shown[:MATCH_REASON_VALUES]) + ('等' if len(shown) > MATCH_REASON_VALUES else '')
     return dict(grade=grade, label=g['label'], weight=g['weight'], reasons=[g['label'] + '：' + text])
+
+
+# ================================================================ 千人千面商品池（CAP-12，FR-24，AD-11；故事 18）
+# 每位已关联客户对商品池每件货打分，Mac 发布时算好货号顺序随快照下发；服务器只照顺序排，不做任何计算。
+# 参数是数据（config/personalize.yaml，经 curio/config.personalize_rules 读取校验）；打分只在这里，不调用 AI。
+#   分数 = 匹配分级权重（match_customer：明说想要 > 明说喜欢 > 推算口味，权重取 matching.yaml）
+#        + 浏览信号：该客户各账号在账本里的 item_open（每次 open 分）与 item_dwell（每秒 dwell_per_second 分），
+#          按事件时间半衰期衰减，乘以被浏览那件与这件货的相近度（同品牌 / 同图案 / 同器型各自的权重相加）；
+#          被浏览的那件本身不因自己被浏览加分（避免反复推同一件）。
+#   沉底：不喜欢的维度对上（customer_dislikes），或墨墨在 04 标了这位客户"不合适"的货 → 排到末尾（不移出）。
+#   同分保持墨墨顺序（稳定排序）。
+
+
+def browse_affinity(facts, seen, weights):
+    """被浏览那件（seen，match_facts 结果）与这件货（facts）的相近度：同品牌 / 同图案 / 同器型的权重之和。"""
+    score = 0.0
+    if facts.get('brand') and facts.get('brand') == seen.get('brand'):
+        score += weights['brand']
+    same_pattern = (facts.get('pattern_id') and facts.get('pattern_id') == seen.get('pattern_id')) or \
+        bool(set(facts.get('pattern_groups') or ()) & set(seen.get('pattern_groups') or ()))
+    if same_pattern:
+        score += weights['pattern']
+    if set(facts.get('forms') or ()) & set(seen.get('forms') or ()):
+        score += weights['form']
+    return score
+
+
+def browse_signal(kind, amount, age_days, params):
+    """一条浏览事件的信号强度（已按时间衰减）：item_open 一次 open 分；item_dwell 每秒 dwell_per_second 分。"""
+    if kind == 'item_open':
+        base = params['open']
+    elif kind == 'item_dwell':
+        base = params['dwell_per_second'] * max(0, min(amount or 0, params['dwell_cap_seconds']))
+    else:
+        return 0.0
+    return base * 0.5 ** (max(0.0, age_days) / params['half_life_days'])
+
+
+def personal_scores(pool, needs, prefs, seen, rejected, rules, params):
+    """一位客户对池中每件货的排序键。
+    pool：[(货号, facts)]；needs / prefs：GoodCustomer 需求与喜好行；
+    seen：[(货号, facts, 事件类型, 数量（停留秒数，点开为 None）, 距今天数)]，该客户各账号的浏览；
+    rejected：墨墨对这位客户标"不合适"的货号集合；rules：matching 词表；params：personalize 参数。
+    浏览加分每件趋近而不超过 params['max_score']（小于分级权重的最小级差，明说想要 > 明说喜欢 > 推算口味 > 无匹配
+    始终成立）。
+    返回 ({货号: (沉底, 分数)}, 需求/喜好是否对上池中至少一件)。"""
+    prefs = [p for p in prefs if isinstance(p, dict) and p.get('status') == 'active']
+    totals = {}                     # 被浏览的货号 → [facts, 信号合计]（先按货号合并，打分只与浏览过的件数成正比）
+    for code, f, kind, amount, age in seen:
+        s = browse_signal(kind, amount, age, params)
+        if s > 0:
+            totals.setdefault(code, [f, 0.0])[1] += s
+    signals = [(code, f, s) for code, (f, s) in totals.items()]
+    out, matched = {}, False
+    for code, facts in pool:
+        disliked = customer_dislikes(facts, prefs, rules)
+        m = None if disliked else match_customer(facts, needs, prefs, rules)
+        matched = matched or disliked or m is not None
+        browse = sum(s * browse_affinity(facts, f, params['same']) for c, f, s in signals if c != code)
+        # 浏览加分 = max_score × b / (b + 1)：随信号单调增加、趋近而不超过 max_score（不会把不同信号压成同分）。
+        score = (float(m['weight']) if m else 0.0) + params['max_score'] * browse / (browse + 1.0)
+        out[code] = (bool(disliked or code in rejected), round(score, 9))
+    return out, matched
+
+
+def order_by_scores(codes, scores):
+    """按 personal_scores 的排序键排货号（codes 为墨墨顺序）：沉底的在后，分高的在前，同分保持墨墨顺序；
+    scores 里没有的货（算分之后才进商品池）按 0 分、不沉底。"""
+    keyed = [((scores.get(c, (False, 0.0))[0], -scores.get(c, (False, 0.0))[1], i), c) for i, c in enumerate(codes)]
+    return [c for _, c in sorted(keyed)]
+
+
+def personal_order(pool, needs, prefs, seen, rejected, rules, params):
+    """一位客户的商品池顺序（personal_scores + order_by_scores）。返回 (货号顺序, 需求/喜好是否对上池中至少一件)。"""
+    scores, matched = personal_scores(pool, needs, prefs, seen, rejected, rules, params)
+    return order_by_scores([c for c, _ in pool], scores), matched

@@ -259,19 +259,22 @@
     var mine = gen;
     more.innerHTML = '<p class="muted">正在加载…</p>';
     var q = ol.getAttribute('data-query');
-    var url = '/api/pool?' + (q ? q + '&' : '') + 'offset=' + encodeURIComponent(ol.getAttribute('data-next'));
+    var url = '/api/pool?' + (q ? q + '&' : '') + 'offset=' + encodeURIComponent(ol.getAttribute('data-next')) +
+      '&pn=' + encodeURIComponent(ol.getAttribute('data-pn') || '');
     fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } }).then(function (r) {
       if (!r.ok) throw new Error('http');
       return r.json();
     }).then(function (d) {
       if (mine !== gen) return;      // 筛选已变：丢掉这批
-      ol.insertAdjacentHTML('beforeend', d.html);
+      // 续载期间发布了新快照：服务器从头给了第一批，整列替换（避免重复或漏掉）。
+      if (d.reset) { ol.innerHTML = d.html; ol.setAttribute('data-pn', String(d.publish_no)); }
+      else ol.insertAdjacentHTML('beforeend', d.html);
       if (window.curioMoney) window.curioMoney();
       ol.setAttribute('data-next', d.next_offset === null ? '' : String(d.next_offset));
       loading = false;
       more.innerHTML = '';
       relayout();
-      announce('已加载 ' + d.count + ' 件，共显示 ' + d.shown + ' 件');
+      announce(d.reset ? '藏品已更新，已从头重新显示' : '已加载 ' + d.count + ' 件，共显示 ' + d.shown + ' 件');
       if (io) {
         io.unobserve(more);
         if (d.next_offset === null) { io.disconnect(); io = null; } else io.observe(more);

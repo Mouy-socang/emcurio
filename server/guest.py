@@ -13,6 +13,8 @@
 - 行为事件（故事 15，AD-25）：已登录客人的首页与单件页带 `data-track-page` 标记（含账号标记 `data-who`，
   HMAC 前 16 位），guest.js 据此生成事件并经 `POST /events`（app.py / inbox.py）上报；币种切换由 `POST /currency`
   在服务器端记录（值变了才记）。Mac 预览与停用、待同意页不带标记、不上报。
+- 千人千面（故事 18，AD-11）：首页"全部藏品"、筛选与续载（`/api/pool`）按当前会话账号在快照 orders 里的顺序排
+  （snapshot.View.for_account）；今日榜、单件页不变；没有本人顺序时按墨墨顺序。Mac 预览不带 orders（墨墨顺序）。
 - 快照数据（`/api/pool`）与图片（`/img/<name>`）只经会话鉴权提供（AD-6）：未登录 401、停用或待同意 403。
 """
 import html
@@ -345,18 +347,23 @@ def item_view_page(env, view, code, cur=None, now=None, stale=False, track=False
 
 
 def pool_batch(env, view, params, cur=None):
-    """自动续载的下一批卡片（HTML 片段，与首页同一模板）。返回 JSON 字典。"""
+    """自动续载的下一批卡片（HTML 片段，与首页同一模板）。返回 JSON 字典。
+    params.pn：页面首批所属的发布编号；与当前快照不同时 reset=True，从头给第一批（页面整列替换）。"""
     cur = cur or EUR_ONLY
     _, _, shown = pool_state(view, params)
     # 最多显示 MAX_SHOWN 件：到上限就停，不再给下一批（否则会反复返回同一批）。
     limit = min(len(shown), MAX_SHOWN)
     offset = _int(params.get('offset'), 0, 0, limit)
+    # 续载期间换了新快照（顺序可能整体变了，故事 18）：按偏移续下去会重复或漏掉，改为从头给第一批，页面整列替换。
+    reset = params.get('pn') not in (None, '') and params.get('pn') != str(view.publish_no)
+    if reset:
+        offset = 0
     batch = shown[offset:min(offset + PAGE_SIZE, limit)]
     cards = env.get_template('_pool.html').module
     html_ = ''.join(str(cards.card(it, cur)) for it in batch)
     end = offset + len(batch)
     return {'ok': True, 'html': html_, 'count': len(batch), 'shown': end, 'total': len(shown),
-            'next_offset': end if end < limit else None}
+            'next_offset': end if end < limit else None, 'publish_no': view.publish_no, 'reset': reset}
 
 
 def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie_secure=True,
@@ -706,7 +713,7 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         if denied:
             return denied
         _, account = current(request)
-        view = load_view()
+        view = load_view().for_account(account['account_id'])
         return JSONResponse(pool_batch(env, view, request.query_params, cur_for(account, view)),
                             headers={'Cache-Control': 'no-store'})
 
@@ -719,7 +726,7 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
             c.close()
 
     def home(params, account):
-        view = load_view()
+        view = load_view().for_account(account['account_id'])     # 全部藏品按本人顺序（AD-11），榜不变
         status, body = home_page(env, view, params, cur_for(account, view), stale_now(),
                                  track=accounts.track_tag(account['account_id']))
         return HTMLResponse(body, status_code=status)

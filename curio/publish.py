@@ -15,6 +15,10 @@
 - 隐藏（AD-5）：`reconcile(c, item_id)` 由拣选状态机与采集在状态变更的同一事务里调用：
   published 里的货离开在售（原平台下架、去掉、移出商品池、标记售出、不再是欧元标价）入发件箱 hide，回到在售入 unhide。
   隐藏原因：原平台下架或墨墨标记售出为 sold（客人侧"已售出"），其余为 removed（"已移出"）。
+- 千人千面（故事 18，AD-11）：发布时由 curio/personalize 为符合条件的账号算商品池顺序，作为可选字段 `orders`
+  随快照下发（账号编号 → 货号前缀）；不进内容指纹（预览按墨墨顺序，AD-28）。客户数记在 publishes.orders，
+  03 发布状态显示"已为 N 位客人排好顺序"。超过 SNAPSHOT_MAX 字节时从最长的顺序开始去掉（记警告）；
+  准备或排序出错只记警告、本次不带顺序，发布照常。
 """
 import hashlib
 import ipaddress
@@ -45,7 +49,9 @@ SIZES = ((1600, 'full'), (600, 'thumb'))
 JPEG_QUALITY = '82'
 MAX_DOWNLOAD = 25_000_000
 MAX_IMAGES = 16
+SNAPSHOT_MAX = sync.MAX_PAYLOAD - 20_000   # 带个性化顺序的快照上限（字节，同 sync.wire 的口径；给信封留出余量）
 CODE_RE = re.compile(r'CO-[0-9]{4,8}')
+ACCOUNT_RE = re.compile(r'[0-9a-f]{32}')
 # 价格区间（欧元，左闭右开）——墨墨 2026-11-03 定。
 BANDS = (('lt200', 0, 200), ('200-500', 200, 500), ('500-1000', 500, 1000), ('gte1000', 1000, None))
 BAND_LABELS = {'lt200': '€200 以下', '200-500': '€200–500', '500-1000': '€500–1000', 'gte1000': '€1000 以上'}
@@ -93,12 +99,15 @@ def ensure(c):
         status TEXT NOT NULL DEFAULT 'pending', tomb_json TEXT NOT NULL DEFAULT '[]');
     ''')
     # 故事 11：发布当时的内容指纹（status_fingerprint），用于"有未发布的修改"。
-    if 'status_fp' not in {r[1] for r in c.execute('PRAGMA table_info(publishes)')}:
-        try:
-            c.execute('ALTER TABLE publishes ADD COLUMN status_fp TEXT')
-        except sqlite3.OperationalError as e:
-            if 'duplicate column' not in str(e):
-                raise
+    # 故事 18：这份快照里有个性化顺序的账号数（orders）。
+    cols = {r[1] for r in c.execute('PRAGMA table_info(publishes)')}
+    for col, decl in (('status_fp', 'TEXT'), ('orders', 'INTEGER NOT NULL DEFAULT 0')):
+        if col not in cols:
+            try:
+                c.execute(f'ALTER TABLE publishes ADD COLUMN {col} {decl}')
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e):
+                    raise
 
 
 # ---------- 入选与榜 ----------
@@ -586,9 +595,55 @@ def status_fingerprint(c, fees=None):
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
 
 
-def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=None, fees=None):
+def check_orders(payload):
+    """快照里个性化顺序的一致性（服务器 snapshot.check_snapshot 同样核对）：账号编号格式、货号是货号格式的文字、
+    都在本快照商品池、不重复。不合抛 PublishError。"""
+    orders = payload.get('orders')
+    if orders is None:
+        return
+    if not isinstance(orders, dict):
+        raise PublishError('个性化顺序格式不对')
+    pool = set(payload['pool'])
+    for account_id, codes in orders.items():
+        if not isinstance(account_id, str) or not ACCOUNT_RE.fullmatch(account_id):
+            raise PublishError('个性化顺序里的账号编号格式不对')
+        if not isinstance(codes, list) or not all(isinstance(x, str) and CODE_RE.fullmatch(x) for x in codes):
+            raise PublishError('个性化顺序里的货号格式不对')
+        if len(set(codes)) != len(codes) or not set(codes) <= pool:
+            raise PublishError('个性化顺序里有重复或不在商品池的货号')
+
+
+def _size(payload):
+    return len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))      # 与 sync.wire 同一口径
+
+
+def _with_orders(payload, orders, owner):
+    """加上个性化顺序；超过 SNAPSHOT_MAX 字节时从最长的顺序开始去掉，直到放得下（去掉的账号看墨墨顺序）。
+    owner：账号编号 → 客户编号。返回带上顺序的客户数（同一客户几个账号算一位）。"""
+    if not orders:
+        return 0
+    payload['orders'] = dict(orders)
+    size = _size(payload)
+    if size > SNAPSHOT_MAX:
+        dropped = 0
+        for account_id in sorted(orders, key=lambda a: (-len(orders[a]), a)):
+            entry = len(json.dumps({account_id: orders[account_id]}, ensure_ascii=False).encode('utf-8'))   # 约等于它在整份里占的字节
+            del payload['orders'][account_id]
+            dropped += 1
+            size -= entry
+            if size <= SNAPSHOT_MAX and _size(payload) <= SNAPSHOT_MAX:
+                break
+        log.warning('快照加上个性化顺序后超过上限，去掉了 %d 个账号（最长的先去）的顺序', dropped)
+        if not payload['orders']:
+            del payload['orders']
+            return 0
+    return len({owner.get(a, a) for a in payload['orders']})
+
+
+def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=None, fees=None, personal=None):
     """在调用方的写事务里生成完整快照、分配发布编号并入发件箱（记为待送达）。返回摘要。
-    expect_fingerprint：预览时的 content_fingerprint；内容已不同则抛 PublishStale（不分配编号、不入队）。"""
+    expect_fingerprint：预览时的 content_fingerprint；内容已不同则抛 PublishStale（不分配编号、不入队）。
+    personal：personalize.prepare 的结果（None 时不带个性化顺序）。"""
     assert c.in_transaction, '快照必须在写事务内生成'
     now = time.time() if now is None else now
     items = eligible(c)
@@ -603,7 +658,15 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=
     publish_no = sync.next_publish_seq(c)
     payload = {'schema_version': 1, 'publish_no': publish_no, 'hide_watermark': publish_no,
                'rank': ranked, 'pool': codes, 'items': payload_items, 'tombstones': tombstones, **fx_fields(c)}
+    from . import personalize
+    try:
+        got, owner = personalize.orders(c, items, personal)
+    except Exception:           # 千人千面"尽量做到"：出错只记警告，本次不带顺序
+        log.warning('个性化顺序排序失败，本次发布不带顺序', exc_info=True)
+        got, owner = {}, {}
+    n_orders = _with_orders(payload, got, owner)
     check_fees(payload)
+    check_orders(payload)
     event_id = sync.enqueue(c, 'snapshot', payload)
     # 待送达快照里的货也算"可能在客人页上"：之后的下架、去掉照样推隐藏。
     c.executemany('INSERT OR IGNORE INTO published(code,item_id,publish_no,changed_at) VALUES(?,?,?,?)',
@@ -613,11 +676,11 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=
     images = sum(len(i['images']) for i in payload_items)
     no_images = [i['code'] for i in payload_items if not i['images']]
     c.execute('INSERT INTO publishes(publish_no,event_id,created_at,rank,pool_size,tombstones,images,status,tomb_json,'
-              "status_fp) VALUES(?,?,?,?,?,?,?,'pending',?,?)",
+              "status_fp,orders) VALUES(?,?,?,?,?,?,?,'pending',?,?,?)",
               (publish_no, event_id, at, json.dumps(ranked), len(codes), len(tombstones), images,
-               json.dumps(tombstones, ensure_ascii=False), status_fingerprint(c, fees)))
+               json.dumps(tombstones, ensure_ascii=False), status_fingerprint(c, fees), n_orders))
     return dict(publish_no=publish_no, event_id=event_id, rank=len(ranked), pool=len(codes),
-                tombstones=len(tombstones), images=images, no_images=no_images, published_at=at)
+                tombstones=len(tombstones), images=images, no_images=no_images, published_at=at, orders=n_orders)
 
 
 def _prune(c):
@@ -739,7 +802,7 @@ def _unlock(store, owner):
             c.execute("DELETE FROM kv WHERE k='publish_lock'")
 
 
-REPLY_KEYS = ('publish_no', 'published_at', 'pool', 'image_failures')
+REPLY_KEYS = ('publish_no', 'published_at', 'pool', 'image_failures', 'orders')
 
 
 def request_payload(expect_rank):
@@ -747,11 +810,12 @@ def request_payload(expect_rank):
 
 
 def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_rank=None, expect_fingerprint=None,
-            request_id=None):
+            request_id=None, gc=None):
     """生成并入队一份完整快照（持发布锁）。返回摘要（no_images：没有可用图片的货号）；
     榜不足、榜里有不能发布的货、另一发布进行中时抛 PublishError。
     后台从预览发布时：expect_rank / expect_fingerprint 为预览所见的榜与内容指纹，入队前（同一写事务）已不同则抛
-    PublishStale；request_id 的结果（REPLY_KEYS）与快照在同一事务里记入 triage_requests，重放返回该结果（replayed=True）。"""
+    PublishStale；request_id 的结果（REPLY_KEYS）与快照在同一事务里记入 triage_requests，重放返回该结果（replayed=True）。
+    gc：GoodCustomer 资料库路径（千人千面读需求与喜好；None 时读 config/settings.yaml，没有已关联账号时不读）。"""
     owner = uuid.uuid4().hex
     _lock(store, owner, clock)
     try:
@@ -762,6 +826,8 @@ def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_r
             items = eligible(c)
         attempted, failures = prepare_images(store, items, root, fetch, sips,
                                              heartbeat=lambda: _refresh(store, owner, clock))
+        from . import personalize
+        personal = personalize.prepare(store, gc, root)
         with store.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             _check_owner(c, owner)
@@ -773,7 +839,8 @@ def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_r
                     return dict(json.loads(prev['result']), replayed=True)
             if expect_rank is not None and rank(c) != list(expect_rank):
                 raise PublishStale('排序在预览之后有变化，请重新预览后再发布')
-            result = build_and_enqueue(c, root, sync.image_dir(store), attempted, clock(), expect_fingerprint)
+            result = build_and_enqueue(c, root, sync.image_dir(store), attempted, clock(), expect_fingerprint,
+                                       personal=personal)
             result['image_failures'] = failures
             if request_id is not None:
                 c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',
