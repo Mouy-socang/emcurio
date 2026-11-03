@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from .price import prices, money
-from .rules import evaluate, standard_name, kb_fingerprint
+from .rules import evaluate, standard_name, kb_fingerprint, kb_status
 from . import triage
 from screening.pipeline import process
 
@@ -32,9 +32,58 @@ def write_std_name(c,item_id,r,ts=None):
     """按 item_id 覆盖写入一条标准名称结果（入库与回填共用）。"""
     segments=json.dumps(dict(era=r['era'],brand=r['brand_display'],pattern=r['pattern'],form=r['form'],function=r['function']),ensure_ascii=False)
     c.execute('''INSERT OR REPLACE INTO std_names(item_id,std_name,std_key,status,brand,pattern_id,form_id,function_id,era,
-        seller_grade,segments,kb_status,kb_fingerprint,generated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        seller_grade,segments,kb_status,kb_fingerprint,generated_at,overpaint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (item_id,r['std_name'],r['std_key'],r['status'],r['brand'],r['pattern_id'],r['form_id'],r['function_id'],r['era'],
-         r['seller_grade'],segments,r['kb_status'],r['kb_fingerprint'],ts or now()))
+         r['seller_grade'],segments,r['kb_status'],r['kb_fingerprint'],ts or now(),int(bool(r.get('overpaint')))))
+
+# 重判时比对的标准名称字段：有任一不同才改写（生成时间随之更新）。
+STD_FIELDS=('std_name','std_key','status','brand','pattern_id','form_id','function_id','era','seller_grade','kb_status','kb_fingerprint','overpaint')
+
+def _safe_name(item,config,failures):
+    """生成标准名称；出错时计数、只记一次日志并返回 None（不中断重判）。"""
+    try:
+        return standard_name(item,config)
+    except Exception:
+        failures.append(item.get('item_id'))
+        if not _STD_WARNED:
+            _STD_WARNED.append(1);log.warning('标准名称生成失败，已跳过',exc_info=True)
+        return None
+
+def _std_tuple(r):
+    return tuple(int(bool(r['overpaint'])) if f=='overpaint' else r[f] for f in STD_FIELDS)
+
+def _category(reason):
+    """理由的类别（用于重判报告）：取「：」前的部分。"""
+    return (reason or '（无）').split('：',1)[0]
+
+# 判断用到的字段（加 rule_version）：锁外预算的结果只在这些都没变时沿用。
+EVAL_FIELDS=('title','description','condition','listed_price','price_text','currency','rule_version')
+
+def _eval_sig(r):
+    return tuple(r[f] for f in EVAL_FIELDS)
+
+def rejudge(c,config,precomputed=None):
+    """全量重判（屏蔽词与重判脚本共用）：理由或结论变化的货更新判断、rule_version+1，
+    再经 triage.system_place 落位——只移动未经人工决定的货（AD-26）。调用方须已开写事务。
+    precomputed：{item_id: (_eval_sig, evaluate 结果)}，签名与当前行一致时沿用，否则当场重算。
+    返回 dict(checked, changed, blocked, moved, transitions={旧类别→新类别: 件数})。"""
+    rows=c.execute('SELECT * FROM items').fetchall()
+    changed=matched=moved=0;transitions={}
+    for r in rows:
+        pre=(precomputed or {}).get(r['item_id'])
+        result=pre[1] if pre and pre[0]==_eval_sig(r) else evaluate(dict(r),config)
+        matched+=result['reason'].startswith('屏蔽词：')
+        if (r['agent_decision'],r['agent_reason'],r['fair_price'] or '')!=(result['decision'],result['reason'],result.get('fair','')):
+            c.execute('UPDATE items SET agent_decision=?,agent_reason=?,fair_price=?,rule_version=rule_version+1 WHERE item_id=?',
+                (result['decision'],result['reason'],result.get('fair',''),r['item_id']))
+            before=triage.state(c,r['item_id'])
+            after=triage.system_place(c,r['item_id'])
+            moved+=before is not None and before!=after
+            changed+=1
+            key='%s（%s）→%s（%s）'%(_category(r['agent_reason']),r['agent_decision'],_category(result['reason']),result['decision'])
+            transitions[key]=transitions.get(key,0)+1
+    return dict(checked=len(rows),changed=changed,blocked=matched,moved=moved,
+                transitions=dict(sorted(transitions.items(),key=lambda kv:-kv[1])))
 
 def similar_prices(c,std_key):
     # 品牌段为空（-|…）的键会把各厂同功能的货混成一组，不算同类
@@ -77,6 +126,13 @@ class Store:
             CREATE INDEX IF NOT EXISTS std_names_key ON std_names(std_key,status);
             CREATE INDEX IF NOT EXISTS price_history_item ON price_history(item_id,seen_at);
             ''')
+            # 故事 5：外画标记列（已有库补列，旧行默认 0，重判脚本刷新）。
+            if 'overpaint' not in {r[1] for r in c.execute('PRAGMA table_info(std_names)')}:
+                try:
+                    c.execute('ALTER TABLE std_names ADD COLUMN overpaint INTEGER NOT NULL DEFAULT 0')
+                except sqlite3.OperationalError as e:
+                    # 两个进程同时首次打开：另一方已补列。
+                    if 'duplicate column' not in str(e):raise
             triage.ensure(c)
     @contextmanager
     def connect(self):
@@ -207,18 +263,45 @@ class Store:
                 (iid,'irrelevant','屏蔽词：'+word,row['currency'],row['agent_decision'],row['agent_reason'],row['listed_price'],row['total_price'],version,now(),request_id))
             triage.remove(c,iid,'屏蔽词：'+word,source='block')
             cfg=dict(config,blocked_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')])
-            rows=c.execute('SELECT * FROM items').fetchall()
-            changed=matched=0
-            for r in rows:
-                result=evaluate(dict(r),cfg)
-                matched+=result['reason'].startswith('屏蔽词：')
-                if (r['agent_decision'],r['agent_reason'],r['fair_price'] or '')!=(result['decision'],result['reason'],result.get('fair','')):
-                    c.execute('UPDATE items SET agent_decision=?,agent_reason=?,fair_price=?,rule_version=rule_version+1 WHERE item_id=?',
-                        (result['decision'],result['reason'],result.get('fair',''),r['item_id']))
-                    triage.system_place(c,r['item_id'])
-                    changed+=1
-            result=dict(checked=len(rows),changed=changed,blocked=matched,word=word)
+            r=rejudge(c,cfg)
+            result=dict(checked=r['checked'],changed=r['changed'],blocked=r['blocked'],word=word)
             c.execute('INSERT INTO block_requests VALUES(?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False)))
+            return result
+
+    def rejudge_all(self,config):
+        """用当前规则（含库里的屏蔽词）重判全部货并刷新标准名称；只对未经人工决定的货移动拣选状态（AD-26）。
+        判断与命名先在写锁外算好，再在一个短写事务里落库；期间有变化的货（签名不同）在事务里当场重算。
+        知识库状态不是 ok 时不刷新标准名称（避免用残缺词表覆盖），报告 std_skipped。
+        单件命名出错只计入 std_failed，不中断。幂等：再次运行改判数为 0。"""
+        with self.connect() as c:
+            rows=c.execute('SELECT * FROM items').fetchall()
+            words=[r[0] for r in c.execute('SELECT word FROM blocked_words')]
+        cfg=dict(config,blocked_words=words)
+        status=kb_status(cfg)
+        refresh=status=='ok'
+        failures=[]
+        pre={r['item_id']:(_eval_sig(r),evaluate(dict(r),cfg)) for r in rows}
+        names={r['item_id']:((r['title'],r['description']),_safe_name(dict(r),cfg,failures)) for r in rows} if refresh else {}
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            now_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')]
+            if now_words!=words:
+                # 屏蔽词在此期间变了：预算结果作废，全部当场重算。
+                cfg=dict(config,blocked_words=now_words);pre={}
+            result=rejudge(c,cfg,pre)
+            written=unchanged=0
+            if refresh:
+                old={r['item_id']:_std_tuple(r) for r in c.execute('SELECT * FROM std_names')}
+                ts=now()
+                for r in c.execute('SELECT item_id,title,description FROM items').fetchall():
+                    got=names.get(r['item_id'])
+                    named=got[1] if got and got[0]==(r['title'],r['description']) else _safe_name(dict(r),cfg,failures)
+                    if named is None:continue
+                    if old.get(r['item_id'])==_std_tuple(named):
+                        unchanged+=1;continue
+                    write_std_name(c,r['item_id'],named,ts);written+=1
+            result.update(std_written=written,std_unchanged=unchanged,std_failed=len(failures),
+                          std_skipped=None if refresh else '知识库状态为 %s，未刷新标准名称'%status)
             return result
 
     def page(self,tab='pending',page=1,size=30):

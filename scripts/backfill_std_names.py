@@ -11,10 +11,8 @@ from collections import Counter
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from curio.config import ROOT,load
-from curio.store import Store,write_std_name,now
+from curio.store import Store,write_std_name,now,STD_FIELDS as FIELDS
 from curio.rules import standard_name
-
-FIELDS=('std_name','std_key','status','brand','pattern_id','form_id','function_id','era','seller_grade','kb_status','kb_fingerprint')
 
 def main(argv=None):
     ap=argparse.ArgumentParser(description='回填标准名称')

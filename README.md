@@ -59,14 +59,14 @@ sqlite3 data/curio.db "SELECT result FROM collection_runs ORDER BY id DESC LIMIT
 - 已知商品另轮询详情（默认每轮20件，最久未检查优先），保留价格变化和下架记录。未出现在搜索列表不等于下架；明确404/410或无库存才标记，下架不推断为已售。
 - Kleinanzeigen 沿用 curl，最多20页/关键词；遇到验证或拦截暂停2小时，状态存库。站点HTML变动仍可能影响解析，不绕过验证码。
 - Etsy Open API v3（`curio/etsy.py`，移植自 `legacy/desktop_curio/etsy_source.py`）：只在 `.env` 有 `ETSY_API_KEY` 时启用；按最新上架翻页（每关键词每轮最多 300 条），一页全是已知货即停，只为新货批量补图。货号 `etsy:<listing_id>`，经 `store.ingest` 去重并记录价格变化。账号额度 5000 次/天、5 次/秒，代码保证相邻请求间隔不少于 0.2 秒。在售检查：`state` 不是 active 或 `quantity` 为 0 判下架（`quantity` 缺失视为在售）；批量查询中途失败时只对拿到详情的编号下结论，其余保持原状态并记录错误。Etsy 未启用、鉴权失败（如 403）或出错时不影响 eBay 与 Kleinanzeigen。两种 key 写法都被 401/403 拒绝后，kv 记 `etsy_auth_backoff_until`（1 小时），期间 Etsy 不发任何请求（含在售检查），结果写 `etsy_status: error`、`etsy: Etsy 鉴权失败，1 小时后重试`；之后第一次请求成功即清除。
-- 每件新货调用一次 judge；仅标价或币种变化重判。规则排除的也保存原因。更改规则配置不会自动重判历史货。
+- 每件新货调用一次 judge；仅标价或币种变化重判。规则排除的也保存原因。更改规则配置不会自动重判历史货，需运行 `scripts/rejudge.py`。
 - 拍卖总价 = 标价 × (1 + auction_fee_rate)，其他总价=标价。这里只包含配置手续费，不含未知运费/税费；竞拍标价是当前出价，不是最终成交价。
 
 ## 规则、模型与审核
 
 `config/price_rules.yaml` 和 `config/slow_sellers.yaml` 初始为空，文件注释有格式。没有把未经确认的旧价格线当作正式配置；旧 judge 的默认调用行为保留，本流程禁用旧硬编码价格阈值，使用 YAML。原有文字分类规则继续使用。
 
-破损/修复线索默认不要。`cheap_damaged_max: null` 关闭便宜破损例外；设欧元阈值后，低于阈值改为询市。只基于商品文本，不能验证图片品相或真伪。
+破损/修复线索默认不要（规则与否定说法见下文「自动筛除与捞回」）。`cheap_damaged_max: null` 关闭便宜破损例外；设欧元阈值后，低于阈值改为询市。只基于商品文本，不能验证图片品相或真伪。
 
 want / probe 进入 cheap / deep 记录。`daily_budget: 0` 时不调用任何 provider；即使改为正数，也只允许本地 NoopProvider，结果原样返回。没有付费模型 SDK，没有自动出价、联系卖家功能。
 
@@ -133,6 +133,51 @@ uv run python scripts/backfill_std_names.py   # 打印 items / std_names 行数�
 ```
 
 2026-11-03 真实库回填结果（评审修复后重跑）：items 22113 = std_names 22113；named 11589、insufficient 10524，同类组 1050 个；Meissen 有名称 9614/19023（50.5%）；`kb_status` 全为 ok。第二次运行写入 0。备份在 `data/backups/curio-before-std-names-v2-20261103T075432Z.db`（首次回填前另有 `curio-before-std-names-20261103T074616Z.db`）。
+
+## 自动筛除与捞回（CAP-3，AD-15、AD-26）
+
+纯规则，不调用 AI。判断入口仍只有 `rules.evaluate`，顺序：屏蔽词 → 硬过滤 → 破损/修复 → 滞销 → 价格规则。
+
+**移出类别与理由：**
+
+| 类别 | 理由写法 |
+|---|---|
+| 屏蔽词 | `屏蔽词：<词>（标题/描述）` |
+| 硬过滤（招聘、房产、求购、纯白瓷、纪念盘、灯具、仿品等） | `硬过滤：<类别>`，如 `硬过滤：年度纪念盘/收藏盘` |
+| 破损或修复 | `破损或修复：<类别>（"<原文片段>"）`，类别为 破损 / 修复 / 磕口 / 裂纹 / 需修理，如 `破损或修复：裂纹（"kleiner Haarriss am Rand"）` |
+| 滞销、价格规则 | `config/slow_sellers.yaml`、`config/price_rules.yaml` 里写的理由 |
+
+纪念盘（只看标题）另认 Gedenkteller、Gedenktasse、Gedenkbecher、Erinnerungsteller、Erinnerungstasse、commemorative。
+
+**破损的否定规则**（`rules.damage_reason`）：在标题、描述、品相（condition）字段里找破损词（德文 defekt、beschädigt/Beschädigung、restauriert、repariert、geklebt、Abplatzer、bestoßen、Chip、Macken、Fehlstelle、Absplitterung、Flohbiss、Haarriss、Riss；英文 chip/chipped、crack、broken、repaired、restored；中文 破损、裂纹、缺口、修复）。句子先按句号、问号、感叹号以及 aber、allerdings、jedoch、nur、außer、but、except 断开，否定与排除**只看命中所在的逗号/分号短句**：
+- 本短句里命中词左边有否定词 keine/kein…/ohne/nicht/nichts/nirgends/weder/no/without/not/never/free of（卖家漏空格的 `istnicht` 也算）；
+- 命中词右边紧跟后置否定：`Beschädigungen: keine`、`Risse: nein`、`… none`、`ist/sind/wurde nicht`；
+- 否定只经**纯破损词列表**跨逗号延续（否定词后面须是破损类词，如 Chips、Risse、Splits、Verfärbungen；Gebrauchsspuren 不算）：`keine Chips, Risse oder Abplatzer` 整串都算否定；但 `Neuwertig, keine Gebrauchsspuren, Haarriss am Boden`、`ohne Deckel, mit Chip am Fuß` 仍移出；`keine Chips, aber ein Haarriss` 也移出；
+- 本短句命中词左侧（及右侧紧邻约 20 个字符）有包装（Karton、Verpackung、OVP）或保修、运输（Garantie、Gewährleistung、Haftung、Versand、Rücknahme）说法的命中不算：`Karton beschädigt, Tasse einwandfrei` 不移出，`Versand im Karton, Tasse hat Haarriss` 移出。
+
+`product_v2` 用的 `rules.damage_statements`（品相陈述）保持原来按整句判断的行为不变。
+
+金彩磨损（Goldabrieb 等）只在品相陈述里记录，不移出。便宜破损例外 `cheap_damaged_max` 不变。
+
+**外画标签：** 标题或描述里有 Hausmalerei、Hausmaler、Außenmalerei/Aussenmalerei、nachträglich bemalt/staffiert、übermalt、Fremdbemalung/fremdbemalt/Fremdmalerei、overpaint/overpainted/over-painted、outside decorated、later decorated、decorated outside the factory（大小写、ß/ss、ä/ae 不敏感；前面有 nicht/keine 等或后面紧跟 nein/keine/no/not 的不算）时，只打标签、不移出、不改判：`standard_name` 结果 `overpaint: true`，标准名称在品牌后加「外画」（`Meissen梅森 外画 盘`），`std_key` 末尾追加 `|外画`，所以 `similar_prices` 只与外画同类比价；表 `std_names` 增列 `overpaint`（0/1，已有库启动时自动补列）。
+
+**已自动移出列表与捞回：** 系统落位事件（`ingest` / `rejudge`）在 `triage_events.reason` 记下当时的 `agent_reason` 快照；列表显示的是该货当前的 `agent_reason`（重判后即最新理由）。
+
+```python
+triage.auto_removed(c, limit=100, offset=0)   # 当前 auto_removed 的货：item_id、title、platform、price（标价）、total_price、currency、url、status、reason、removed_at，按移出时间新到旧；limit<1 或 offset<0 抛 ValueError
+triage.rescue(c, item_id)                      # 捞回：回新货队列最前，写人工事件
+```
+
+**全量重判（幂等）：** `Store.rejudge_all(config)` 与屏蔽词全量重判共用 `store.rejudge` 循环：结论或理由变了的货更新 `agent_decision` / `agent_reason`、`rule_version+1`，拣选状态只对没有人工事件的货在 新货 / 自动移出 间移动（AD-26）；人工决定、`cases`、`market_decisions` 不动。判断与标准名称先在写锁外算好，再在一个短写事务里落库，期间被采集改过（标题、描述、品相、价格、币种、`rule_version` 变化）的货在事务里当场重算。随后刷新标准名称（含外画键），只改写有差异的行；单件命名出错计入 `std_failed`、不中断；知识库状态不是 ok 时不刷新标准名称，报告 `std_skipped`。
+
+**部署判断或命名规则的改动后（改 `rules.py` / `judge.py` 的词表、外画、标准名称逻辑，或知识库大改），必须运行一次 `scripts/rejudge.py`**：采集只在新货或改价改文时重判，存量不会自动更新。
+
+```sh
+sqlite3 data/curio.db ".backup data/backups/curio-before-rejudge-<UTC时间>.db"
+uv run python scripts/rejudge.py   # 打印 checked / changed / moved / transitions（旧类别（结论）→新类别（结论）：件数）/ std_written / 各状态计数 / 外画件数
+```
+
+2026-11-03 真实库重判结果：checked 22122；首次改判 229——35 件旧规则判为破损的货不再按破损移出（否定说法；34 件改为询市/要，1 件因无品牌信号仍移出），61 件新判为破损或修复移出（新增词、英文词），106 件只是理由改为带类别与片段，1 件 Gedenkteller 按纪念盘移出，其余 26 件为旧规则版本遗留的询市理由更新；补上 `istnicht` 否定后补跑改判 1 件（放回新货）。评审修复（否定只看本短句、后置否定、英文 not/never/free of、外画词边界与后置否定）后两次补跑：改判 4 件 + 2 件（5 件新判破损移出，1 件放回），外画由 15 件变为 13 件（同一件货的两条“übermalter Ausbesserung”不再算外画），备份 `data/backups/curio-before-rejudge-v2-20261103T081430Z.db`、`curio-before-rejudge-v3-20261103T081603Z.db`。共移动拣选状态 103 件；人工决定过的 195 件状态与货号全部不变，`cases` 180、`market_decisions` 15 不变；外画 13 件。之后再运行改判 0、标准名称改写 0。备份在 `data/backups/curio-before-rejudge-20261103T080404Z.db`。
 
 ## 每5分钟唤醒的本机自动采集（launchd）
 

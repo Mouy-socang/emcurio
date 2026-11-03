@@ -93,6 +93,11 @@ def _event(c, iid, old, new, action, actor, item, reason=None, at=None, undoes=N
     return cur.lastrowid
 
 
+def _agent_reason(item):
+    """系统落位事件的理由快照：当时的 items.agent_reason（之后会被重判覆盖，事件里的不会）。"""
+    return item['agent_reason'] if 'agent_reason' in item.keys() else None
+
+
 def has_human(c, iid):
     return c.execute("SELECT 1 FROM triage_events WHERE item_id=? AND actor='human' LIMIT 1", (iid,)).fetchone() is not None
 
@@ -115,7 +120,7 @@ def _row(c, iid, item=None):
         s = system_state(item['agent_decision'])
         ts = now()
         c.execute('INSERT INTO triage(item_id,state,updated_at) VALUES(?,?,?)', (iid, s, ts))
-        _event(c, iid, None, s, 'ingest', 'system', item, at=ts)
+        _event(c, iid, None, s, 'ingest', 'system', item, reason=_agent_reason(item), at=ts)
     return s
 
 
@@ -135,10 +140,11 @@ def system_place(c, iid):
     if has_human(c, iid):
         return cur
     target = system_state(item['agent_decision'])
+    reason = _agent_reason(item)
     if cur != target and cur in ('new', 'auto_removed'):
         ts = now()
         c.execute('UPDATE triage SET state=?,updated_at=? WHERE item_id=?', (target, ts, iid))
-        _event(c, iid, cur, target, 'rejudge', 'system', item, at=ts)
+        _event(c, iid, cur, target, 'rejudge', 'system', item, reason=reason, at=ts)
         return target
     return cur
 
@@ -271,6 +277,23 @@ def queue(c, limit=100, offset=0):
         FROM triage t JOIN items i ON i.item_id=t.item_id
         WHERE t.state='new' AND t.backlog=0 AND i.status='active'
         ORDER BY t.rescued_at IS NULL, t.rescued_at DESC, i.first_seen DESC, i.item_id
+        LIMIT ? OFFSET ?''', (limit, offset))]
+
+
+def auto_removed(c, limit=100, offset=0):
+    """「已自动移出」列表：当前状态为 auto_removed 的货，按移出时间新到旧。
+    每件含 item_id、title、platform、价格（price=标价、total_price、currency）、url、status、reason、removed_at：
+    reason 为该货当前的 items.agent_reason（重判后即为最新理由；当时的快照另记在 triage_events.reason），
+    removed_at 为最近一次进入 auto_removed 的事件时间。捞回用 rescue()。"""
+    if type(limit) is not int or limit < 1 or type(offset) is not int or offset < 0:
+        raise ValueError('分页参数无效：limit 须 ≥1，offset 须 ≥0')
+    return [dict(r) for r in c.execute('''SELECT i.item_id,i.title,i.platform,i.listed_price price,i.total_price,
+        i.currency,i.url,i.status,i.agent_reason reason,
+        COALESCE((SELECT e.at FROM triage_events e WHERE e.item_id=t.item_id AND e.new_state='auto_removed'
+                  AND e.old_state IS NOT 'auto_removed' ORDER BY e.id DESC LIMIT 1), t.updated_at) removed_at
+        FROM triage t JOIN items i ON i.item_id=t.item_id
+        WHERE t.state='auto_removed'
+        ORDER BY removed_at DESC, i.item_id
         LIMIT ? OFFSET ?''', (limit, offset))]
 
 

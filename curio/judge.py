@@ -28,7 +28,7 @@ HARD_FILTERS = [
     (r"wei[sß]{1,2}e[sn]?\s+(figur|gruppe|putto|madonna)", "素白塑像"),
     # 你确认的：年度纪念盘 / 收藏盘
     (r"jahres(teller|tasse|becher|glocke|kugel|plakette)|sammelteller|weihnachts(teller|jahr|glocke|kugel)|"
-     r"club\s*edition|wandteller\s+jahr",
+     r"club\s*edition|wandteller\s+jahr|gedenk(?:teller|tasse|becher)|erinnerungs(?:teller|tasse)|commemorative",
      "年度纪念盘/收藏盘"),
     (r"\blampe\b|\bleuchte\b|tischlampe|porzellanlampe", "灯具"),
     (r"replik|replica|nachbildung|art\s+meissen|meissener\s+art|\bbuch\b|katalog|postkarte", "仿品/非瓷器"),
@@ -519,12 +519,34 @@ def _in_order(title, description, fn):
     return None
 
 
+# 外画（Hausmalerei 等）：只标记、不扣分；进入标准名称与分组键，同类比价只与外画货比较。
+# 在 _norm 之后匹配：ß→ss、ä/ü 去附加符，另收 ae/ue 写法。
+_OVERPAINT = re.compile(r"\bhausmaler(?:ei|in)?\b|aussenmalerei|nachtr(?:a|ae)glich\s+(?:bemalt|staffiert)|"
+                        r"\b(?:u|ue)bermalt\b|fremdbemal\w*|fremdmalerei|\bover[\s-]?paint(?:ed|ing)?\b|"
+                        r"outside[\s-]+decorated|later\s+decorated|decorated\s+outside\s+the\s+factory")
+OVERPAINT_LABEL = '外画'
+
+
+_OVERPAINT_NEG = re.compile(r"\b(?:kein\w*|nicht|ohne|no|not|without)\s+(?:\w+\s+)?$")
+_OVERPAINT_POSTNEG = re.compile(r"\W*(?:nein|keine?|no|not)\b")
+
+
+def overpaint(title, description=''):
+    """标题或描述里有外画说法时返回 True（大小写、ß/ss 不敏感）；紧跟否定（如 nicht übermalt）的不算。"""
+    for text in (title, description):
+        t = _norm(text)
+        for m in _OVERPAINT.finditer(t):
+            if not _OVERPAINT_NEG.search(t[max(0, m.start() - 40):m.start()]) and not _OVERPAINT_POSTNEG.match(t[m.end():]):
+                return True
+    return False
+
+
 def standard_name(title, description='', config=None):
     """据卖家标题/描述生成候选标准名称（不调用 AI，不影响判断结论）。
 
     返回 dict：brand / brand_display、pattern_id / pattern、form_id / form、function_id / function、
     era、seller_grade（卖家原文，不入名）、std_name（无器型且无功能时为 None）、
-    std_key（品牌|图案ID|器型ID|功能ID，缺值写 -）、status（named / insufficient）、kb_status、kb_fingerprint。
+    std_key（品牌|图案ID|器型ID|功能ID，缺值写 -；外画货末尾追加 |外画）、overpaint、status（named / insufficient）、kb_status、kb_fingerprint。
     """
     path = (config or {}).get('em_kb_path') or DEFAULT_KB_PATH
     vocab, kb_status, fp = kb_vocab(path)
@@ -545,7 +567,8 @@ def standard_name(title, description='', config=None):
     brand_display = (brand + BRAND_ZH.get(brand, '')) if brand else None
     named = bool(form or function)
     # 厂家等级须可靠证据（V2），卖家陈述不入名，故名称中此段始终省略。
-    parts = [era, brand_display, pattern and pattern[1], form and form[1], function and function[1]]
+    painted = overpaint(title, description)
+    parts = [era, brand_display, painted and OVERPAINT_LABEL, pattern and pattern[1], form and form[1], function and function[1]]
     return dict(
         brand=brand, brand_display=brand_display,
         pattern_id=pattern and pattern[0], pattern=pattern and pattern[1],
@@ -553,6 +576,8 @@ def standard_name(title, description='', config=None):
         function_id=function and function[0], function=function and function[1],
         era=era, seller_grade=grade,
         std_name=' '.join(p for p in parts if p) if named else None,
-        std_key='|'.join(x or '-' for x in (brand, pattern and pattern[0], form and form[0], function and function[0])),
+        std_key='|'.join(x or '-' for x in (brand, pattern and pattern[0], form and form[0], function and function[0]))
+        + ('|' + OVERPAINT_LABEL if painted else ''),
+        overpaint=painted,
         status='named' if named else 'insufficient',
         kb_status=kb_status, kb_fingerprint=fp)

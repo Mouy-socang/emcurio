@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from .rules import damage_statements  # 规则归口（AD-15）；行为不变
 
 ROOT=Path(__file__).resolve().parents[1]
 FIELDS=json.loads((ROOT/'docs/product-fields-v2.json').read_text())['fields']
@@ -22,26 +23,6 @@ def seller_grade_claim(title, description):
     values={c['value'] for c in claims}
     label={'first':'一等','second':'二等'}.get(next(iter(values)),'') if len(values)==1 else ('等级待核（一／二等均有记载）' if values else None)
     return dict(label=label,value=next(iter(values)) if len(values)==1 else 'unknown',claims=claims,source='卖家描述')
-
-def damage_statements(title, description):
-    found=[]
-    patterns=[('破损',r'\bdefekt\b|\bbeschädigung\w*\b|\bbeschädigt\w*\b'),('修复',r'\brestauriert\w*\b|\brepariert\w*\b|\bgeklebt\b'),('磕口',r'\babplatzer\w*\b|\bbestoßen\w*\b|\bbestossen\w*\b|\bchips?\b|\bmacken\b|\bfehlstelle\b|\babsplitterung\w*\b|\bflohbisse?\b'),('裂纹',r'\bhaarriss\w*\b|\brisse?\b'),('金彩磨损',r'goldabrieb|gold berieben|abrieb an den goldrändern')]
-    for source,text in [('title',title),('description',description)]:
-        # Keep abbreviations inside the same clause, e.g. "keine Risse bzw. Chips".
-        normalized=re.sub(r'\b(bzw|bspw|ca|z|B|s|evtl)\.',r'\1',text,flags=re.I)
-        normalized=re.sub(r'o\.\s*ä\.', 'oder ähnliche',normalized,flags=re.I)
-        for cn,pat in patterns:
-            for m in re.finditer(pat,normalized,re.I):
-                left=normalized[max(0,m.start()-220):m.start()]
-                right=normalized[m.end():m.end()+90]
-                clause=re.split(r'[.!?]|\b(?:aber|allerdings|jedoch|nur|außer|ausser)\b',left,flags=re.I)[-1]
-                if match(r'\b(?:keine\w*|kein\w*|ohne|nicht|nirgends|weder|no|without)\b',clause):continue
-                if match(r'^\s*(?:ist|sind|wurde)?\s*nicht\b',right):continue
-                if match(r'karton|verpackung|ovp',clause):continue
-                if match(r'garantie|gewährleistung|haftung|versand|rücknahme',clause):continue
-                label='需修理' if cn=='修复' and match(r'müsste|muss|müssten|sollte',clause) else cn
-                if label not in [x[0] for x in found]:found.append((label,normalized[max(0,m.start()-80):m.end()+90],source))
-    return found
 
 # Ordered, explicit language mappings. Values are extraction candidates, not authentication.
 FORMS=[
