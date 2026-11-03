@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% from "_macros.html" import logout_button %}
+{% block body %}
+<span hidden data-signed-in></span>
+<div class="head">
+  <p class="eb" aria-hidden="true">Curiobject</p>
+  <h1>用户协议已更新</h1>
+  <p>请阅读更新后的用户协议与隐私政策，勾选同意后继续浏览。</p>
+</div>
+<form method="post" action="/consent" novalidate>
+  <input type="hidden" name="next" value="{{ next }}">
+  <label class="consent">
+    <input type="checkbox" id="r-consent" name="consent" value="yes"{% if error %} aria-invalid="true" aria-describedby="r-consent-err" autofocus{% endif %}>
+    <span>我已阅读并同意<a class="lnk" href="/legal#terms">《用户协议》</a><a class="lnk" href="/legal#privacy">《隐私政策》</a>（数据存放在中国境外）</span>
+  </label>
+  {% if error %}<p class="err" id="r-consent-err" role="alert">{{ error }}</p>{% endif %}
+  <button class="btn btn-primary" type="submit" data-consent-gate aria-disabled="true" aria-describedby="why-reg">同意并继续</button>
+  <p class="reason" id="why-reg" data-consent-reason>{{ msg.consent }}</p>
+</form>
+<div>{{ logout_button() }}</div>
+{% endblock %}

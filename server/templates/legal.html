@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block body %}
+<p><a class="lnk lnk-pad" href="{{ back }}" data-back>返回</a></p>
+<article class="legal">
+  <div class="head tight">
+    <p class="eb" aria-hidden="true">Curiobject</p>
+    <h1>用户协议与隐私说明</h1>
+    <p class="ver">版本 <span class="mono">{{ version }}</span></p>
+  </div>
+  {{ html|safe }}
+</article>
+{% endblock %}

@@ -1,10 +1,13 @@
-"""Curiobject 香港服务器：管理接口骨架（AD-3、AD-19、AD-21、AD-23）。
+"""Curiobject 香港服务器：管理接口（AD-3、AD-19、AD-21、AD-23、AD-24）与客人账号页面（AD-8、AD-18，见 guest.py）。
 
 - `GET /healthz`：无鉴权，只返回 ok 与版本。
 - `POST /admin/events`：`Authorization: Bearer <管理密钥>`；按 contract/ 的 JSON Schema 校验信封与载荷，
   按 event_id 去重——重复请求返回第一次的确认，不重复处理。
 - 只监听 127.0.0.1，由 Caddy 反代并签 HTTPS 证书；服务器从不主动连接 Mac。
-- 设置只来自环境变量（systemd EnvironmentFile）：CURIO_ADMIN_TOKEN、CURIO_SERVER_DB、CURIO_CONTRACT_DIR。
+- 设置只来自环境变量（systemd EnvironmentFile）：CURIO_ADMIN_TOKEN、CURIO_SERVER_DB、CURIO_CONTRACT_DIR、
+  CURIO_PUBLIC_URL（重设链接用的站点地址）、CURIO_COOKIE_SECURE（默认 1；本机 http 测试设 0）、
+  CURIO_MAILER / CURIO_MAIL_DIR（见 mailer.py）、CURIO_SERVER_SECRET（HMAC 密钥；不设时在库所在目录生成 server_secret）。
+- 已处理的载荷：ping（只存下）、set_invite_code（AD-24 指令：设置通用邀请码，服务器只存其哈希）。
 """
 import argparse
 import hmac
@@ -13,6 +16,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +26,10 @@ from fastapi.responses import JSONResponse
 from jsonschema import Draft202012Validator
 from starlette.concurrency import run_in_threadpool
 
-VERSION = '0.1.0'
+import accounts
+import guest
+
+VERSION = '0.2.0'
 HOST = '127.0.0.1'
 DEFAULT_PORT = 8790
 MAX_BODY = 1_000_000
@@ -62,6 +69,7 @@ def init_db(path):
             payload TEXT NOT NULL,
             envelope TEXT NOT NULL,
             received_at TEXT NOT NULL)''')
+        accounts.ensure(c)
     finally:
         c.close()
 
@@ -122,28 +130,41 @@ def _error(status, detail):
     return JSONResponse({'ok': False, 'detail': detail}, status_code=status)
 
 
-def _store_event(db_path, envelope):
-    """按 event_id 幂等写入；返回 (status, body)。"""
-    canonical = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+def _store_event(db_path, envelope, clock=None):
+    """按 event_id 幂等写入并在同一事务内执行该载荷；返回 (status, body)。
+
+    邀请码等明文在存入 events 表前替换为哈希（accounts.redact），重放比对也用替换后的内容。"""
+    stored_payload = accounts.redact(envelope['kind'], envelope['payload'])
+    stored = dict(envelope, payload=stored_payload)
+    canonical = json.dumps(stored, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     c = connect(db_path)
     try:
         c.execute('BEGIN IMMEDIATE')
         row = c.execute('SELECT envelope,received_at FROM events WHERE event_id=?',
                         (envelope['event_id'],)).fetchone()
         if row:
+            ack = {'ok': True, 'event_id': envelope['event_id'], 'received_at': row[1]}
+            if envelope['kind'] == 'set_invite_code':
+                done = c.execute('SELECT applied FROM commands WHERE command_id=?',
+                                 (envelope['payload']['command_id'],)).fetchone()
+                ack['applied'] = bool(done and done[0])
             c.execute('COMMIT')
             if row[0] != canonical:
                 return 409, {'ok': False, 'detail': '同一 event_id 已收到不同内容'}
-            return 200, {'ok': True, 'event_id': envelope['event_id'], 'received_at': row[1]}
+            return 200, ack
         received_at = utc_now()
         c.execute('INSERT INTO events(event_id,kind,schema_version,created_at,payload,envelope,received_at) '
                   'VALUES(?,?,?,?,?,?,?)',
                   (envelope['event_id'], envelope['kind'], envelope['payload']['schema_version'],
-                   envelope['created_at'], json.dumps(envelope['payload'], ensure_ascii=False, sort_keys=True),
+                   envelope['created_at'], json.dumps(stored_payload, ensure_ascii=False, sort_keys=True),
                    canonical, received_at))
-        # 各类载荷的处理在后续故事加入；ping 只存下。
+        ack = {'ok': True, 'event_id': envelope['event_id'], 'received_at': received_at}
+        if envelope['kind'] == 'set_invite_code':
+            # ack 里的 applied：false 表示服务器已有更新的邀请码命令，本条未生效（Mac 端按永久失败处理）。
+            ack['applied'] = accounts.apply_set_invite_code(c, envelope['payload'], (clock or time.time)())
+        # ping 只存下；其它载荷的处理在后续故事加入。
         c.execute('COMMIT')
-        return 200, {'ok': True, 'event_id': envelope['event_id'], 'received_at': received_at}
+        return 200, ack
     except Exception:
         if c.in_transaction:
             c.execute('ROLLBACK')
@@ -152,14 +173,23 @@ def _store_event(db_path, envelope):
         c.close()
 
 
-def create_app(db_path=None, admin_token=None, contract_dir=None):
+def _env_flag(name, default):
+    value = os.environ.get(name)
+    if value is None or value == '':
+        return default
+    return value.strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, mailer=None, cookie_secure=None,
+               public_url=None, terms_path=None):
     db_path = str(db_path or os.environ.get('CURIO_SERVER_DB') or DEFAULT_DB)
     token = admin_token if admin_token is not None else os.environ.get('CURIO_ADMIN_TOKEN', '')
     contract = Contract(contract_dir or os.environ.get('CURIO_CONTRACT_DIR') or DEFAULT_CONTRACT)
     init_db(db_path)
+    accounts.load_secret(str(Path(db_path).parent))
     if not token:
         log.warning('未设置 CURIO_ADMIN_TOKEN：所有管理接口一律拒绝')
-    # 不暴露自动文档：除 /healthz 外没有无鉴权接口。
+    # 不暴露自动文档。无鉴权的只有 /healthz 与客人注册/登录/说明页（guest.py）。
     app = FastAPI(title='Curiobject server', version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
     expected = ('Bearer ' + token).encode() if token else None
 
@@ -191,13 +221,22 @@ def create_app(db_path=None, admin_token=None, contract_dir=None):
             return _error(400, '请求体不是 JSON 或嵌套过深')
         try:
             contract.check(envelope)
-        except BadPayload as e:
+            if envelope['kind'] == 'set_invite_code':
+                accounts.check_invite_command(envelope['payload'])
+        except (BadPayload, accounts.BadCommand) as e:
             return _error(400, str(e))
         except RecursionError:
             return _error(400, '载荷嵌套过深')
-        status, result = await run_in_threadpool(_store_event, db_path, envelope)
+        status, result = await run_in_threadpool(_store_event, db_path, envelope, clock)
         return JSONResponse(result, status_code=status)
 
+    if cookie_secure is None:
+        cookie_secure = _env_flag('CURIO_COOKIE_SECURE', True)
+    if public_url is None:
+        public_url = (os.environ.get('CURIO_PUBLIC_URL') or '').rstrip('/') or None
+    # 客人路由含兜底 GET /{path}，必须最后注册。
+    guest.register_guest_routes(app, db_path, connect, clock=clock, mailer=mailer, cookie_secure=cookie_secure,
+                                public_url=public_url, terms_path=terms_path)
     app.state.db_path = db_path
     return app
 

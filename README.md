@@ -295,7 +295,7 @@ launchctl kickstart gui/$(id -u)/com.curiobject.collect
 - 采集轮在 AI 打分之后、归档之前调用一次 flush（墙钟限时 30 秒，含慢速响应；没发完的下轮继续）；结果写入 `sync_status`：`disabled`（`.env` 未配置服务器，发件箱保留）、`ok`、`error`（附 `sync_error`、`sync_fail_streak`）、`blocked`、`timeout`，另有 `sync_sent`、`sync_pending`。只做调度判断、两项都不到期的空转轮次不 flush。
 - 连续 3 次 flush 失败（含同步模块的意外异常）时发一次 macOS 系统通知（`osascript`）；只有 `ok` 清零，`timeout` 与 `blocked` 不改计数。
 - 本故事只有测试载荷 `ping`；快照、隐藏、指令、收件箱由后续故事加入。
-- 已送达的发件箱记录与服务器 `events` 表目前不清理，清理策略留到快照故事（故事 9）一并定。
+- 已送达的发件箱记录与服务器 `events` 表目前不清理，清理策略留到快照故事一并定。
 
 ```sh
 uv run python scripts/outbox.py list               # 未送达的记录（--all 含已送达）
@@ -348,6 +348,68 @@ uv run python scripts/backup_server.py             # 服务器上 mktemp -d（07
 
 ```sh
 cd server && uv sync && CURIO_ADMIN_TOKEN=<本机测试密钥> uv run python app.py --port 8790
+```
+
+## 客人注册与登录（故事 9，CAP-13；AD-8、AD-18、AD-24）
+
+服务器（`server/`）自己产生账号；本故事只在本机运行与测试，不上线、不连真实邮件服务。登录后暂时只有空首页占位（首页与单件页在故事 10）。
+
+### 组成
+
+- `server/accounts.py`：账号、会话、限频、重设令牌、同意记录、邀请码的表与逻辑。
+- `server/guest.py` + `server/templates/` + `server/static/`：服务器端渲染的客人页面；表单是普通 POST，不跑 JS 也能提交，`guest.js` 只做增强（同意框切换注册按钮、注册/登录不跳页切换、去看说明页再回来时保留已填内容）。
+- `server/mailer.py`：可替换的发信接口；目前只有 `FileMailer`（写 `.eml` 文件）。
+- `server/legal/terms.md`：用户协议与隐私说明**草稿**，文件头 `version:` 即同意记录里的版本号。**上线前必须由墨墨确认并请懂法律的人审阅后替换**（替换时改版本号）。
+
+### 账号规则
+
+- 注册：邀请码 → 用户名 → 密码 → 微信名/称呼 → 邮箱（选填，只用于找回）→ 同意《用户协议》《隐私政策》（数据存放在中国境外）。不收手机号、不发短信。注册成功即登录，回到原来要打开的页面（含 `/item/CO-NNNN`）。
+- 用户名 2–20 个字符（中文、字母、数字、下划线；全角自动转半角），不区分大小写唯一；密码 8–128 位；微信名/称呼 1–30 字；邮箱按格式校验。
+- 密码与邀请码只存 Argon2id 哈希（m=19 MiB、t=2、p=1）；会话令牌、重设令牌只存 SHA-256；限频计数的键（IP、用户名）与 `events` 表里的邀请码副本用 HMAC-SHA256（密钥 `CURIO_SERVER_SECRET`，不设时在服务器库所在目录生成一次 `server_secret`，0600；换密钥只会让 15 分钟内的限频计数清零）。明文不进库、不进日志。
+- 会话：随机令牌放在 `curio_session` Cookie（HttpOnly、SameSite=Lax、Secure、90 天，到期不续）。退出（在任一设备上）、重设密码、停用都使该账号全部会话失效；失效后再打开任何页面显示登录表单（用户名预填）与"登录已过期，请重新登录。"
+- 未登录访问任何客人路径都只显示注册/登录页（完成后只会回到 `/` 或 `/item/CO-NNNN`，其它一律回首页）；免登录的只有注册/登录/找回/设置新密码页、`/legal` 说明页、`/static/`、`/healthz`。
+- 同意记录（表 `consents`，只追加）：注册时写两行——`terms_privacy` 与 `cross_border_storage`（境外存储单独同意），各带版本号与 UTC 时间。`terms.md` 的版本号改变后，客人登录后先看到"用户协议已更新"确认页（同一个同意框），同意后再追加两行、继续原来的页面。登录后页头与页脚都有"用户协议与隐私说明"。
+- 停用账号（`accounts.set_status`，后台入口在故事 14）只看到"账号已停用"页与"退出登录"；找回密码显示"此账号已停用，请在微信中联系墨墨。"，不发信、旧重设链接失效。
+- 随故事 14（后台 06 客人）才有的：无邮箱客人的密码重置（墨墨后台重置）、停用/启用指令、删除账号。在那之前删除与撤回同意由墨墨手动处理（说明页第七条如此写明）。
+
+### 限频（窗口 15 分钟，按 IP 与用户名分别计数，只存哈希）
+
+| 动作 | 按 IP | 按用户名 |
+| --- | --- | --- |
+| 登录 | 失败 20 次 | 失败 5 次（第 6 次起即使密码正确也拒绝；成功登录清零） |
+| 注册 | 每次提交 20 次 | 失败 5 次（邀请码错、用户名已被使用、字段不合规） |
+| 找回 | 每次提交 20 次 | 每次提交 5 次 |
+
+超出时显示"尝试次数过多，请稍后再试。"及大约还需等几分钟；用户名不存在时与存在时表现相同（找回除外：有邮箱"重设链接已发送"、无邮箱"此账号未填写邮箱，请在微信中联系墨墨重置密码。"；不存在的用户名也显示"已发送"）。客户端 IP：经 Caddy 反代时由 uvicorn 按 `X-Forwarded-For` 取得。
+
+### 邀请码下发（Mac → 服务器）
+
+```sh
+uv run python scripts/outbox.py invite MOMO2026    # 4–32 位字母、数字、_、-；不区分大小写
+```
+
+入队一条 `set_invite_code` 指令（`command_id` + `target_seq`，序号存在 `curio.db` 的 `kv` 表 `cmd_seq:invite`），下一轮采集的 flush 送到 `/admin/events`。服务器只存新码的哈希，确认后新码生效、旧码立即失效；同一 `command_id` 只执行一次（重放返回第一次的结果）；`target_seq` 必须是 1 到 2^63-1 的整数，且**严格大于**已生效的最高序号才生效，否则确认里 `applied: false`；`events` 表里的邀请码替换为 HMAC。`scripts/outbox.py list` 只显示邀请码首尾各一位。服务器从未收到过邀请码时注册关闭（"注册暂未开放"）。Mac 发件箱 `outbox.payload` 里保留明文（Mac 是邀请码的唯一写入方，故事 14 的后台 06 要显示当前码）。
+
+**`applied: false` 的处理（例如 Mac 库从备份恢复后计数器回退）：** Mac 把该条记为被拒收（`last_error`："服务器已有更新的邀请码命令，未生效"），同步停住并发通知。恢复：
+
+```sh
+uv run python scripts/outbox.py drop <seq> --yes                             # 放弃卡住的那条
+uv run python scripts/outbox.py invite <新码> --seq <比服务器上更大的序号>   # 如上次成功的序号 + 100；序号只会往上抬
+```
+
+### 找回密码与发信配置
+
+- 有邮箱的账号：生成一次性重设令牌（1 小时有效），邮件里是 `<CURIO_PUBLIC_URL>/reset?token=…`；设置新密码后该账号全部会话失效，回到登录并提示"新密码已保存，请重新登录。"
+- 服务器环境变量：`CURIO_PUBLIC_URL`（生产必填，如 `https://<域名>`，末尾 `/` 会去掉；未设置且 Cookie 为 Secure 时**不发任何重设邮件**，页面显示"暂时无法发送重设邮件，请在微信中联系墨墨重置密码。"并记警告，因为 Host 头可被伪造；只有本机 http 测试 `CURIO_COOKIE_SECURE=0` 时才用请求地址）、`CURIO_SERVER_SECRET`（HMAC 密钥，至少 16 字节，选填）、`CURIO_COOKIE_SECURE`（默认 1；只有本机 http 测试设 0）、`CURIO_MAILER`（目前只有 `file`）、`CURIO_MAIL_DIR`（默认 `server/data/mail/`，目录 0700、文件 0600）。
+- 发信服务在购买服务器时再选（计入 AD-20 成本表）：实现一个带 `send(to, subject, body)` 的类，在 `mailer.from_env()` 里按 `CURIO_MAILER` 选择即可，其它代码不用改。
+
+### 本机试用
+
+```sh
+cd server && CURIO_ADMIN_TOKEN=<本机测试密钥> CURIO_COOKIE_SECURE=0 CURIO_PUBLIC_URL=http://127.0.0.1:8790 uv run python app.py --port 8790
+# 另一个终端：Mac .env 设 CURIO_SERVER_URL=http://127.0.0.1:8790 与同一密钥，然后
+uv run python scripts/outbox.py invite MOMO2026 && uv run python -c "from curio.store import Store;from curio import sync;print(sync.flush(Store('data/curio.db')))"
+# 浏览器打开 http://127.0.0.1:8790/ ；找回密码的邮件在 server/data/mail/*.eml
 ```
 
 ## 验证

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "set_invite_code.v1.schema.json",
+  "title": "set_invite_code 载荷 v1（Mac 指令：设置通用邀请码，AD-2、AD-24）",
+  "description": "Mac 用 scripts/outbox.py invite <新码> 入队。服务器只保存邀请码的哈希（不区分大小写，去首尾空白），新码生效时旧码立即失效；同一 command_id 只执行一次（重放返回第一次结果）；target_seq 须为 1 到 2^63-1 的整数，且严格大于已生效的最高序号才生效，否则确认里 applied 为 false。未设置过邀请码时注册关闭。",
+  "type": "object",
+  "required": ["schema_version", "command_id", "target_seq", "code"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "command_id": {
+      "type": "string",
+      "description": "小写 UUID，Mac 入队时生成。",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "target_seq": {
+      "type": "integer",
+      "description": "目标 invite 的单调序号（Mac curio.db kv 计数器分配，从 1 开始）。"
+    },
+    "code": {
+      "type": "string",
+      "description": "新邀请码明文：4–32 位字母、数字、下划线或连字符。只经 HTTPS 管理接口发送，服务器不存明文。",
+      "pattern": "^[A-Za-z0-9_-]{4,32}$"
+    }
+  }
+}

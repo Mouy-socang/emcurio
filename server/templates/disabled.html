@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% from "_macros.html" import logout_button %}
+{% block body %}
+<span hidden data-signed-in></span>
+<div class="head">
+  <p class="eb" aria-hidden="true">Curiobject</p>
+  <h1>账号已停用</h1>
+  <p>{{ msg.disabled }}</p>
+</div>
+{{ logout_button() }}
+{% endblock %}

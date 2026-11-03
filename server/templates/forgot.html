@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field %}
+{% block body %}
+<p><a class="lnk lnk-pad" href="/login">返回登录</a></p>
+<div class="head tight">
+  <p class="eb" aria-hidden="true">Curiobject</p>
+  <h1>找回密码</h1>
+  <p>填过邮箱的账号可通过邮件重设密码。</p>
+</div>
+<form method="post" action="/forgot" novalidate>
+  {{ field('f-user', 'username', '用户名', username, autocomplete='username', mono=True, focus=True) }}
+  {% if rate %}
+  <button class="btn btn-primary" type="submit" aria-disabled="true" aria-describedby="why-forgot-rate">找回密码</button>
+  <p class="reason" id="why-forgot-rate">{{ msg.rate }}{% if rate_minutes %}约 {{ rate_minutes }} 分钟后可再试。{% endif %}</p>
+  {% else %}
+  <button class="btn btn-primary" type="submit">找回密码</button>
+  {% endif %}
+</form>
+{% if result %}<p class="im after" role="{{ 'alert' if rate or failed else 'status' }}">{{ result }}</p>{% endif %}
+{% endblock %}

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field %}
+{% block body %}
+{% set re = reg.errors %}
+<section id="register" data-title="注册 · Curiobject"{% if mode != 'register' %} hidden{% endif %}>
+  <div class="head">
+    <p class="eb" aria-hidden="true">Curiobject</p>
+    <h1 tabindex="-1">注册 Curiobject</h1>
+    <p>注册后浏览墨墨挑选的藏品。</p>
+  </div>
+  {% if not invite_open %}<p class="im" role="status">注册暂未开放，请在微信中联系墨墨。</p>{% endif %}
+  {% if reg.rate %}<p class="im" role="alert">{{ msg.rate }}</p>{% endif %}
+  <form method="post" action="/register" novalidate data-remember="register">
+    <input type="hidden" name="next" value="{{ next }}">
+    {{ field('r-code', 'invite', '邀请码', reg.invite, autocomplete='off', help='墨墨在微信里给您的邀请码。', error=re.invite, mono=True, focus=reg.focus=='invite') }}
+    {{ field('r-user', 'username', '用户名', reg.username, autocomplete='username', help='2–20 个字符：中文、字母、数字或下划线。', error=re.username, mono=True, focus=reg.focus=='username') }}
+    {{ field('r-pass', 'password', '密码', type='password', autocomplete='new-password', help='至少 8 位。', error=re.password, focus=reg.focus=='password') }}
+    {{ field('r-nick', 'nickname', '微信名/称呼', reg.nickname, autocomplete='nickname', help='方便墨墨认出您。', error=re.nickname, focus=reg.focus=='nickname') }}
+    {{ field('r-mail', 'email', '邮箱', reg.email, type='email', autocomplete='email', help='仅用于找回密码。', error=re.email, optional=True, focus=reg.focus=='email') }}
+    <label class="consent">
+      <input type="checkbox" id="r-consent" name="consent" value="yes"{% if reg.consent %} checked{% endif %}{% if re.consent %} aria-invalid="true" aria-describedby="r-consent-err"{% endif %}{% if reg.focus=='consent' %} autofocus{% endif %}>
+      <span>我已阅读并同意<a class="lnk" href="/legal#terms">《用户协议》</a><a class="lnk" href="/legal#privacy">《隐私政策》</a>（数据存放在中国境外）</span>
+    </label>
+    {% if re.consent %}<p class="err" id="r-consent-err" role="alert">{{ re.consent }}</p>{% endif %}
+    {% if reg.rate %}
+    <button class="btn btn-primary" type="submit" aria-disabled="true" aria-describedby="why-reg-rate">注册</button>
+    <p class="reason" id="why-reg-rate">{{ msg.rate }}{% if reg.rate_minutes %}约 {{ reg.rate_minutes }} 分钟后可再试。{% endif %}</p>
+    {% else %}
+    <button class="btn btn-primary" type="submit" data-consent-gate{% if not reg.consent %} aria-disabled="true"{% endif %} aria-describedby="why-reg">注册</button>
+    <p class="reason" id="why-reg" data-consent-reason{% if reg.consent %} hidden{% endif %}>{{ msg.consent }}</p>
+    {% endif %}
+  </form>
+  <p class="switch"><a class="lnk lnk-pad" href="/login?next={{ next|urlencode }}" data-switch="login">已有账号？登录</a></p>
+</section>
+
+{% set le = login.errors %}
+<section id="login" data-title="登录 · Curiobject"{% if mode != 'login' %} hidden{% endif %}>
+  <div class="head">
+    <p class="eb" aria-hidden="true">Curiobject</p>
+    <h1 tabindex="-1">登录 Curiobject</h1>
+    <p>登录后浏览墨墨挑选的藏品。</p>
+  </div>
+  {% if login.notice %}<p class="im" role="status">{{ login.notice }}</p>{% endif %}
+  {% if login.rate %}<p class="im" role="alert">{{ msg.rate }}</p>{% endif %}
+  <form method="post" action="/login" novalidate>
+    <input type="hidden" name="next" value="{{ next }}">
+    {{ field('l-user', 'username', '用户名', login.username, autocomplete='username', mono=True, focus=login.focus=='username') }}
+    {{ field('l-pass', 'password', '密码', type='password', autocomplete='current-password', error=le.password, focus=login.focus=='password') }}
+    {% if login.rate %}
+    <button class="btn btn-primary" type="submit" aria-disabled="true" aria-describedby="why-login-rate">登录</button>
+    <p class="reason" id="why-login-rate">{{ msg.rate }}{% if login.rate_minutes %}约 {{ login.rate_minutes }} 分钟后可再试。{% endif %}</p>
+    {% else %}
+    <button class="btn btn-primary" type="submit">登录</button>
+    {% endif %}
+  </form>
+  <p><a class="lnk lnk-pad" href="/forgot">忘记密码？</a></p>
+  <p class="switch"><a class="lnk lnk-pad" href="/register?next={{ next|urlencode }}" data-switch="register">没有账号？注册</a></p>
+</section>
+{% endblock %}

@@ -16,6 +16,7 @@ contract/
 | --- | --- | --- |
 | 管理接口事件信封（`POST /admin/events`，按 `event_id` 去重） | Mac → 服务器 | `envelope.v1.schema.json` |
 | 通道测试 `ping`（信封 `kind: ping` 的 `payload`） | Mac → 服务器 | `ping.v1.schema.json` |
+| 指令：设置通用邀请码 `set_invite_code`（AD-2、AD-24；`command_id` + 按目标 `invite` 单调的 `target_seq`） | Mac → 服务器 | `set_invite_code.v1.schema.json` |
 
 信封的 `payload` 按 `<kind>.v<payload.schema_version>.schema.json` 另行校验；新增载荷类别时同时把它加进信封的 `kind` 枚举。Mac 端用标准库最小校验器（`curio/sync`，只支持 `type`、`required`、`properties`、`additionalProperties`、`const`、`enum`、`pattern`、`minLength`、`maxLength`），Schema 里出现其它关键字会直接报错；服务器端用 `jsonschema`。
 

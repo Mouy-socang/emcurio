@@ -57,6 +57,7 @@ class FakeServer:
         self.lose_ack = set()     # 这些 event_id 存下但返回 500（只一次）
         self.reject = {}          # event_id -> 400/409（永久拒收）
         self.drip = None          # 秒数：先发头，再每隔这么久滴一个字节
+        self.not_applied = set()  # 这些 event_id（set_invite_code）回 applied: false
         self.requests = 0
         outer = self
 
@@ -93,6 +94,8 @@ class FakeServer:
                     return self.reply(500, {'ok': False, 'detail': '内部错误'})
                 if eid not in outer.events:
                     outer.events[eid] = {'ok': True, 'event_id': eid, 'received_at': '2026-11-03T08:00:00.000Z'}
+                    if env['kind'] == 'set_invite_code':
+                        outer.events[eid]['applied'] = eid not in outer.not_applied
                     outer.order.append(eid)
                 if eid in outer.lose_ack:
                     outer.lose_ack.discard(eid)
@@ -578,6 +581,169 @@ def test_end_to_end_with_local_server(tmp_path, store):
         assert requests.post(url + '/admin/events', json=env1).status_code == 401
         with sqlite3.connect(tmp_path / 'server.db') as c:
             assert c.execute('SELECT count(*) FROM events').fetchone()[0] == 3
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+# ---------- 故事 9：邀请码指令（set_invite_code，AD-2、AD-24） ----------
+
+def test_outbox_invite_enqueues_command_with_increasing_target_seq(store):
+    from scripts import outbox
+    lines = []
+    db = ['--db', str(store.path)]
+    assert outbox.main(db + ['invite', 'MOMO2026'], out=lines.append) == 0
+    assert outbox.main(db + ['invite', ' NEW-CODE_2 '], out=lines.append) == 0
+    got = [(r['kind'], json.loads(r['payload'])) for r in rows(store)]
+    assert [k for k, _ in got] == ['set_invite_code', 'set_invite_code']
+    assert [p['target_seq'] for _, p in got] == [1, 2]
+    assert [p['code'] for _, p in got] == ['MOMO2026', 'NEW-CODE_2']
+    assert got[0][1]['command_id'] != got[1][1]['command_id']
+    assert all('MOMO2026' not in line for line in lines)        # 不回显邀请码
+    for r in rows(store):
+        sync.check_envelope(sync._envelope(r['event_id'], r['kind'], json.loads(r['payload']), r['created_at']))
+
+
+@pytest.mark.parametrize('code', ['abc', 'has space', 'x' * 33, '邀请码码码', '   ', 'MOMO\n2026'])
+def test_outbox_invite_rejects_bad_code(store, code):
+    from scripts import outbox
+    lines = []
+    assert outbox.main(['--db', str(store.path), 'invite', code], out=lines.append) == 1
+    assert rows(store) == [] and store.get('cmd_seq:invite') is None
+    assert lines[-1].startswith('失败：')
+
+
+def test_invite_target_seq_is_part_of_transaction(store):
+    with pytest.raises(RuntimeError):
+        with store.connect() as c:
+            sync.enqueue_invite(c, 'MOMO2026')
+            raise RuntimeError('失败')
+    assert rows(store) == [] and store.get('cmd_seq:invite') is None
+
+
+def test_invite_not_applied_blocks_and_notifies(store, root, fake, notes):
+    with store.connect() as c:
+        eid, _ = sync.enqueue_invite(c, 'MOMO2026')
+    fake.not_applied.add(eid)
+    r = sync.flush(store, root)
+    assert r['sync_status'] == 'blocked' and r['sync_error'] == sync.INVITE_NOT_APPLIED
+    [row] = rows(store)
+    assert row['failed_at'] and row['sent_at'] is None and row['last_error'] == '服务器已有更新的邀请码命令，未生效'
+    assert len(notes) == 1 and '邀请码' in notes[0]
+
+
+def test_invite_applied_ack_is_sent(store, root, fake):
+    with store.connect() as c:
+        sync.enqueue_invite(c, 'MOMO2026')
+    assert sync.flush(store, root)['sync_status'] == 'ok'
+
+
+def test_invite_seq_override_for_recovery(store):
+    from scripts import outbox
+    db = ['--db', str(store.path)]
+    assert outbox.main(db + ['invite', 'MOMO2026'], out=lambda *_: None) == 0
+    assert outbox.main(db + ['invite', 'NEWCODE2', '--seq', '50'], out=lambda *_: None) == 0
+    assert outbox.main(db + ['invite', 'NEWCODE3', '--seq', '10'], out=lambda *_: None) == 0   # 只往上抬
+    assert outbox.main(db + ['invite', 'NEWCODE4', '--seq', '0'], out=lambda *_: None) == 1
+    assert [json.loads(r['payload'])['target_seq'] for r in rows(store)] == [1, 50, 51]
+
+
+def test_outbox_list_masks_invite_code(store):
+    from scripts import outbox
+    lines = []
+    db = ['--db', str(store.path)]
+    outbox.main(db + ['invite', 'MOMO2026'], out=lines.append)
+    outbox.main(db + ['list'], out=lines.append)
+    assert 'MOMO2026' not in '\n'.join(lines) and 'M******6' in lines[-1] and '序号 1' in lines[-1]
+
+
+INVITE_CASES = [
+    dict(),
+    dict(code='abc'),
+    dict(code='MOMO2026\n'),
+    dict(target_seq='1'),
+    dict(target_seq=True),
+    dict(target_seq=1.5),
+    dict(command_id='not-a-uuid'),
+    dict(extra=1),
+]
+
+
+@pytest.mark.skipif(not (ROOT / 'server' / '.venv' / 'bin' / 'python').exists(), reason='先在 server/ 下 uv sync')
+def test_invite_contract_agrees_with_server_jsonschema():
+    base = {'schema_version': 1, 'command_id': '0f8fad5b-d9cb-469f-a165-70867728950e', 'target_seq': 1,
+            'code': 'MOMO2026'}
+    envs = [{'schema_version': 1, 'event_id': '0f8fad5b-d9cb-469f-a165-70867728950e', 'kind': 'set_invite_code',
+             'created_at': '2026-11-03T08:00:00.000Z', 'payload': dict(base, **over)} for over in INVITE_CASES]
+    probe = ('import json,sys\n'
+             'import app\n'
+             'c=app.Contract(app.DEFAULT_CONTRACT)\n'
+             'out=[]\n'
+             'for e in json.load(sys.stdin):\n'
+             '    try:c.check(e);out.append(True)\n'
+             '    except app.BadPayload:out.append(False)\n'
+             'print(json.dumps(out))\n')
+    r = subprocess.run([str(ROOT / 'server' / '.venv' / 'bin' / 'python'), '-c', probe], cwd=ROOT / 'server',
+                       input=json.dumps(envs), capture_output=True, text=True, timeout=60, check=True)
+    server_ok = json.loads(r.stdout)
+    mac_ok = []
+    for e in envs:
+        try:
+            sync.check_envelope(e)
+            mac_ok.append(True)
+        except sync.ContractError:
+            mac_ok.append(False)
+    # 结尾换行由两端在 Schema 之外再严格检查（Mac：enqueue_invite；服务器：accounts.check_invite_command）。
+    assert mac_ok == server_ok
+    assert mac_ok[0] is True and mac_ok[1] is False and not any(mac_ok[3:])
+
+
+@pytest.mark.skipif(not SERVER_PY.exists(), reason='先在 server/ 下 uv sync')
+def test_invite_end_to_end_with_local_server(tmp_path, store):
+    """Mac 经发件箱下发邀请码 → 本机真服务器生效 → 旧码注册失败、新码成功（只连 127.0.0.1）。"""
+    from scripts import outbox
+    port = _free_port()
+    env = dict(os.environ, CURIO_ADMIN_TOKEN=TOKEN, CURIO_SERVER_DB=str(tmp_path / 'server.db'),
+               CURIO_COOKIE_SECURE='0', CURIO_MAIL_DIR=str(tmp_path / 'mail'))
+    proc = subprocess.Popen([str(SERVER_PY), 'app.py', '--port', str(port)], cwd=ROOT / 'server', env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    url = f'http://127.0.0.1:{port}'
+    try:
+        for _ in range(100):
+            try:
+                if requests.get(url + '/healthz', timeout=1).status_code == 200:
+                    break
+            except requests.RequestException:
+                time.sleep(0.1)
+        else:
+            pytest.fail('本机服务器未启动')
+        write_env(tmp_path, CURIO_SERVER_URL=url, CURIO_ADMIN_TOKEN=TOKEN)
+
+        def register(code, username):
+            s = requests.Session()
+            s.headers['Origin'] = url
+            r = s.post(url + '/register', allow_redirects=False,
+                       data={'invite': code, 'username': username, 'password': 'meissen1710',
+                             'nickname': '王姐', 'consent': 'yes', 'next': '/item/CO-0001'})
+            return r, s
+
+        r, _ = register('OLDCODE1', 'before')
+        assert r.status_code == 400 and '注册暂未开放' in r.text
+        db = ['--db', str(store.path)]
+        assert outbox.main(db + ['invite', 'OLDCODE1'], out=lambda *_: None) == 0
+        assert sync.flush(store, tmp_path)['sync_status'] == 'ok'
+        r, s = register('oldcode1', 'first')
+        assert r.status_code == 303 and r.headers['location'] == '/item/CO-0001'
+        assert '今日榜' in s.get(url + '/item/CO-0001').text
+        assert outbox.main(db + ['invite', 'NEWCODE2'], out=lambda *_: None) == 0
+        assert sync.flush(store, tmp_path)['sync_status'] == 'ok'
+        r, _ = register('OLDCODE1', 'second')
+        assert r.status_code == 400 and '邀请码不正确，请向墨墨确认。' in r.text
+        r, _ = register('NEWCODE2', 'second')
+        assert r.status_code == 303
+        with sqlite3.connect(tmp_path / 'server.db') as c:
+            dump = '\n'.join(c.iterdump())
+        assert 'OLDCODE1' not in dump and 'NEWCODE2' not in dump and 'meissen1710' not in dump
     finally:
         proc.terminate()
         proc.wait(timeout=10)

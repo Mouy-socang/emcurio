@@ -1,0 +1,17 @@
+{% macro field(id, name, label, value='', type='text', autocomplete='off', help=None, error=None, mono=False, optional=False, focus=False, extra='') -%}
+<div class="field">
+  <label class="flabel" for="{{ id }}">{{ label }}{% if optional %} <span class="opt">（选填）</span>{% endif %}</label>
+  <input class="ti{% if mono %} mono{% endif %}" id="{{ id }}" name="{{ name }}" type="{{ type }}" autocomplete="{{ autocomplete }}"
+    {%- if type != 'password' %} value="{{ value }}"{% endif %}
+    {%- if mono %} autocapitalize="off" spellcheck="false"{% endif %}
+    {%- if error %} aria-invalid="true"{% endif %}
+    {%- if help or error %} aria-describedby="{% if help %}{{ id }}-help{% endif %}{% if help and error %} {% endif %}{% if error %}{{ id }}-err{% endif %}"{% endif %}
+    {%- if focus %} autofocus{% endif %} {{ extra|safe }}>
+  {% if help %}<p class="help" id="{{ id }}-help">{{ help }}</p>{% endif %}
+  {% if error %}<p class="err" id="{{ id }}-err" role="alert">{{ error }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro logout_button(label='退出登录') -%}
+<form method="post" action="/logout"><button class="linkbtn" type="submit">{{ label }}</button></form>
+{%- endmacro %}

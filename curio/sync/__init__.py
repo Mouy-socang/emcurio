@@ -226,6 +226,35 @@ def enqueue(c, kind, payload):
     return event_id
 
 
+_INVITE_RE = re.compile(r'[A-Za-z0-9_-]{4,32}')
+_MAX_SEQ = 2 ** 63 - 1
+INVITE_NOT_APPLIED = '服务器已有更新的邀请码命令，未生效'
+
+
+def next_target_seq(c, target, at_least=None):
+    """AD-24：按目标单调递增的指令序号（kv `cmd_seq:<target>`）。先写后读，写锁保证并发下不重复。不提交。
+
+    at_least：恢复用——Mac 库从备份恢复后计数器落后于服务器时，把计数器抬到至少这个值。"""
+    key = f'cmd_seq:{target}'
+    if at_least is not None:
+        if type(at_least) is not int or not 1 <= at_least <= _MAX_SEQ:
+            raise ContractError('序号须为 1 到 2^63-1 的整数')
+        c.execute("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET "
+                  "v=MAX(CAST(v AS INTEGER),CAST(excluded.v AS INTEGER))", (key, str(at_least - 1)))
+    c.execute("INSERT INTO kv(k,v) VALUES(?,'1') ON CONFLICT(k) DO UPDATE SET v=CAST(v AS INTEGER)+1", (key,))
+    return int(c.execute('SELECT v FROM kv WHERE k=?', (key,)).fetchone()[0])
+
+
+def enqueue_invite(c, code, at_least=None):
+    """入队 set_invite_code 指令（AD-2、AD-24），返回 (event_id, target_seq)。不提交。码不合规抛 ContractError。"""
+    code = (code or '').strip()
+    if not _INVITE_RE.fullmatch(code):
+        raise ContractError('邀请码须为 4–32 位字母、数字、下划线或连字符')
+    seq = next_target_seq(c, 'invite', at_least)
+    payload = {'schema_version': 1, 'command_id': str(uuid.uuid4()), 'target_seq': seq, 'code': code}
+    return enqueue(c, 'set_invite_code', payload), seq
+
+
 def pending(c):
     return c.execute('SELECT count(*) FROM outbox WHERE sent_at IS NULL').fetchone()[0]
 
@@ -313,6 +342,9 @@ def _post(session, url, token, envelope, timeout, deadline, monotonic):
         return f'服务器返回 {r.status_code}{detail}', r.status_code in PERMANENT_STATUS
     if not isinstance(body, dict) or body.get('event_id') != envelope['event_id']:
         return '服务器确认无效（未回显 event_id）', False
+    if envelope['kind'] == 'set_invite_code' and body.get('applied') is not True:
+        # 服务器已有序号更大的邀请码指令（例如 Mac 库从备份恢复后计数器回退）：重发也不会生效。
+        return INVITE_NOT_APPLIED, True
     return None, False
 
 

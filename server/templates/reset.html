@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field %}
+{% block body %}
+<div class="head">
+  <p class="eb" aria-hidden="true">Curiobject</p>
+  <h1>设置新密码</h1>
+</div>
+{% if valid %}
+<form method="post" action="/reset" novalidate>
+  <input type="hidden" name="token" value="{{ token }}">
+  {{ field('n-pass', 'password', '新密码', type='password', autocomplete='new-password', help='至少 8 位。', error=error, focus=True) }}
+  <button class="btn btn-primary" type="submit">保存新密码</button>
+</form>
+{% else %}
+<p class="im" role="alert">{{ msg.reset_invalid }}</p>
+<p><a class="lnk lnk-pad" href="/login">返回登录</a></p>
+{% endif %}
+{% endblock %}
