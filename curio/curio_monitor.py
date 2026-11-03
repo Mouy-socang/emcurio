@@ -513,6 +513,9 @@ def run(root,clock=time.time):
         # CAP-4：抓取与在售检查之后，在 AI 预算内给新货打分；失败只记 ai_status，不影响其它结果。
         from . import ai
         result.update(ai.run(store,root,config,clock))
+        # AD-23：限时 30 秒把发件箱按序推到服务器；未配置服务器时 sync_status: disabled，失败下轮从同一条重试。
+        from . import sync
+        result.update(sync.run(store,root))
         store.archive();store.set('last_collection',now())
         result['api_usage']=budget.snapshot();result.update(sched.summary())
         store.set('last_collection_result',json.dumps(result,ensure_ascii=False))

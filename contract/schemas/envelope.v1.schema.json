@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "envelope.v1.schema.json",
+  "title": "管理接口事件信封 v1（Mac → 服务器，POST /admin/events）",
+  "description": "每条发件箱记录都包在信封里发送；服务器按 event_id 去重。payload 的结构由 kind 决定，按 contract/schemas/<kind>.v<payload.schema_version>.schema.json 另行校验。",
+  "type": "object",
+  "required": ["schema_version", "event_id", "kind", "created_at", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_id": {
+      "type": "string",
+      "description": "小写 UUID，Mac 入队时生成，重发不变。",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "kind": {
+      "type": "string",
+      "description": "载荷类别；新增类别时同时新增对应的 <kind>.v1.schema.json。",
+      "enum": ["ping"]
+    },
+    "created_at": {
+      "type": "string",
+      "description": "入队时间，UTC，ISO 8601 带 Z，精确到毫秒。",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "payload": {"type": "object"}
+  }
+}

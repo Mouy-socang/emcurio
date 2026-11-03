@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ping.v1.schema.json",
+  "title": "ping 载荷 v1（通道测试）",
+  "description": "只用于打通 Mac → 服务器通道；服务器原样存下，无其它处理。",
+  "type": "object",
+  "required": ["schema_version"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "message": {"type": "string", "maxLength": 200}
+  }
+}

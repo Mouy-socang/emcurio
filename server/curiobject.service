@@ -1,0 +1,31 @@
+# venv 的 Python 装在 /opt/curiobject/python（部署脚本设 UV_PYTHON_INSTALL_DIR），不在 /home 下，ProtectHome 不会挡住解释器。
+# systemd 服务（复制到 /etc/systemd/system/curiobject.service，然后 systemctl daemon-reload && systemctl enable --now curiobject）。
+# 管理密钥等设置只在 /etc/curiobject/server.env（权限 0600），不进仓库：
+#   CURIO_ADMIN_TOKEN=<墨墨生成的管理密钥>
+#   CURIO_SERVER_DB=/var/lib/curiobject/server.db
+[Unit]
+Description=Curiobject server (FastAPI, 127.0.0.1:8790)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=curiobject
+Group=curiobject
+WorkingDirectory=/opt/curiobject/server
+EnvironmentFile=/etc/curiobject/server.env
+ExecStart=/opt/curiobject/server/.venv/bin/python app.py --port 8790
+Restart=on-failure
+RestartSec=5
+StateDirectory=curiobject
+# 组（deploy 在 curiobject 组里）可读写库，备份脚本才能 VACUUM INTO。
+StateDirectoryMode=0770
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/curiobject
+
+[Install]
+WantedBy=multi-user.target

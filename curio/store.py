@@ -10,6 +10,7 @@ from .price import prices, money
 from .rules import evaluate, standard_name, kb_fingerprint, kb_status, baseline_score
 from .config import ROOT
 from . import triage
+from . import sync
 from screening.pipeline import process
 
 
@@ -172,6 +173,8 @@ class Store:
                     # 两个进程同时首次打开：另一方已补列。
                     if 'duplicate column' not in str(e):raise
             triage.ensure(c)
+            # AD-23：Mac → 服务器的持久发件箱。
+            sync.ensure(c)
     @contextmanager
     def connect(self):
         c=sqlite3.connect(self.path,timeout=30);c.row_factory=sqlite3.Row

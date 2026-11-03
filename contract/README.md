@@ -10,6 +10,15 @@ contract/
   schemas/         每类载荷一个 JSON Schema 文件
 ```
 
+已定义：
+
+| 载荷 | 方向 | 文件 |
+| --- | --- | --- |
+| 管理接口事件信封（`POST /admin/events`，按 `event_id` 去重） | Mac → 服务器 | `envelope.v1.schema.json` |
+| 通道测试 `ping`（信封 `kind: ping` 的 `payload`） | Mac → 服务器 | `ping.v1.schema.json` |
+
+信封的 `payload` 按 `<kind>.v<payload.schema_version>.schema.json` 另行校验；新增载荷类别时同时把它加进信封的 `kind` 枚举。Mac 端用标准库最小校验器（`curio/sync`，只支持 `type`、`required`、`properties`、`additionalProperties`、`const`、`enum`、`pattern`、`minLength`、`maxLength`），Schema 里出现其它关键字会直接报错；服务器端用 `jsonschema`。
+
 需要定义的载荷（由后续故事逐个加入 `schemas/`）：
 
 | 载荷 | 方向 | 建议文件名 |

@@ -272,13 +272,92 @@ launchctl kickstart gui/$(id -u)/com.curiobject.collect
 
 不相关信息沿用旧硬过滤（招聘、房产、汽车、求购、仿品/非瓷器等），并补齐实际出现的土地、地砖、代金券。排除货仍入库保存原因，只是不进待审核。此次对旧库的两条不相关记录做了一次纠正，保留在 rule_corrections；不改变店主的历史 cases。日常判断仍为新商品一次、价格变化才重判。
 
+## 香港服务器与同步通道（故事 8，AD-3、AD-19、AD-21、AD-23）
+
+香港服务器与域名还没买（墨墨 2026-11-03 决定）。本仓库只写好服务器骨架、部署与备份脚本，并在本机测试；**连接真实 VPS（部署、备份）须墨墨另行授权后才执行**。
+
+### 组成
+
+- `server/`：FastAPI + SQLite 服务器（单独的 `server/pyproject.toml` 与 `server/uv.lock`，Mac 端依赖不变）。
+  - `GET /healthz`：无鉴权，只返回 `{"status":"ok","version":…}`。
+  - `POST /admin/events`：`Authorization: Bearer <管理密钥>`，否则 401 且不写入；按 `contract/schemas/` 校验信封与载荷，不认识的 `schema_version` / `kind` 或不合 Schema 返回 400（中文 `detail`）；按 `event_id` 去重——重复请求返回第一次的确认、不重复处理（同一 `event_id` 内容不同返回 409）。
+  - 不提供 `/docs`、`/openapi.json`；SQLite 开 WAL 与 `busy_timeout`；只监听 `127.0.0.1:8790`，由 Caddy 反代并自动签 HTTPS 证书（`server/Caddyfile`、`server/curiobject.service`）。
+  - 设置只来自服务器环境文件 `/etc/curiobject/server.env`（权限 0600）：`CURIO_ADMIN_TOKEN`、`CURIO_SERVER_DB`（默认 `server/data/server.db`，生产用 `/var/lib/curiobject/server.db`）。
+- `contract/schemas/`：`envelope.v1.schema.json`（`schema_version`、`event_id`、`kind`、`created_at`、`payload`）与 `ping.v1.schema.json`。两端用同一份文件校验。
+- `curio/sync/`：Mac 上唯一调用服务器的代码。
+
+### 发件箱（`curio.db` 表 `outbox`）
+
+- 列：`seq`（自增，发送顺序）、`event_id`（UUID，唯一）、`kind`、`payload`、`created_at`（UTC，带 Z，毫秒）、`attempts`、`last_error`、`sent_at`。
+- 写入只用 `curio.sync.enqueue(c, kind, payload)`：先按契约校验（坏载荷抛错、不入队），与触发它的状态变更同一事务、由调用方提交。
+- `curio.sync.flush()` 按 `seq` 逐条发送；遇失败即停、不跳过，`attempts` 加一、`last_error` 记中文原因，下次从同一条重试；服务器 2xx 且回显 `event_id` 才写 `sent_at`。
+- 暂时失败（网络、超时、5xx、401）下轮自动重试。永久失败（服务器 400 / 409 / 413、本机契约校验不过、库里载荷 JSON 坏掉）把该条标 `failed_at` 并停在这里——**不跳过**（顺序要紧），之后每轮都是 `sync_status: blocked`（附 `sync_blocked_seq`），并立刻发一条点名该条的系统通知。处理办法见下方 `scripts/outbox.py`。
+- 采集轮在 AI 打分之后、归档之前调用一次 flush（墙钟限时 30 秒，含慢速响应；没发完的下轮继续）；结果写入 `sync_status`：`disabled`（`.env` 未配置服务器，发件箱保留）、`ok`、`error`（附 `sync_error`、`sync_fail_streak`）、`blocked`、`timeout`，另有 `sync_sent`、`sync_pending`。只做调度判断、两项都不到期的空转轮次不 flush。
+- 连续 3 次 flush 失败（含同步模块的意外异常）时发一次 macOS 系统通知（`osascript`）；只有 `ok` 清零，`timeout` 与 `blocked` 不改计数。
+- 本故事只有测试载荷 `ping`；快照、隐藏、指令、收件箱由后续故事加入。
+- 已送达的发件箱记录与服务器 `events` 表目前不清理，清理策略留到快照故事（故事 9）一并定。
+
+```sh
+uv run python scripts/outbox.py list               # 未送达的记录（--all 含已送达）
+uv run python scripts/outbox.py ping "部署后测试"   # 入队一条 ping，下一轮采集送出
+uv run python scripts/outbox.py requeue <seq>      # 修好服务器或契约后，清除拒收标记重发
+uv run python scripts/outbox.py drop <seq> --yes   # 放弃一条卡住的记录（不可撤销），后面的记录才会继续发
+```
+
+```sh
+sqlite3 data/curio.db "SELECT seq,kind,attempts,last_error,sent_at FROM outbox ORDER BY seq DESC LIMIT 10"
+```
+
+### Mac `.env`（密钥不进代码、测试、日志、提交）
+
+```sh
+CURIO_SERVER_URL=https://<域名>          # 必须 https（本机测试可用 http://127.0.0.1:端口）
+CURIO_ADMIN_TOKEN=<管理密钥>             # 与服务器 /etc/curiobject/server.env 中相同
+CURIO_SSH_HOST=deploy@<服务器 IP 或域名>  # 部署与备份用
+# 选填（括号内为默认值）：
+# CURIO_REMOTE_DIR（/opt/curiobject）        服务器上的仓库目录
+# CURIO_REMOTE_DB（/var/lib/curiobject/server.db）  服务器库，备份用
+# CURIO_REMOTE_UV（uv）                      服务器上 uv 的路径（非交互 SSH 的 PATH 里找不到时填绝对路径）
+# CURIO_REMOTE_PYTHON（<CURIO_REMOTE_DIR>/server/.venv/bin/python）  备份时在服务器上跑 VACUUM INTO 的 Python
+```
+
+未填 `CURIO_SERVER_URL` 时同步为 `disabled`；只填地址不填密钥、或地址不是 https 时同样不发送，并在 `sync_error` 说明原因。
+
+### 服务器准备清单（墨墨操作）
+
+1. 买香港 VPS（实测 CN2 线路，≥2 GB 内存、≥10 Mbit/s；见 open-items 第 7 条）与域名，域名 A 记录指向 VPS。
+2. 在 Mac 生成 SSH 密钥（已有可跳过：`ssh-keygen -t ed25519`），把公钥加到 VPS 的部署用户（如 `deploy`）`~/.ssh/authorized_keys`；关闭密码登录。
+3. 生成管理密钥：`python3 -c "import secrets;print(secrets.token_urlsafe(32))"`，填进 Mac `.env` 的 `CURIO_ADMIN_TOKEN` 与服务器 `/etc/curiobject/server.env`。
+4. 服务器一次性准备（root）：安装 uv、rsync、curl 与 Caddy 2.11.x；`useradd --system curiobject`，把 `deploy` 加入 `curiobject` 组；`mkdir -p /opt/curiobject /etc/curiobject`，`/opt/curiobject` 归 `deploy` 且其他用户可读（服务以 `curiobject` 用户运行，要能读代码与 venv）。部署脚本让 uv 把 Python 3.13 装在 `/opt/curiobject/python`（`UV_PYTHON_INSTALL_DIR`），不在 `/home` 下，所以服务的 `ProtectHome=true` 不会挡住解释器。`/var/lib/curiobject` 不用手建：systemd 按 `StateDirectory=curiobject`、`StateDirectoryMode=0770` 建成 `curiobject:curiobject`、组可读写，服务 `UMask=0007` 让库与 WAL 文件也组可读写，`deploy` 因在 `curiobject` 组里才能做备份。写 `/etc/curiobject/server.env`（`CURIO_ADMIN_TOKEN=…`、`CURIO_SERVER_DB=/var/lib/curiobject/server.db`，0600，归 root）；允许 `deploy` 免密 `sudo systemctl restart curiobject`。
+5. 首次部署（见下）后：`cp /opt/curiobject/server/curiobject.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now curiobject`；`cp /opt/curiobject/server/Caddyfile /etc/caddy/Caddyfile`，在 Caddy 环境里设 `CURIO_DOMAIN=<域名>`，`systemctl reload caddy`。防火墙只开 22、80、443。
+
+### 部署与备份（须墨墨授权后才对真实 VPS 执行）
+
+```sh
+uv run python scripts/deploy_server.py --dry-run   # 只打印命令
+uv run python scripts/deploy_server.py             # rsync server/（不含 .venv、data）与 contract/ → uv sync --frozen → 重启 → 健康检查（核对版本）
+uv run python scripts/backup_server.py             # 服务器上 mktemp -d（0700）里 VACUUM INTO → 拉回 data/server-backups/server-<UTC>.db → 本机 integrity_check → 删除服务器临时目录与超过 30 天的备份
+```
+
+- ssh / rsync 一律 `BatchMode=yes`（不弹密码或主机指纹提示，首次连接前先手动 `ssh deploy@…` 确认指纹）、`ConnectTimeout=15`，每步另有总时限；任一步失败或超时都非零退出。
+- 部署后先在服务器本机查 `/healthz`，填了 `CURIO_SERVER_URL` 时再经 HTTPS 查一次，两处报告的版本都须等于 `server/app.py` 的 `VERSION`。
+- 端到端验证：部署后在 Mac 执行 `uv run python scripts/outbox.py ping "部署后测试"`，再跑一轮 `uv run python -m curio.curio_monitor`（或等下一轮），输出里 `sync_status: ok`、`scripts/outbox.py list` 显示无未送达记录即通道已通。
+- 每日备份可在买好服务器后另加 launchd 任务（本故事不安装）。
+
+### 本机运行服务器
+
+```sh
+cd server && uv sync && CURIO_ADMIN_TOKEN=<本机测试密钥> uv run python app.py --port 8790
+```
+
 ## 验证
 
 ```sh
 uv run pytest -q
+cd server && uv run pytest -q    # 服务器端测试（单独的 venv）
 ```
 
-测试使用模拟API和临时数据库，不连接商品平台，不消耗模型额度。测试结果见 `VALIDATION.txt`。原仓库基线验收仍待拿到 main 和案例后运行；目标计数为店主「要」21件：6/15/0，店主「不要」289件：4/245/40，当前未验证。
+同步测试只连本机 127.0.0.1 上临时启动的服务器（标准库假服务器，以及 `server/.venv` 存在时的真服务器端到端），部署与备份脚本用 mock 或本机执行验证，不连真实 VPS。测试使用模拟API和临时数据库，不连接商品平台，不消耗模型额度。测试结果见 `VALIDATION.txt`。原仓库基线验收仍待拿到 main 和案例后运行；目标计数为店主「要」21件：6/15/0，店主「不要」289件：4/245/40，当前未验证。
 
 ## 2026-10-05 本机部署结果（历史记录（迁移前））
 

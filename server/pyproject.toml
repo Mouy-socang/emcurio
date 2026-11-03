@@ -1,0 +1,23 @@
+[project]
+name = "curiobject-server"
+version = "0.1.0"
+description = "Curiobject 香港服务器：管理接口骨架（健康检查、鉴权、事件按 event_id 幂等）"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jsonschema>=4.23,<5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "httpx>=0.27",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

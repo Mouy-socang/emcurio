@@ -1,0 +1,15 @@
+# Curiobject 香港服务器 Caddy 配置（复制到 /etc/caddy/Caddyfile）。
+# CURIO_DOMAIN 写在 Caddy 的环境里（如 /etc/default/caddy 或 systemd override：Environment=CURIO_DOMAIN=example.com），
+# Caddy 自动申请并续期 HTTPS 证书；FastAPI 只监听 127.0.0.1:8790，不直接对外。
+{$CURIO_DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 1MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8790
+}
