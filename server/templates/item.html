@@ -34,6 +34,7 @@
 
 {% block body %}
 <span hidden data-signed-in></span>
+{% if track and state %}<span hidden data-track-page="item" data-who="{{ track }}" data-code="{{ code }}"></span>{% endif %}
 {{ site_head(cur, here, None, stale) }}
 {% if state == 'show' %}
 <article class="obj">

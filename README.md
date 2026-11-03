@@ -512,7 +512,63 @@ uv run python scripts/publish.py publish [--flush]            # 生成完整快�
   - 临时密码由 Mac 生成（12 位，去掉 0、1、I、O、l、o），服务器只存 Argon2id 哈希（`events` 表里为 HMAC）。Mac 只把明文放进发件箱等发送，服务器答复后 flush 立即抹掉；`guest_requests` 等表从不写明文；`scripts/outbox.py list` 只显示账号编号前 8 位与序号。后台浏览器只在确认后显示一次临时密码与「复制」，离开 06 或页面即不可再见（同一 request_id 重放不再给出明文，提示再重置一次）。
 - **邀请码**：06 顶部显示当前邀请码（最近一条已送达的 `set_invite_code`）与「更换」；更换需确认，复用 `sync.enqueue_invite`；待确认的新码后跟"待同步"，期间旧码仍有效；不合规的码就地报错。
 - 接口（本机后台，令牌 + Origin 同其它写接口；写请求带 `request_id`，表 `guest_requests` 幂等）：`GET /api/guests[?refresh=1]`、`GET /api/guests/search?q=`、`POST /api/guests/link`（action：link / relink / unlink / create）、`POST /api/guests/command`（action：disable_account / reset_password）、`POST /api/guests/invite`。
-- 不在本故事：行为事件与 GC 交接文件重算（故事 15）、按账号排序（故事 16 起）、删除账号与撤回同意、自动匹配建议。
+- 不在本故事：按账号排序（故事 16 起）、删除账号与撤回同意、自动匹配建议。关联、更正、解除后重算行为交接文件见下节（故事 15）。
+
+## 行为数据回流（故事 15，CAP-15；AD-9、AD-12、AD-18、AD-25、AD-28）
+
+客人的打开、点开、停留、筛选、币种选择按账号记录，经服务器收件箱临时中转回到 Mac，成为该客人在 GoodCustomer 侧的记忆。行为数据不推回线上，也不用于排序或打分（故事 16 起）。
+
+### 事件（契约 `contract/schemas/behavior_event.v1.schema.json`）
+
+字段：`event_id`（客人页生成的 UUID，重试不变）、`account_id`（服务器按会话填，不信客户端）、`type`、`co_code`（可空）、`client_ts`（仅参考）、`server_ts`（服务器入箱时写，权威）、`params`、`event_schema_version`。
+
+| 类型 | 何时 | `co_code` | `params` |
+| --- | --- | --- | --- |
+| `home_open` | 打开首页 | null | 当前筛选 `brand` / `form` / `band` / `pattern`（各自可缺） |
+| `item_open` | 打开单件页 | 货号 | `from`：`rank`（从今日榜点开）/ `pool`（从全部藏品点开）/ `link`（直接打开链接） |
+| `item_dwell` | 单件页隐藏或离开时（`sendBeacon`） | 货号 | `seconds`：这一段可见时长，1–1800，超过截为 1800 |
+| `filter` | 首页就地筛选改变后 | null | 改变后的所选值（同 `home_open`） |
+| `currency` | 币种切换保存到账号且值确实改变时（服务器在 `POST /currency` 里记录，脚本与无脚本表单提交都记，`event_id` 由服务器生成） | null | `currency`：`EUR` / `CNY` |
+
+各类型的 `co_code` 与 `params` 写在同一文件的 `$defs.<type>`，服务器与 Mac 都先按整份、再按 `$defs.<type>` 校验（Mac 最小校验器为此支持了 `type` 列表与 `$defs`）。
+
+### 客人页（`server/static/guest.js`）
+
+- 只在服务器上已登录客人的首页与单件页运行：页面带 `data-track-page` 标记与账号标记 `data-who`（账号编号的 HMAC 前 16 位，不是账号编号；`home_page` / `item_view_page` 的 `track` 只由客人路由传入）。Mac 预览（`/preview/…`，AD-28）、停用页、待重新同意页不带标记，不生成也不上报；预览的币种切换本来就只在页内。
+- 事件先进本机队列（`localStorage` 的 `curio-events`，最多 200 条、7 天；每条带账号标记，同一设备换了账号登录时别的账号留下的未发事件直接丢掉；写回前重新读取并按 `event_id` 合并，多个标签页不互相覆盖；存储写不进时改用内存队列；单条超过 2 KB 的不入队），约 1.5 秒后每批最多 50 条 `POST /events`；网络失败或 5xx / 429 留在队列里，30 秒后或下一页再发（同一 `event_id`，服务器去重）。服务器收下、拒收（400）、未登录 / 不记录（401 / 403）的才从队列删掉。页面隐藏或离开时用 `sendBeacon`（`text/plain` 的 JSON）把队列发出——beacon 只表示浏览器接下了，事件仍留在队列里，下次 fetch 得到答复才删（重复的由服务器按 `event_id` 去掉）。
+- 从榜或商品池点开单件时在 `sessionStorage` 记下来源（按链接解析后的路径判断货号），单件页据此填 `item_open.from`；其它情况为 `link`。
+
+### 服务器收件箱（`server/inbox.py`，路由在 `server/app.py`）
+
+- `POST /events`（会话 Cookie；`behavior_upload.v1`，每批 1–50 条，请求体 ≤ 64 KB——不带 Content-Length 的分块请求边读边数，超过即 413；`application/json` 或 `text/plain`；带 Origin 时必须同站，带 `Sec-Fetch-Site` 时必须 `same-origin`；两者都没有时放行，靠会话 Cookie 的 SameSite=Lax 挡住跨站）：未登录 401，停用或待重新同意 403；不合格的事件（如枚举外类型 `share`）列在 `rejected`、计数（`inbox_stats.rejected`）并记日志，一条都不合格时 400。按 `event_id` 去重（`inbox_seen` 保留 30 天，Mac 确认删除后重发也不再入箱），分配单调 `inbox_seq`。每账号每小时（整点窗口）最多 600 条，超出丢弃并计数（`inbox_stats.rate_dropped`）、记日志。
+- `GET /admin/inbox?after=<seq>&limit=500`（管理密钥；`inbox_batch.v1`）按 `inbox_seq` 升序返回，`more` 表示之后还有；`stats` 带服务器累计计数（`expired` / `rate_dropped` / `rejected`）。
+- `POST /admin/inbox/ack {schema_version: 1, max_seq}`（管理密钥；`inbox_ack.v1`）只删除 `inbox_seq ≤ max_seq` 的事件，幂等。
+- 未确认的事件保留 30 天，上报与拉取时清理超期的并记日志（`inbox_stats.expired`）。线上不长期保存行为数据；GC 编号与映射从不上线。
+
+### Mac：拉取 → 入账 → 重算 → 确认（`curio/behavior.py`）
+
+- 随 `sync.run` 每轮进行（在心跳与账号名单之后）：在 `curio.db` 同目录锁文件 `curio.db.inbox.lock` 的 `fcntl.flock`（不等待）内进行，同一时刻只有一个进程；后台与调度同时拉取时另一方跳过本轮（`inbox_status: busy`）。
+- 每页：拉取 → 按 `event_id` `INSERT OR IGNORE` 写入 `behavior_events` 并提交（同一事务把受影响客户记入 `handoff_dirty`）→ 重算交接文件 → 确认本页最大 `inbox_seq`（kv `inbox_acked_seq`）。写入失败不确认；确认前崩溃时下轮重拉、不重复。无法解析的事件原样存入 `behavior_unknown`（按内容哈希去重）并照常确认，不阻塞。
+- 失败（含重算、契约文件等意外）只写结果字段 `inbox_status: error` / `inbox_error`（kv `inbox_pull_error`），不计入同步连续失败，下轮重试。限时（20 秒，从先补算上轮留下的待重算之后开始）用完而还有页时另有 `inbox_more: true`。结果另有 `inbox_pulled`、`inbox_new`、`inbox_duplicate`、`inbox_unknown`、`handoff_errors`，以及服务器计数 `inbox_server_expired` / `inbox_server_rate_dropped` / `inbox_server_rejected`；计数比上次增长时记警告日志并给出 `inbox_server_grown`（例如 Mac 离线超过 30 天、事件被服务器删掉）。
+
+### GoodCustomer 交接文件
+
+- 位置（墨墨 2026-11-03 决定）：Curiobject 自己的目录 `data/gc_handoff/<GC编号>.json`（即 `curio.db` 同目录下的 `gc_handoff/`），**不写入 GoodCustomer 库**；GoodCustomer 要接时再指过来。重算只用 `curio.db` 里的映射与账本，不依赖 GC 库是否可用。
+- 每个已关联客户一份，内容为该客户当前关联的全部账号在账本中的全部事件（按 `server_ts`、`event_id` 排序，`event_id` 唯一）加按类型的计数。每次整份原子覆盖写（临时文件 + `os.replace`），不追加，内容相同则字节相同；没有任何关联账号时删除该文件。未关联账号的事件只留在账本，关联后整段历史进入文件。
+- 何时重算：新事件入账、关联、更正（前后两个客户）、解除、新建档案并关联。待重算的客户记在 `handoff_dirty`（与触发它的写入同一事务），重算成功才清掉；写文件失败下一轮拉取（或下一次关联变化）再算。
+
+```json
+{
+ "handoff_version": 1,
+ "customer_id": "GC000123",
+ "source": "curiobject",
+ "accounts": [{"account_id": "…32 位…", "username": "wangjie", "nickname": "王姐"}],
+ "summary": {"total": 5, "by_type": {"home_open": 1, "item_open": 1, "item_dwell": 1, "filter": 1, "currency": 1},
+             "first_server_ts": "2026-11-03T08:00:00.000Z", "last_server_ts": "2026-11-03T08:05:12.345Z"},
+ "events": [{"event_id": "…", "account_id": "…", "type": "item_open", "co_code": "CO-0012", "client_ts": "…",
+             "server_ts": "…", "params": {"from": "rank"}, "event_schema_version": 1}]
+}
+```
 
 ## 验证
 

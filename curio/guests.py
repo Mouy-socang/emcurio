@@ -9,6 +9,7 @@
   不写入 guest_requests 或任何别的表（发件箱里的明文在服务器确认后由 flush 抹掉）。
 - 邀请码：当前码 = 最近一条已送达的 set_invite_code；更新的未送达那条显示"待同步"（期间旧码仍有效）。
 - 写操作带 request_id，同一 request_id 重放返回第一次的结果（guest_requests）。
+- 关联、更正（前后两个客户）、解除后重算受影响客户的行为交接文件（curio/behavior.py，故事 15）；只需 GC 编号，不读 GC 库。
 """
 import json
 import logging
@@ -21,7 +22,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from . import sync
+from . import behavior, sync
 
 log = logging.getLogger(__name__)
 
@@ -227,10 +228,13 @@ def link(store, gc, action, account_id, request_id, customer_id=None):
                 c.execute('INSERT OR REPLACE INTO guest_links(account_id,customer_id,linked_at) VALUES(?,?,?)',
                           (account_id, customer_id, at))
             _log(c, account_id, action, before, customer_id if action != 'unlink' else None, request_id)
+            # 故事 15（AD-12）：前后两个客户的交接文件都待重算（同一事务标记，提交后立即重算）。
+            behavior.mark_dirty(c, before, customer_id if action != 'unlink' else None)
             result = {'ok': True, 'action': action, 'account_id': account_id, 'nickname': acct['nickname'],
                       'before': before, 'customer_id': customer_id if action != 'unlink' else None,
                       'display_name': target['display_name'] if target else None}
             _remember(c, request_id, payload, result)
+    behavior.after_link_change(store)
     return result
 
 
@@ -267,6 +271,7 @@ def create_and_link(store, gc, account_id, request_id, run=None):
                 c.execute('INSERT INTO guest_links(account_id,customer_id,linked_at) VALUES(?,?,?)',
                           (account_id, customer_id, _now()))
                 _log(c, account_id, 'link', None, customer_id, request_id)
+                behavior.mark_dirty(c, customer_id)
                 result = {'ok': True, 'action': 'create', 'account_id': account_id, 'nickname': acct['nickname'],
                           'before': None, 'customer_id': customer_id, 'display_name': acct['nickname'], 'created': True}
                 _remember(c, request_id, payload, result)
@@ -275,6 +280,7 @@ def create_and_link(store, gc, account_id, request_id, run=None):
         except Exception as e:
             log.warning('新建档案 %s 后未能关联：%s', customer_id, e)
             raise GuestError(f'已新建档案 {customer_id}，但未能关联；请重试（不会再新建）') from None
+    behavior.after_link_change(store)
     return result
 
 

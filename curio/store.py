@@ -13,6 +13,7 @@ from .config import ROOT, fees_for
 from . import triage
 from . import sync
 from . import publish
+from . import behavior
 from screening.pipeline import process
 
 
@@ -201,6 +202,8 @@ class Store:
             sync.ensure(c)
             # AD-5、AD-22：榜、发布记录、图片转码缓存、已发布货的隐藏状态。
             publish.ensure(c)
+            # 故事 15（AD-9、AD-12、AD-25）：行为账本、未识别事件、交接文件待重算标记。
+            behavior.ensure(c)
     @contextmanager
     def connect(self):
         c=sqlite3.connect(self.path,timeout=30);c.row_factory=sqlite3.Row

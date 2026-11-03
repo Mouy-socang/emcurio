@@ -3,6 +3,8 @@
 {% from "_pool.html" import card, rank_card %}
 {% block body %}
 <span hidden data-signed-in></span>
+{# 故事 15（AD-25）：行为事件标记；预览（AD-28）与停用页不带，guest.js 见不到就不上报。 #}
+{% if track %}<span hidden data-track-page="home" data-who="{{ track }}" data-params='{{ chosen|tojson }}'></span>{% endif %}
 {{ site_head(cur, here, updated, stale) }}
 <div class="head">
   <p class="eb" aria-hidden="true">Today's Ten</p>

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "behavior_upload.v1.schema.json",
+  "title": "行为事件上报 v1（客人页 → 服务器，POST /events，会话鉴权）",
+  "description": "一批行为事件，最多 50 条。每条是 behavior_event.v1 去掉 account_id 与 server_ts 的部分（两者由服务器填写；客户端带了也被覆盖）；服务器补齐后按 behavior_event.v1 校验整条。合格的入箱（event_id 去重），不合格的列在响应的 rejected 里；一条都不合格时返回 400。",
+  "type": "object",
+  "required": ["schema_version", "events"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {"type": "object"}
+    }
+  }
+}

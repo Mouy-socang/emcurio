@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "behavior_event.v1.schema.json",
+  "title": "行为事件 v1（客人页 → 服务器收件箱 → Mac 行为账本，AD-9、AD-12、AD-25）",
+  "description": "一条客人行为。客人页生成 event_id（UUID）、type、co_code、client_ts、params、event_schema_version，经 POST /events（behavior_upload.v1）上报；account_id 由服务器按会话填写（不信客户端），server_ts 由服务器入箱时写（权威）。服务器入箱前、Mac 入账前都按本 Schema 校验整条事件，再按 $defs.<type> 校验该类型的 co_code 与 params（两端同一份定义）。服务器拒收枚举外的类型；Mac 遇到不合本 Schema 的事件原样存入未识别事件表并照常确认。",
+  "type": "object",
+  "required": ["event_id", "account_id", "type", "co_code", "client_ts", "server_ts", "params", "event_schema_version"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "小写 UUID，客人页生成；发送失败重试时不变。服务器与 Mac 都按它去重。",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "account_id": {"type": "string", "description": "服务器按会话填写。", "pattern": "^[0-9a-f]{32}$"},
+    "type": {
+      "type": "string",
+      "description": "v1 事件类型：home_open 打开首页；item_open 点开单件；item_dwell 单件页停留；filter 筛选；currency 币种切换。",
+      "enum": ["home_open", "item_open", "item_dwell", "filter", "currency"]
+    },
+    "co_code": {
+      "type": ["string", "null"],
+      "description": "货号；只有 item_open、item_dwell 有，其它类型为 null。",
+      "pattern": "^CO-[0-9]{4,8}$"
+    },
+    "client_ts": {
+      "type": "string",
+      "description": "客人设备上的时间（仅参考），UTC，ISO 8601 带 Z，精确到毫秒。",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "server_ts": {
+      "type": "string",
+      "description": "服务器入箱时间（权威），UTC，ISO 8601 带 Z，精确到毫秒。",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "params": {"type": "object", "description": "键由类型定义，见 $defs.<type>.properties.params。"},
+    "event_schema_version": {"const": 1}
+  },
+  "$defs": {
+    "home_open": {
+      "description": "打开首页。params：当前筛选（品牌 / 器型 / 价格区间 / 图案，各自可缺）。",
+      "type": "object",
+      "properties": {
+        "co_code": {"type": "null"},
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "brand": {"type": "string", "minLength": 1, "maxLength": 60},
+            "form": {"type": "string", "minLength": 1, "maxLength": 60},
+            "band": {"type": "string", "enum": ["lt200", "200-500", "500-1000", "gte1000"]},
+            "pattern": {"type": "string", "minLength": 1, "maxLength": 60}
+          }
+        }
+      }
+    },
+    "item_open": {
+      "description": "点开单件页。params.from：rank（从今日榜）/ pool（从全部藏品）/ link（直接打开链接，如墨墨发的单件链接）。",
+      "type": "object",
+      "properties": {
+        "co_code": {"type": "string", "pattern": "^CO-[0-9]{4,8}$"},
+        "params": {
+          "type": "object",
+          "required": ["from"],
+          "additionalProperties": false,
+          "properties": {"from": {"type": "string", "enum": ["rank", "pool", "link"]}}
+        }
+      }
+    },
+    "item_dwell": {
+      "description": "单件页停留。页面隐藏或离开时发送（sendBeacon）；params.seconds 为这一段可见时长，1–1800 秒，超过 1800 截为 1800。",
+      "type": "object",
+      "properties": {
+        "co_code": {"type": "string", "pattern": "^CO-[0-9]{4,8}$"},
+        "params": {
+          "type": "object",
+          "required": ["seconds"],
+          "additionalProperties": false,
+          "properties": {"seconds": {"type": "integer", "minimum": 1, "maximum": 1800}}
+        }
+      }
+    },
+    "filter": {
+      "description": "首页筛选改变后。params：改变后的所选值（品牌 / 器型 / 价格区间 / 图案，各自可缺；全部清除时为空对象）。",
+      "type": "object",
+      "properties": {
+        "co_code": {"type": "null"},
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "brand": {"type": "string", "minLength": 1, "maxLength": 60},
+            "form": {"type": "string", "minLength": 1, "maxLength": 60},
+            "band": {"type": "string", "enum": ["lt200", "200-500", "500-1000", "gte1000"]},
+            "pattern": {"type": "string", "minLength": 1, "maxLength": 60}
+          }
+        }
+      }
+    },
+    "currency": {
+      "description": "币种切换（已保存到账号后）。params.currency：EUR / CNY。",
+      "type": "object",
+      "properties": {
+        "co_code": {"type": "null"},
+        "params": {
+          "type": "object",
+          "required": ["currency"],
+          "additionalProperties": false,
+          "properties": {"currency": {"type": "string", "enum": ["EUR", "CNY"]}}
+        }
+      }
+    }
+  }
+}

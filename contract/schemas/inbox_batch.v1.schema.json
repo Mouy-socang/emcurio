@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inbox_batch.v1.schema.json",
+  "title": "收件箱批次 v1（GET /admin/inbox?after=<seq>&limit=500 的响应，服务器 → Mac，AD-9）",
+  "description": "按 inbox_seq 升序返回 inbox_seq > after 的事件，最多 limit（≤ 500）条；more 表示之后还有。每条的 event 是服务器入箱时已按 behavior_event.v1 校验过的完整事件；Mac 仍逐条校验，不合格的原样存入未识别事件表并照常确认（不阻塞）。 stats（可选）：服务器累计计数——expired（超 30 天未确认而删除）、rate_dropped（每账号每小时超 600 条丢弃）、rejected（不合契约拒收）；Mac 发现增长时记日志。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "events",
+    "more"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "events": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": [
+          "inbox_seq",
+          "event"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "inbox_seq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "event": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "more": {
+      "type": "boolean"
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expired": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "rate_dropped": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "rejected": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    }
+  }
+}

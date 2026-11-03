@@ -110,6 +110,12 @@ def _mac(text):
     return hmac.new(_SECRET[0], text.encode('utf-8'), hashlib.sha256).hexdigest()
 
 
+def track_tag(account_id):
+    """行为事件队列的账号标记（故事 15）：账号编号的 HMAC 前 16 位，不可反推账号编号。客人页用它丢掉同一设备上
+    别的账号留下的未发事件（服务器按当前会话填 account_id，不丢就会记到当前账号名下）。"""
+    return _mac('track\0' + account_id)[:16]
+
+
 def _sha(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 

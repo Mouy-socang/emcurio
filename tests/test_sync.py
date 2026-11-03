@@ -225,7 +225,9 @@ def test_validator_refuses_unsupported_keywords():
 
 
 @pytest.mark.parametrize('schema', [
-    {'type': ['string', 'null']},
+    {'type': ['string', 'date']},
+    {'type': []},
+    {'$defs': {'a': {'format': 'uuid'}}},                 # $defs 里的子 Schema 也要预先检查
     {'type': 'date'},
     {'properties': {'a': {'exclusiveMinimum': 1}}},       # 实例里没有 a 也要报
     {'additionalProperties': {'format': 'uuid'}},
@@ -237,6 +239,13 @@ def test_validator_refuses_unsupported_keywords():
 def test_bad_schema_fails_up_front(schema):
     with pytest.raises(sync.ContractError):
         sync.validate({}, schema)
+
+
+def test_type_list_and_defs_supported():
+    """故事 15：type 可为类型列表（行为事件的 co_code 可为 null）；$defs 只是命名的子 Schema，本身不约束实例。"""
+    schema = {'type': ['string', 'null'], 'pattern': '^CO-', '$defs': {'x': {'type': 'integer'}}}
+    assert not sync.validate(None, schema) and not sync.validate('CO-0001', schema)
+    assert sync.validate('X', schema) and sync.validate(1, schema)
 
 
 @pytest.mark.parametrize('text', ['{oops', '[]'])

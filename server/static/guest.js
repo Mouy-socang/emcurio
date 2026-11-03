@@ -178,6 +178,19 @@
     }
   });
 
+  // 筛选地址里的所选值（品牌 / 器型 / 价格区间 / 图案），作为 filter 事件的 params（故事 15）。
+  function filterParams(href) {
+    var out = {}, q = (href.split('#')[0].split('?')[1] || '').split('&');
+    q.forEach(function (kv) {
+      var i = kv.indexOf('=');
+      if (i < 1) return;
+      var k = kv.slice(0, i), v;
+      try { v = decodeURIComponent(kv.slice(i + 1).replace(/\+/g, ' ')); } catch (err) { return; }
+      if (/^(brand|form|band|pattern)$/.test(k) && v) out[k] = v;
+    });
+    return out;
+  }
+
   // ----- 就地筛选：取同一地址的整页 HTML，替换 [data-swap] 区块（汇总行是 role=status，原地更新即播报） -----
   function applyFilter(a) {
     if (!window.fetch || !window.DOMParser) { location.href = a.href; return; }
@@ -199,6 +212,7 @@
         if (n) el.innerHTML = n.innerHTML;
       });
       history.replaceState(null, '', href.split('#')[0] || '/');
+      if (window.curioTrack) window.curioTrack('filter', null, filterParams(href));
       if (window.curioMoney) window.curioMoney();
       var here = document.querySelector('form[data-currency] [name=next]');
       if (here) here.value = href.split('#')[0] || '/';
@@ -340,7 +354,7 @@
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body: body
       }).then(function (r) {
         busy = false;
-        if (!r.ok) throw new Error('http');
+        if (!r.ok) throw new Error('http');       // currency 事件由服务器在 /currency 里记（无脚本的表单提交同样记）
       }).catch(function () {
         busy = false;
         var back = was ? was.value : 'EUR';
@@ -543,4 +557,151 @@
   var polite = document.getElementById('polite');
   if (!note || !polite) return;
   setTimeout(function () { polite.textContent = note.textContent; }, 400);
+})();
+
+/* 故事 15（CAP-15，AD-25）：行为事件。只在服务器上已登录客人的首页与单件页运行（页面带 data-track-page）；
+   Mac 预览（AD-28）、停用页、待同意页没有该标记，不生成也不上报。币种切换由服务器在 POST /currency 里记录。
+   事件先进本机队列（localStorage，带 event_id 与账号标记 data-who），每批最多 50 条 POST /events；失败留在队列里下次重试
+   （同一 event_id，服务器去重）。队列里别的账号（同一设备换了登录）留下的事件直接丢掉，不记到当前账号名下。
+   单件页停留在页面隐藏或离开时记一段（1–1800 秒）并用 sendBeacon 发出；beacon 只表示浏览器接下了，事件仍留在队列里，
+   下次 fetch 收到服务器答复才删（重复的由服务器按 event_id 去掉）。 */
+(function () {
+  'use strict';
+  var page = document.querySelector('[data-track-page]');
+  if (!page || /^\/preview(\/|$)/.test(location.pathname)) return;
+  var who = page.getAttribute('data-who') || '';
+  if (!who) return;
+  var KEY = 'curio-events', FROM = 'curio-from', BATCH = 50, MAX_QUEUE = 200, MAX_AGE = 7 * 86400 * 1000, MAX_EVENT = 2048;
+  var store = null, broken = false, mem = [];      // mem：本页的队列副本；存储不可用（或写失败）后只用它
+  try { store = window.localStorage; } catch (err) { store = null; }
+
+  function stored() {
+    if (!store || broken) return null;
+    try {
+      var q = JSON.parse(store.getItem(KEY) || '[]');
+      return Array.isArray(q) ? q : [];
+    } catch (err) { return []; }
+  }
+  function keep(x) {             // 只留当前账号、未过期、结构完整的条目
+    var t = x && x.e ? Date.parse(x.e.client_ts) : NaN;
+    return x && x.w === who && x.e && typeof x.e.event_id === 'string' && isFinite(t) && Date.now() - t < MAX_AGE;
+  }
+  // 写回前重新读一次存储，按 event_id 合并（别的标签页刚加的不会被覆盖），再去掉 gone 里的。
+  function save(adds, gone) {
+    var base = stored(), out = [], seen = {}, rm = {};
+    (gone || []).forEach(function (id) { rm[id] = 1; });
+    // 存储可用时以存储为准（别的标签页已发掉删除的不会被本页旧副本加回来）；不可用时用内存队列。
+    (base === null ? mem : base).concat(adds || []).forEach(function (x) {
+      if (!keep(x) || seen[x.e.event_id] || rm[x.e.event_id]) return;   // 别的账号留下的、过期的：丢掉
+      seen[x.e.event_id] = 1;
+      out.push(x);
+    });
+    if (out.length > MAX_QUEUE) out = out.slice(out.length - MAX_QUEUE);
+    mem = out;
+    if (store && !broken) {
+      try { store.setItem(KEY, JSON.stringify(out)); }
+      catch (err) { broken = true; }   // 存不下（配额 / 无痕模式）：从此只用内存队列
+    }
+    return out;
+  }
+  function queue() { return save([], []); }
+  function uuid() {
+    var c = window.crypto;
+    if (c && c.randomUUID) { try { return c.randomUUID(); } catch (err) { /* 非安全上下文 */ } }
+    var b = new Uint8Array(16), i;
+    if (c && c.getRandomValues) c.getRandomValues(b); else for (i = 0; i < 16; i++) b[i] = Math.random() * 256 | 0;
+    b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
+    var h = '';
+    for (i = 0; i < 16; i++) h += (b[i] + 256).toString(16).slice(1);
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+  }
+  function ids(batch) { return batch.map(function (x) { return x.e.event_id; }); }
+  function body(batch) { return JSON.stringify({ schema_version: 1, events: batch.map(function (x) { return x.e; }) }); }
+
+  var timer = null, sending = false;
+  function schedule(ms) { if (!timer) timer = setTimeout(function () { timer = null; flush(); }, ms || 1500); }
+  function flush() {
+    if (sending || !window.fetch) return;
+    var q = queue();
+    if (!q.length) return;
+    var batch = q.slice(0, BATCH);
+    sending = true;
+    fetch('/events', { method: 'POST', credentials: 'same-origin', keepalive: true,
+      headers: { 'Content-Type': 'application/json' }, body: body(batch)
+    }).then(function (r) {
+      sending = false;
+      // 收下（含重复、超限丢弃）、拒收（400：如枚举外类型）、未登录 / 不记录（401 / 403）：都不再重试这批。
+      if (r.ok || r.status === 400 || r.status === 401 || r.status === 403 || r.status === 413 || r.status === 415) {
+        if (save([], ids(batch)).length) schedule(200);
+      } else schedule(30000);
+    }).catch(function () { sending = false; schedule(30000); });
+  }
+  function beacon() {
+    var q = queue();
+    if (!q.length) return;
+    var ok = false;
+    if (navigator.sendBeacon) {
+      try { ok = navigator.sendBeacon('/events', new Blob([body(q.slice(0, BATCH))], { type: 'text/plain;charset=UTF-8' })); }
+      catch (err) { ok = false; }
+    }
+    if (!ok) flush();             // 发出与否都留在队列里，等 fetch 的答复再删
+  }
+  function add(type, code, params) {
+    var e = { event_id: uuid(), type: type, co_code: code || null, client_ts: new Date().toISOString(),
+      params: params || {}, event_schema_version: 1 };
+    if (JSON.stringify(e).length > MAX_EVENT) return;     // 单条过大：不进队列（否则整批 413 会连带丢掉别的）
+    save([{ w: who, e: e }], []);
+    schedule();
+  }
+  window.curioTrack = add;
+
+  function itemCode(a) {
+    try {
+      var m = /^\/item\/(CO-[0-9]{4,8})$/.exec(new URL(a.getAttribute('href'), location.href).pathname);
+      return m ? m[1] : null;
+    } catch (err) { return null; }
+  }
+
+  var kind = page.getAttribute('data-track-page');
+  if (kind === 'home') {
+    var params = {};
+    try { params = JSON.parse(page.getAttribute('data-params') || '{}') || {}; } catch (err) { params = {}; }
+    add('home_open', null, params);
+    // 点开单件：记下来自榜还是商品池，单件页据此填 item_open 的 from。
+    document.addEventListener('click', function (e) {
+      var a = e.target.closest ? e.target.closest('a.rk-a, a.card-a') : null;
+      var code = a ? itemCode(a) : null;
+      if (!code) return;
+      try {
+        window.sessionStorage.setItem(FROM, JSON.stringify({ code: code, from: a.classList.contains('rk-a') ? 'rank' : 'pool', at: Date.now() }));
+      } catch (err) { /* 记不下就算 link */ }
+    }, true);
+  } else if (kind === 'item') {
+    var code = page.getAttribute('data-code'), from = 'link';
+    try {
+      var f = JSON.parse(window.sessionStorage.getItem(FROM) || 'null');
+      window.sessionStorage.removeItem(FROM);
+      if (f && f.code === code && Date.now() - f.at < 60000 && (f.from === 'rank' || f.from === 'pool')) from = f.from;
+    } catch (err) { from = 'link'; }
+    add('item_open', code, { from: from });
+    var shownAt = document.visibilityState === 'hidden' ? null : Date.now();
+    var endDwell = function () {
+      if (shownAt === null) return;
+      var s = Math.round((Date.now() - shownAt) / 1000);
+      shownAt = null;
+      if (s >= 1) add('item_dwell', code, { seconds: Math.min(s, 1800) });
+    };
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') { endDwell(); beacon(); }
+      else if (shownAt === null) shownAt = Date.now();
+    });
+    window.addEventListener('pagehide', function () { endDwell(); beacon(); });
+    window.addEventListener('pageshow', function (e) {
+      if (e.persisted && shownAt === null && document.visibilityState !== 'hidden') shownAt = Date.now();
+    });
+  }
+  if (kind !== 'item') {
+    window.addEventListener('pagehide', beacon);
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') beacon(); });
+  }
 })();

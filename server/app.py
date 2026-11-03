@@ -14,6 +14,8 @@
   两者都使该账号全部会话与重设链接失效；临时密码只存哈希，events 表里存 HMAC）、
   snapshot（AD-5、AD-22：整份原子替换，编号 ≤ 当前的不替换，缺图拒收）、hide（含 unhide，按 hide_seq 与水位合并）、
   heartbeat（AD-10：已发布货下架检查最近成功时间；只留最新一份，不存入 events 表——每轮都发，不是事件）。
+- 行为收件箱（故事 15，AD-9、AD-25，见 inbox.py）：客人页 `POST /events`（会话鉴权，一批最多 50 条）；
+  Mac `GET /admin/inbox?after=<seq>&limit=500` 拉取、`POST /admin/inbox/ack {max_seq}` 确认后删除。
 - 图片（AD-13）：`POST /admin/images/check` 查哪些还没有，`PUT /admin/images/<name>` 上传（核对内容哈希），
   客人经会话鉴权的 `/img/<name>` 读取（guest.py）。
 """
@@ -29,6 +31,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -37,6 +40,7 @@ from starlette.concurrency import run_in_threadpool
 
 import accounts
 import guest
+import inbox
 import snapshot
 
 VERSION = '0.2.0'
@@ -47,6 +51,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_CONTRACT = HERE.parent / 'contract' / 'schemas'
 DEFAULT_DB = HERE / 'data' / 'server.db'
 _NAME_RE = re.compile(r'^[a-z][a-z0-9_-]{0,63}$')
+_DIGITS_RE = re.compile(r'[0-9]{1,19}')   # 只认 ASCII 数字（Unicode 数字如 '²' 不算，int() 也不认）
 _CREATED_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z')
 
 log = logging.getLogger('curiobject.server')
@@ -84,6 +89,7 @@ def init_db(path):
             c.execute('ALTER TABLE events ADD COLUMN ack TEXT')
         accounts.ensure(c)
         snapshot.ensure(c)
+        inbox.ensure(c)
     finally:
         c.close()
 
@@ -273,7 +279,7 @@ def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, ma
                                 headers={'WWW-Authenticate': 'Bearer'})
         declared = request.headers.get('content-length')
         if declared is not None:
-            if not declared.isdigit():
+            if not _DIGITS_RE.fullmatch(declared):
                 return _error(400, 'Content-Length 无效')
             if int(declared) > MAX_BODY:
                 return _error(413, '请求体过大')
@@ -327,7 +333,7 @@ def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, ma
 
     async def read_body(request, limit):
         declared = request.headers.get('content-length')
-        if declared is not None and (not declared.isdigit() or int(declared) > limit):
+        if declared is not None and (not _DIGITS_RE.fullmatch(declared) or int(declared) > limit):
             return None
         body = await request.body()
         return body if len(body) <= limit else None
@@ -369,11 +375,140 @@ def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, ma
         cookie_secure = _env_flag('CURIO_COOKIE_SECURE', True)
     if public_url is None:
         public_url = (os.environ.get('CURIO_PUBLIC_URL') or '').rstrip('/') or None
+    checker = inbox.Checker(contract)
+    register_inbox_routes(app, db_path, checker, authorized, clock or time.time)
+
+    def record_event(c, account_id, type_, params, now):
+        return inbox.record(c, checker, account_id, type_, params, now)
     # 客人路由含兜底 GET /{path}，必须最后注册。
     guest.register_guest_routes(app, db_path, connect, clock=clock, mailer=mailer, cookie_secure=cookie_secure,
-                                public_url=public_url, terms_path=terms_path)
+                                public_url=public_url, terms_path=terms_path, record_event=record_event)
     app.state.db_path = db_path
     return app
+
+
+EVENTS_MAX_BODY = 65_536          # 50 条事件绰绰有余
+
+
+def _event_origin_ok(request):
+    """行为上报的来源检查：带 Origin（非 'null'）时必须同站；带 Sec-Fetch-Site 时必须 same-origin。两者都没有时放行——
+    会话 Cookie 是 SameSite=Lax，跨站 POST 本来就带不上会话（sendBeacon 在部分内置浏览器里不带这两个头）。"""
+    origin = request.headers.get('origin')
+    if origin and origin != 'null':
+        return urlsplit(origin).netloc == request.headers.get('host', '')
+    site = request.headers.get('sec-fetch-site')
+    return site is None or site in ('same-origin', 'none')
+
+
+def register_inbox_routes(app, db_path, checker, authorized, clock):
+    """行为收件箱（AD-9、AD-25）：客人上报 POST /events（会话鉴权）；Mac 拉取 GET /admin/inbox、确认 POST /admin/inbox/ack。"""
+
+    def unauthorized():
+        return JSONResponse({'ok': False, 'detail': '未授权'}, status_code=401, headers={'WWW-Authenticate': 'Bearer'})
+
+    def _receive(token, items):
+        c = connect(db_path)
+        c.row_factory = sqlite3.Row
+        try:
+            now = clock()
+            state, account = accounts.lookup_session(c, token, now)
+            if state != 'ok':
+                return 401, {'ok': False, 'detail': '请先登录'}
+            # 停用账号（其会话已失效，这里再拦一次）与待重新同意的账号不记录。条款版本由客人路由注册时读入。
+            if account['status'] != 'active' or accounts.needs_consent(c, account['account_id'], app.state.terms_version):
+                return 403, {'ok': False, 'detail': '不记录'}
+            result = inbox.receive(c, checker, account['account_id'], items, now)
+        finally:
+            c.close()
+        status = 400 if result['rejected'] and not (result['accepted'] or result['duplicates'] or result['dropped']) else 200
+        return status, dict(result, ok=status == 200)
+
+    @app.post('/events')
+    async def events(request: Request):
+        """客人页行为上报（behavior_upload.v1）。预览在 Mac 渲染、从不连到这里（AD-28）。"""
+        if not _event_origin_ok(request):
+            return _error(403, '来源不符')
+        ctype = request.headers.get('content-type', '')
+        if not ctype.startswith(('application/json', 'text/plain')):
+            return _error(415, '请求类型不对')
+        declared = request.headers.get('content-length')
+        if declared is not None and (not _DIGITS_RE.fullmatch(declared) or int(declared) > EVENTS_MAX_BODY):
+            return _error(413, '请求体过大')
+        # 不带 Content-Length（分块传输）时边读边数，超过上限立即 413，不把整个请求体读进内存。
+        chunks, size = [], 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > EVENTS_MAX_BODY:
+                return _error(413, '请求体过大')
+            chunks.append(chunk)
+        body = b''.join(chunks)
+        try:
+            batch = json.loads(body)
+        except (ValueError, RecursionError):
+            return _error(400, '请求体不是 JSON')
+        if not isinstance(batch, dict):
+            return _error(400, '上报应为对象')
+        try:
+            Contract._run(checker.upload, batch, '行为上报')
+        except BadPayload as e:
+            return _error(400, str(e))
+        except RecursionError:
+            return _error(400, '载荷嵌套过深')
+        status, result = await run_in_threadpool(_receive, request.cookies.get(guest.COOKIE), batch['events'])
+        return JSONResponse(result, status_code=status, headers={'Cache-Control': 'no-store'})
+
+    def _int_param(value, default, low, high):
+        if value is None:
+            return default
+        if not _DIGITS_RE.fullmatch(value):
+            raise BadPayload('参数无效')
+        return max(low, min(high, int(value)))
+
+    def _pull(after, limit):
+        c = connect(db_path)
+        try:
+            return inbox.pull(c, after, limit, clock())
+        finally:
+            c.close()
+
+    @app.get('/admin/inbox')
+    async def admin_inbox(request: Request):
+        """收件箱拉取（inbox_batch.v1）：inbox_seq > after 的事件按序返回，最多 limit（≤ 500）条。"""
+        if not authorized(request):
+            return unauthorized()
+        try:
+            after = _int_param(request.query_params.get('after'), 0, 0, 2 ** 63 - 1)
+            limit = _int_param(request.query_params.get('limit'), inbox.PULL_MAX, 1, inbox.PULL_MAX)
+        except BadPayload as e:
+            return _error(400, str(e))
+        return JSONResponse(await run_in_threadpool(_pull, after, limit), headers={'Cache-Control': 'no-store'})
+
+    def _ack(max_seq):
+        c = connect(db_path)
+        try:
+            return inbox.ack(c, max_seq)
+        finally:
+            c.close()
+
+    @app.post('/admin/inbox/ack')
+    async def admin_inbox_ack(request: Request):
+        """收件箱确认（inbox_ack.v1）：只删除 inbox_seq ≤ max_seq 的事件；幂等。"""
+        if not authorized(request):
+            return unauthorized()
+        body = await request.body()
+        if len(body) > 4096:
+            return _error(413, '请求体过大')
+        try:
+            data = json.loads(body)
+            if not isinstance(data, dict):
+                raise BadPayload('确认应为对象')
+            Contract._run(checker.ack, data, '收件箱确认')
+        except (ValueError, RecursionError):
+            return _error(400, '请求体不是 JSON')
+        except BadPayload as e:
+            return _error(400, str(e))
+        deleted = await run_in_threadpool(_ack, data['max_seq'])
+        return {'ok': True, 'max_seq': data['max_seq'], 'deleted': deleted}
 
 
 def main(argv=None):

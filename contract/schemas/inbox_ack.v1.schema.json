@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inbox_ack.v1.schema.json",
+  "title": "收件箱确认 v1（POST /admin/inbox/ack 的请求，Mac → 服务器，AD-9）",
+  "description": "Mac 已把 inbox_seq ≤ max_seq 的事件写入 curio.db 并提交、重算了交接文件后发送。服务器只删除 inbox_seq ≤ max_seq 的事件；幂等（重复确认或确认更小的值不再删除别的）。响应：{ok: true, max_seq, deleted}。",
+  "type": "object",
+  "required": ["schema_version", "max_seq"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "max_seq": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}
+  }
+}

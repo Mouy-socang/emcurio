@@ -10,6 +10,9 @@
   "已售出 / 已移出"（无复制栏），超过 90 天或不在快照里显示"此件已不在展出"。
 - 币种（故事 12，AD-14）：页头 €/¥ 切换，选择存在账号（accounts.currency，POST /currency，无 JS 时是表单提交）；
   ¥ 按快照汇率换算并标"约"，汇率缺失或日期距今超过 7 天时只显示欧元、不出现切换。
+- 行为事件（故事 15，AD-25）：已登录客人的首页与单件页带 `data-track-page` 标记（含账号标记 `data-who`，
+  HMAC 前 16 位），guest.js 据此生成事件并经 `POST /events`（app.py / inbox.py）上报；币种切换由 `POST /currency`
+  在服务器端记录（值变了才记）。Mac 预览与停用、待同意页不带标记、不上报。
 - 快照数据（`/api/pool`）与图片（`/img/<name>`）只经会话鉴权提供（AD-6）：未登录 401、停用或待同意 403。
 """
 import html
@@ -303,9 +306,11 @@ def pool_state(view, params):
     return options, chosen, shown
 
 
-def home_page(env, view, params, cur=None, stale=False):
+def home_page(env, view, params, cur=None, stale=False, track=False):
     """首页：今日榜 + 全部藏品（筛选、首批卡片）。cur：currency_ctx 结果（缺省欧元）。
-    stale：已发布货下架检查超过 2 小时未成功（AD-10），页头下方显示状态未更新提示。返回 (status, html)。"""
+    stale：已发布货下架检查超过 2 小时未成功（AD-10），页头下方显示状态未更新提示。
+    track：行为事件的账号标记（accounts.track_tag，故事 15）；只有服务器上已登录的客人页给出，Mac 预览（AD-28）不带。
+    返回 (status, html)。"""
     cur = cur or EUR_ONLY
     options, chosen, shown = pool_state(view, params)
     n = _int(params.get('n'), PAGE_SIZE, PAGE_SIZE, MAX_SHOWN)
@@ -320,21 +325,21 @@ def home_page(env, view, params, cur=None, stale=False):
                        more_href='/?' + more + '#pool', updated=updated_text(view.received_at),
                        chosen_labels={k: label_of(options, k, v) for k, v in chosen.items()},
                        filter_labels=FILTER_LABELS, cur=cur, here='/?' + filter_query(chosen) if chosen else '/',
-                       stale=stale)
+                       stale=stale, track=track)
 
 
-def item_view_page(env, view, code, cur=None, now=None, stale=False):
-    """单件页。now：Unix 秒，用于 90 天保留期（None 时不判）。stale 同 home_page。返回 (status, html)。"""
+def item_view_page(env, view, code, cur=None, now=None, stale=False, track=False):
+    """单件页。now：Unix 秒，用于 90 天保留期（None 时不判）。stale、track 同 home_page。返回 (status, html)。"""
     cur = cur or EUR_ONLY
     state = view.item_state(code, now)
     it = view.items.get(code)
     here = '/item/' + code
     if state == 'show':
         return render_page(env, 'item.html', it['title'], state=state, it=it, code=code, cur=cur, here=here,
-                           stale=stale)
+                           stale=stale, track=track)
     if state in ('sold', 'removed'):
         title = it['title'] if it else ('已售出' if state == 'sold' else '已移出')
-        return render_page(env, 'item.html', title, state=state, it=it, code=code, cur=cur, here=here, stale=stale)
+        return render_page(env, 'item.html', title, state=state, it=it, code=code, cur=cur, here=here, stale=stale, track=track)
     return render_page(env, 'item.html', '此件已不在展出', 404, state=None, it=None, code=code, cur=cur, here=here,
                        stale=stale)
 
@@ -355,7 +360,8 @@ def pool_batch(env, view, params, cur=None):
 
 
 def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie_secure=True,
-                          public_url=None, terms_path=None):
+                          public_url=None, terms_path=None, record_event=None):
+    """record_event(c, account_id, type, params, now)：服务器自己记行为事件（币种切换，故事 15）；None 时不记。"""
     clock = clock or time.time
     terms_version, terms_html = load_terms(terms_path or DEFAULT_TERMS)
     env = make_env()
@@ -714,12 +720,14 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
 
     def home(params, account):
         view = load_view()
-        status, body = home_page(env, view, params, cur_for(account, view), stale_now())
+        status, body = home_page(env, view, params, cur_for(account, view), stale_now(),
+                                 track=accounts.track_tag(account['account_id']))
         return HTMLResponse(body, status_code=status)
 
     def item_page(code, account):
         view = load_view()
-        status, body = item_view_page(env, view, code, cur_for(account, view), clock(), stale_now())
+        status, body = item_view_page(env, view, code, cur_for(account, view), clock(), stale_now(),
+                                      track=accounts.track_tag(account['account_id']))
         return HTMLResponse(body, status_code=status)
 
     @app.post('/currency')
@@ -748,7 +756,13 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         def work():
             c = db()
             try:
-                accounts.set_currency(c, account['account_id'], form['currency'], clock())
+                now = clock()
+                # 只在值真的变了时记一条 currency 事件（脚本与无脚本表单提交同一处记，不重复）。
+                if accounts.set_currency(c, account['account_id'], form['currency'], now) and record_event:
+                    try:
+                        record_event(c, account['account_id'], 'currency', {'currency': form['currency']}, now)
+                    except Exception:      # 记录失败不影响币种保存
+                        log.warning('币种事件未能记录', exc_info=True)
             finally:
                 c.close()
         await run_in_threadpool(work)

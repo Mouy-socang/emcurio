@@ -14,7 +14,7 @@
 - 连续 3 次 flush 失败（含意外异常）发一次 macOS 通知；只有 ok 清零，timeout 不改计数。
 - 账号指令（故事 14，AD-24）：停用 / 重置密码经 `enqueue_account_command` 入队（按账号单调 target_seq）；服务器
   applied 不为 true 按永久失败；重置的临时密码明文在服务器答复后立即从发件箱抹掉。`run` 每轮末尾拉一次账号名单
-  （`pull_accounts`，GET /admin/accounts）写入 guest_accounts。
+  （`pull_accounts`，GET /admin/accounts）写入 guest_accounts，再拉一轮行为收件箱（`behavior.pull`，故事 15）。
 - 管理密钥只从 .env 读取，不进日志、错误信息或数据库。
 """
 import json
@@ -66,9 +66,10 @@ _TYPES = {
 }
 # 只描述、不约束的关键字。
 _ANNOTATIONS = {'$schema', '$id', 'title', 'description'}
+# $defs：命名的子 Schema（行为事件按类型的 params），本身不约束实例，由调用方按名取出另行校验。
 _SUPPORTED = _ANNOTATIONS | {'type', 'required', 'properties', 'additionalProperties',
                              'const', 'enum', 'pattern', 'minLength', 'maxLength', 'items', 'minItems', 'maxItems',
-                             'minimum', 'maximum', 'dependentRequired'}
+                             'minimum', 'maximum', 'dependentRequired', '$defs'}
 
 
 def check_schema(schema, path='$'):
@@ -78,8 +79,15 @@ def check_schema(schema, path='$'):
     unknown = set(schema) - _SUPPORTED
     if unknown:
         raise ContractError(f'Schema {path} 用到校验器不支持的关键字：' + '、'.join(sorted(unknown)))
-    if 'type' in schema and (not isinstance(schema['type'], str) or schema['type'] not in _TYPES):
-        raise ContractError(f'Schema {path} 的 type 不受支持')
+    if 'type' in schema:
+        types = schema['type'] if isinstance(schema['type'], list) else [schema['type']]
+        if not types or not all(isinstance(t, str) and t in _TYPES for t in types):
+            raise ContractError(f'Schema {path} 的 type 不受支持')
+    defs = schema.get('$defs', {})
+    if not isinstance(defs, dict):
+        raise ContractError(f'Schema {path} 的 $defs 应为对象')
+    for key, sub in defs.items():
+        check_schema(sub, f'{path}.$defs.{key}')
     if 'required' in schema and (not isinstance(schema['required'], list)
                                  or not all(isinstance(k, str) for k in schema['required'])):
         raise ContractError(f'Schema {path} 的 required 应为文字列表')
@@ -124,8 +132,10 @@ def _same(a, b):
 def _validate(instance, schema, path):
     errors = []
     t = schema.get('type')
-    if t is not None and not _TYPES[t](instance):
-        return [f'{path} 应为 {t}']
+    if t is not None:
+        types = t if isinstance(t, list) else [t]
+        if not any(_TYPES[x](instance) for x in types):
+            return [f'{path} 应为 {" 或 ".join(types)}']
     if 'const' in schema and not _same(instance, schema['const']):
         errors.append(f'{path} 应为 {json.dumps(schema["const"], ensure_ascii=False)}')
     if 'enum' in schema and not any(_same(instance, v) for v in schema['enum']):
@@ -412,8 +422,9 @@ def _record_round(store, status):
 
 # ---------- 发送 ----------
 
-def _call(session, method, url, token, timeout, deadline, monotonic, **kw):
-    """发一个请求并按墙钟 deadline 读完响应。返回 (status, body 或 None, 错误或 None)；错误为中文、不含密钥。"""
+def _call(session, method, url, token, timeout, deadline, monotonic, max_bytes=MAX_RESPONSE, **kw):
+    """发一个请求并按墙钟 deadline 读完响应（最多 max_bytes 字节）。返回 (status, body 或 None, 错误或 None)；
+    错误为中文、不含密钥。"""
     headers = dict(kw.pop('headers', {}), Authorization='Bearer ' + token)
     try:
         r = getattr(session, method.lower())(url, timeout=timeout, stream=True, headers=headers, **kw)
@@ -426,7 +437,7 @@ def _call(session, method, url, token, timeout, deadline, monotonic, **kw):
                 return None, None, '服务器响应超时'
             chunks.append(chunk)
             size += len(chunk)
-            if size > MAX_RESPONSE:
+            if size > max_bytes:
                 return None, None, '服务器响应过大'
     except requests.RequestException as e:
         return None, None, f'读取服务器响应失败（{type(e).__name__}）'
@@ -773,7 +784,8 @@ def pull_accounts(store, root=ROOT, session=None, monotonic=time.monotonic, seco
 
 
 def run(store, root=ROOT, session=None, monotonic=time.monotonic, clock=time.time):
-    """采集调度每轮（含空闲轮）调用：限时 flush 发件箱，再发一次心跳（AD-10），再拉一次账号名单（故事 14）。
+    """采集调度每轮（含空闲轮）调用：限时 flush 发件箱，再发一次心跳（AD-10），再拉一次账号名单（故事 14），
+    再拉一轮行为收件箱（故事 15，curio/behavior.py；失败只写 inbox_status / inbox_error，下轮重试）。
     flush 或心跳失败都计入连续失败（一轮最多计一次）；名单拉取失败只写结果字段（accounts_status: error），
     不影响其余部分；任何意外都只变成 sync_status: error。"""
     try:
@@ -792,6 +804,12 @@ def run(store, root=ROOT, session=None, monotonic=time.monotonic, clock=time.tim
             except Exception as e:      # 名单的意外不丢掉其余结果
                 log.warning('账号名单未拉取（%s）', type(e).__name__)
                 result.update({'accounts_status': 'error', 'accounts_error': f'拉取账号名单失败（{type(e).__name__}）'})
+            try:
+                from .. import behavior      # 行为收件箱（故事 15，AD-9）：文件锁内拉取 → 入账 → 重算交接文件 → 确认
+                result.update(behavior.pull(store, root, session, monotonic))
+            except Exception as e:      # 收件箱的意外不丢掉其余结果；下轮重试
+                log.warning('收件箱未拉取（%s）', type(e).__name__)
+                result.update({'inbox_status': 'error', 'inbox_error': f'拉取收件箱失败（{type(e).__name__}）'})
         status = 'error' if failed else result['sync_status']
         streak = _record_round(store, status)
         if failed or 'sync_error' in result:

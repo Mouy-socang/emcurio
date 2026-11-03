@@ -70,7 +70,9 @@ def test_preview_html_matches_guest_page(client, published, path, query):
     out = preview.render(payload, path, query, received)
     live = client.get(path + ('?' + query if query else ''))
     assert out['type'] == 'html' and out['status'] == live.status_code
-    assert unprefix(out['body']) == live.text
+    # 唯一的差别：已登录客人页带行为事件标记（故事 15），预览不带（AD-28：预览不记录任何行为）。
+    assert 'data-track-page' not in out['body']
+    assert unprefix(out['body']) == re.sub(r'<span hidden data-track-page="[^"]*"[^>]*></span>', '', live.text)
     # 页内地址全部在预览前缀下，没有外部地址。
     assert not re.search(r'(?:href|src|action)="/(?!preview/)', out['body'])
     assert not re.search(r'https?://', out['body'])
@@ -138,6 +140,7 @@ def test_preview_with_fee_and_fx_matches_live_page_except_local_switch(client, d
         assert 'value="EUR" role="radio" aria-label="欧元" aria-checked="true"' in local     # 欧元默认
         assert '<form class="cur" method="post" action="/currency"' in live
         flat = lambda h: re.sub(r'\s+', ' ', switch.sub('', h))           # 模板分支留下的空行不算差异
-        assert flat(unprefix(body)) == flat(live)
+        assert 'data-track-page' not in body and 'data-track-page' in live    # 故事 15：只有客人页带行为标记
+        assert flat(unprefix(body)) == flat(re.sub(r'<span hidden data-track-page="[^"]*"[^>]*></span>', '', live))
     item = preview.render(payload, '/item/CO-0001', '', received)['body']
     assert '约 €42' in item and '（B 档：30cm 以下花瓶）' in item and '¥' not in item.replace('>¥<', '')
