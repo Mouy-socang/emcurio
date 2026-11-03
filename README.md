@@ -97,6 +97,43 @@ uv run python scripts/migrate_triage.py      # 幂等，可重跑；打印各状
 
 2026-11-02 真实库迁移结果：items 21996 = triage 21996；`removed` 195（cases 180 件 + market_decisions 15 件，全为人工无关/不要）、`auto_removed` 10539、`new` 11262（其中 backlog 7050，新货队列 4212）；无 want，货号 0 个。备份在 `data/backups/curio-before-triage-20261102T200445Z.db`。第二次运行新增事件 0、货号 0。
 
+## 标准名称与价格库（CAP-16，AD-15）
+
+**知识库只读。** 词表唯一来源是 EM 西洋瓷器知识库（`config/settings.yaml` 的 `em_kb_path`，默认 `~/Desktop/EM 西洋瓷器`，`~` 会展开）。Curiobject 只读其中的文件夹名与 CSV（`utf-8-sig`），任何代码路径都不写入、不改名、不建文件；新名称由墨墨在知识库里维护：改了 CSV（或知识库从缺失恢复）后，词表缓存按 `kb_fingerprint` 失效；某件货下次被采集到时，若库里结果的 `kb_fingerprint` 与当前不同就重新生成；要一次刷新全部存量，重跑回填脚本。
+
+**词表：**
+
+| 段 | 来源 | ID |
+|---|---|---|
+| 品牌 | `06 Brands and Manufactories 品牌与窑厂/` 下的文件夹名（允许德语形容词词尾 -er，如 Meissener） | 文件夹名 |
+| 图案（仅 Meissen） | `Meissen/4 Patterns 图案/Meissen_图案主题数据.csv`（外文名及括号内别名）+ `Meissen_官方图案目录数据.csv`（德文名、六位编号；编号已归入某个 MP 的用 MP） | `MP-xxx` 或六位编号 |
+| 器型（仅 Meissen） | `Meissen/3 Forms and Relief 器型与浮雕/Forms 器型/Meissen_器型索引.csv` | `MS-xxx` |
+| 功能（所有品牌） | `05 General Knowledge 通用知识/买手培训/功能词表.csv`（德文、英文、别名与卖家用词） | `FN-xxx` |
+
+匹配大小写、重音不敏感，按词边界；词内空格/逗号/连字符宽松（`Platte, oval` 能匹配 `Platte Oval`）；功能词还可作德语复合词词尾（`Porzellanvase` → 花瓶）。同时命中多个词条时取最长的；先看标题，标题没有再看描述（年代只看标题）。“im Stil von / wie / nicht / à la / style of Meissen”“Meissen-Art / -Stil / style”不算品牌。NNxxxx 式图案编号取最长匹配前缀。别名单元格里括号说明、“注意…/不写…/另立…”这类反例说明和带日期的批注不作词条。Meissen 专属词表只在品牌识别为 Meissen 时使用；不从图案反推品牌。
+
+**命名（知识库 V2）：** 年代 → 品牌 → 厂家等级 → 图案 → 器型 → 功能，空格分隔，缺值段省略。品牌显示为外文名+中文名（`Meissen梅森`；其它品牌知识库暂无中文名时只写外文名）。厂家等级须可靠证据，卖家写的 `1. Wahl` / `I. Wahl` / `2. Wahl` 等只存原文 `seller_grade`，不入名称。年代只看标题，在出现明确四位年份（`1900`、`um 1900` → 约1900年、`1860-1910`）或 `19. Jh.` / `19./20. Jh.` 时写入；“seit 1710”、价格（Preis/EUR/€/VB 后）、购买与运费（gekauft/Kauf/Versand/Neuware 后）、尺寸里的数字不算。**没有器型也没有功能时不生成名称**（`std_name` 为空，`status='insufficient'`）。全部结果都是据卖家描述的候选，不是正式商品标题。
+
+**存储：** 表 `std_names`（主键 `item_id`）：`std_name`、`std_key`（`品牌|图案ID|器型ID|功能ID`，缺值写 `-`；年代不进分组键）、`status`（named / insufficient）、各段 ID、`era`、`seller_grade`、`segments`（各段显示名 JSON）、`kb_status`（`ok` / `missing` / `partial:缺失的部分`）、`kb_fingerprint`、`generated_at`。`Store.ingest` 在新货或标题/描述/价格变化、该货尚无结果、或其 `kb_fingerprint` 与当前知识库不同时于同一事务写入；判断结论、拣选状态、货号都不受影响；命名本身出错时只记一次日志、不写该行，入库照常。知识库缺失或某个 CSV 无法解析时采集照常，对应段视为未知，日志警告一次。
+
+**查询：**
+
+```python
+store.similar_prices('Meissen|MP-001|-|FN-009')   # 同类（std_key 相同且已命名）全部 price_history 行，按时间排序，附币种与标题
+store.by_code('CO-0001')                           # 经 item_codes 关联：标准名称各字段 + prices（同类历史价）；未知货号返回 {}
+```
+
+`insufficient` 的货、以及品牌段为 `-` 的键（会把各厂同功能的货混在一起）不参与同类查价，返回空列表。价格库只在 Mac `curio.db`，不上线。
+
+**回填（幂等，以 item_id 覆盖；结果相同的行不改写）：**
+
+```sh
+sqlite3 data/curio.db ".backup data/backups/curio-before-std-names-<UTC时间>.db"
+uv run python scripts/backfill_std_names.py   # 打印 items / std_names 行数、生成与 insufficient 计数、各品牌计数、Meissen 有名称比例
+```
+
+2026-11-03 真实库回填结果（评审修复后重跑）：items 22113 = std_names 22113；named 11589、insufficient 10524，同类组 1050 个；Meissen 有名称 9614/19023（50.5%）；`kb_status` 全为 ok。第二次运行写入 0。备份在 `data/backups/curio-before-std-names-v2-20261103T075432Z.db`（首次回填前另有 `curio-before-std-names-20261103T074616Z.db`）。
+
 ## 每5分钟唤醒的本机自动采集（launchd）
 
 只安装一个定时任务 `com.curiobject.collect`：每 300 秒唤醒一次 `curio.curio_monitor`，由调度器决定是否真正抓取（见上文「调度与接口调用预算」），由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。

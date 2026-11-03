@@ -1,16 +1,48 @@
 """One SQLite for items, rules, screening, collection state and owner reviews."""
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from .price import prices, money
-from .rules import evaluate
+from .rules import evaluate, standard_name, kb_fingerprint
 from . import triage
 from screening.pipeline import process
 
 
 def now():return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+log=logging.getLogger(__name__)
+_STD_WARNED=[]
+
+def _std_name_or_none(c,item,config,changed):
+    """需要（重）生成时返回标准名称结果，否则 None。命名出错只记一次日志、不写行，绝不中断入库。
+    需要生成：新货/改价改文、尚无结果、或库里结果的 kb_fingerprint 与当前知识库不同（知识库改过或恢复了）。"""
+    try:
+        row=c.execute('SELECT kb_fingerprint FROM std_names WHERE item_id=?',(item['item_id'],)).fetchone()
+        if not changed and row and (row[0] or '')==kb_fingerprint(config):return None
+        return standard_name(item,config)
+    except Exception:
+        if not _STD_WARNED:
+            _STD_WARNED.append(1);log.warning('标准名称生成失败，已跳过（不影响入库）',exc_info=True)
+        return None
+
+def write_std_name(c,item_id,r,ts=None):
+    """按 item_id 覆盖写入一条标准名称结果（入库与回填共用）。"""
+    segments=json.dumps(dict(era=r['era'],brand=r['brand_display'],pattern=r['pattern'],form=r['form'],function=r['function']),ensure_ascii=False)
+    c.execute('''INSERT OR REPLACE INTO std_names(item_id,std_name,std_key,status,brand,pattern_id,form_id,function_id,era,
+        seller_grade,segments,kb_status,kb_fingerprint,generated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        (item_id,r['std_name'],r['std_key'],r['status'],r['brand'],r['pattern_id'],r['form_id'],r['function_id'],r['era'],
+         r['seller_grade'],segments,r['kb_status'],r['kb_fingerprint'],ts or now()))
+
+def similar_prices(c,std_key):
+    # 品牌段为空（-|…）的键会把各厂同功能的货混成一组，不算同类
+    if not std_key or std_key.split('|',1)[0]=='-':return []
+    rows=c.execute('''SELECT h.item_id,h.price,h.total_price,h.seen_at,i.currency,i.title,i.platform,s.std_name
+        FROM std_names s JOIN price_history h ON h.item_id=s.item_id LEFT JOIN items i ON i.item_id=s.item_id
+        WHERE s.std_key=? AND s.status='named' ORDER BY h.seen_at,h.rowid''',(std_key,)).fetchall()
+    return [dict(r) for r in rows]
 
 class Store:
     def __init__(self,path):
@@ -37,6 +69,13 @@ class Store:
             CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY,v TEXT);
             CREATE INDEX IF NOT EXISTS review_order ON items(status,agent_decision,created,first_seen);
             CREATE INDEX IF NOT EXISTS cases_item ON cases(item_id);
+            -- CAP-16 标准名称（候选，据卖家描述）：每件货一行，入库与回填都按 item_id 覆盖。
+            CREATE TABLE IF NOT EXISTS std_names(
+                item_id TEXT PRIMARY KEY, std_name TEXT, std_key TEXT NOT NULL, status TEXT NOT NULL,
+                brand TEXT, pattern_id TEXT, form_id TEXT, function_id TEXT, era TEXT, seller_grade TEXT,
+                segments TEXT, kb_status TEXT NOT NULL, kb_fingerprint TEXT, generated_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS std_names_key ON std_names(std_key,status);
+            CREATE INDEX IF NOT EXISTS price_history_item ON price_history(item_id,seen_at);
             ''')
             triage.ensure(c)
     @contextmanager
@@ -89,7 +128,24 @@ class Store:
                 c.execute('INSERT INTO items('+','.join(p)+') VALUES('+','.join('?' for _ in p)+')',list(p.values()))
             # AD-26：系统只在未经人工决定的货上落位（new / auto_removed）；未变化的货不重放。
             if changed:triage.system_place(c,p['item_id'])
+            # CAP-16：标题/描述变化、尚无结果或知识库变化时（重）生成标准名称，与判断同一事务。
+            named=_std_name_or_none(c,p,config,changed)
+            if named:write_std_name(c,p['item_id'],named,ts)
         return 'new' if old is None else 'changed' if changed else 'unchanged'
+    def similar_prices(self,std_key):
+        """同类历史价：标准名称分组键相同（且已生成名称）的全部货的 price_history，按时间排序。"""
+        with self.connect() as c:return similar_prices(c,std_key)
+    def by_code(self,code):
+        """按货号查标准名称与同类历史价（经 item_codes 关联）；未知货号返回空 dict。"""
+        with self.connect() as c:
+            row=c.execute('''SELECT k.code,k.item_id,s.std_name,s.std_key,s.status,s.brand,s.pattern_id,s.form_id,s.function_id,
+                s.era,s.seller_grade,s.segments,s.kb_status,s.kb_fingerprint,s.generated_at
+                FROM item_codes k LEFT JOIN std_names s ON s.item_id=k.item_id WHERE k.code=?''',(code,)).fetchone()
+            if not row:return {}
+            out=dict(row)
+            out['segments']=json.loads(out['segments']) if out.get('segments') else None
+            out['prices']=similar_prices(c,row['std_key']) if row['status']=='named' else []
+            return out
     def mark_gone(self,iid):
         with self.connect() as c:c.execute("UPDATE items SET status='gone',gone_at=?,checked_at=? WHERE item_id=? AND status='active'",(now(),now(),iid))
     def archive(self):

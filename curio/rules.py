@@ -44,3 +44,11 @@ def evaluate(item,config):
             if p is not None and p>rule['max_price']:
                 return dict(result,decision='skip',reason=rule['reason'],fair=str(rule['max_price']))
     return result
+
+def standard_name(item,config):
+    """CAP-16：标准名称的唯一对外入口（命名逻辑在 judge.standard_name，其它模块不得复制）。"""
+    return judge.standard_name(item.get('title',''),item.get('description',''),config)
+
+def kb_fingerprint(config):
+    """当前知识库指纹（只 stat，不重读未变化的 CSV）；与 std_names.kb_fingerprint 比对决定是否重算。"""
+    return judge.kb_vocab((config or {}).get('em_kb_path'))[2]

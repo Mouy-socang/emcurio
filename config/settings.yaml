@@ -12,3 +12,5 @@ api_budget:
   ebay: 4500
   etsy: 4500          # 账号额度 5000/天、5 次/秒（请求间隔 ≥0.2 秒，由 curio/etsy.py 保证）
   kleinanzeigen: 1500
+# EM 西洋瓷器知识库（标准名称词表来源，只读；Curiobject 从不写入）。
+em_kb_path: ~/Desktop/EM 西洋瓷器

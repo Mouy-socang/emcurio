@@ -44,6 +44,11 @@ def load(root=ROOT):
                 if isinstance(cap,bool) or not isinstance(cap,(int,float)) or not math.isfinite(cap) or cap<0:raise ValueError('max_price 无效')
                 if not rule.get('currency'):raise ValueError('价格规则缺少币种')
         defaults[name]=rules
+    # CAP-16：EM 西洋瓷器知识库路径（只读词表来源）；展开 ~，不存在时不报错（标准名称记 kb_status=missing）。
+    from .judge import DEFAULT_KB_PATH
+    kb=defaults.get('em_kb_path') or DEFAULT_KB_PATH
+    if not isinstance(kb,str) or not kb.strip():raise ValueError('em_kb_path 必须为文字路径')
+    defaults['em_kb_path']=str(Path(kb.strip()).expanduser())
     return defaults
 
 def _env(root,keys):
