@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "image_ack.v1.schema.json",
+  "title": "图片上传确认 v1（服务器 → Mac，PUT /admin/images/<name> 的响应）",
+  "description": "服务器核对过 sha256 前 16 位与文件名一致、内容为 JPEG 并已落盘后才返回；Mac 收到与本机一致的 name、bytes 才算确认。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "name",
+    "bytes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "description": "图片文件名：转码后 JPEG 内容 sha256 的前 16 位 + .jpg（AD-13，上传后不可变）。",
+      "pattern": "^[0-9a-f]{16}\\.jpg$"
+    },
+    "bytes": {
+      "type": "integer"
+    }
+  }
+}

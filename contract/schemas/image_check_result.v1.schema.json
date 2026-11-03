@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "image_check_result.v1.schema.json",
+  "title": "图片查询结果 v1（服务器 → Mac）",
+  "description": "missing 为服务器上还没有的图片名（按请求顺序）；为空时 Mac 才提交快照。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "missing"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "missing": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "type": "string",
+        "description": "图片文件名：转码后 JPEG 内容 sha256 的前 16 位 + .jpg（AD-13，上传后不可变）。",
+        "pattern": "^[0-9a-f]{16}\\.jpg$"
+      }
+    }
+  }
+}

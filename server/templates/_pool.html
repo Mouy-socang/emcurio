@@ -1,0 +1,18 @@
+{# 首页卡片（首页首批与 /api/pool 续载共用）。整卡一个链接，链接名取标题，卡内图片 alt=""。 #}
+{% macro card(it) -%}
+<li class="card"><a class="card-a" href="/item/{{ it.code }}" aria-labelledby="t-{{ it.code }}">
+<span class="code mono" aria-hidden="true">{{ it.code }}</span>
+{%- if it.images %}<span class="ph"><img src="/img/{{ it.images[0].thumb }}" width="{{ it.images[0].tw }}" height="{{ it.images[0].th }}" alt="" loading="lazy" decoding="async"></span>
+{%- else %}<span class="ph ph-none">图片未能加载</span>{% endif %}
+<h3 class="ct" id="t-{{ it.code }}"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</h3>
+<span class="pr mono">{{ price_text(it.price_eur) }}</span>
+</a></li>
+{%- endmacro %}
+
+{% macro rank_card(n, it) -%}
+<li class="rk"><a class="rk-a" href="/item/{{ it.code }}" aria-label="第 {{ n }} 名，{{ it.title }}，{{ price_text(it.price_eur) }}">
+<span class="ph sq">{% if it.images %}<img src="/img/{{ it.images[0].thumb }}" width="{{ it.images[0].tw }}" height="{{ it.images[0].th }}" alt="" decoding="async">{% else %}<span class="ph-none">图片未能加载</span>{% endif %}<span class="rk-n mono" aria-hidden="true">{{ '%02d' % n }}</span></span>
+<span class="rt"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</span>
+<span class="pr mono">{{ price_text(it.price_eur) }}</span>
+</a></li>
+{%- endmacro %}

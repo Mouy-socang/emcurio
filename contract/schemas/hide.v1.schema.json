@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hide.v1.schema.json",
+  "title": "隐藏推送 v1（Mac → 服务器，AD-5、AD-22；含取消隐藏）",
+  "description": "已发布的货原平台下架、被墨墨去掉或移出商品池时 action=hide；这些动作被撤销时 action=unhide。hide_seq 与快照 publish_no 出自同一计数器；服务器对同一货号只接受 hide_seq 更大的，hide_seq ≤ 当前快照水位的忽略（确认里 applied 为 false，不算错误）。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "code",
+    "hide_seq",
+    "action",
+    "at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^CO-[0-9]{4,8}$"
+    },
+    "hide_seq": {
+      "type": "integer",
+      "description": "1 到 2^63-1。"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "hide",
+        "unhide"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "description": "隐藏原因：sold = 原平台下架（客人侧统一标已售出），removed = 墨墨去掉或移出商品池。",
+      "enum": [
+        "sold",
+        "removed"
+      ]
+    },
+    "at": {
+      "type": "string",
+      "description": "UTC，ISO 8601 带 Z，精确到毫秒。",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  }
+}

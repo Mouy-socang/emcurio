@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {% from "_macros.html" import logout_button %}
+{% from "_pool.html" import card, rank_card %}
 {% block body %}
 <span hidden data-signed-in></span>
 <header class="site-head">
-  <span class="brand">Curiobject</span>
+  <p class="brand-line"><span class="brand">Curiobject</span>{% if updated %} <span class="upd mono">{{ updated }} 更新</span>{% endif %}</p>
   <nav class="menu" aria-label="菜单">
     <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
     {{ logout_button() }}
@@ -13,9 +14,65 @@
   <p class="eb" aria-hidden="true">Today's Ten</p>
   <h1 class="display">今日榜</h1>
 </div>
+{% if not rank and not pool_total %}
 <div class="empty">
   <p>墨墨正在准备今天的藏品，请稍后再来。</p>
 </div>
+{% else %}
+{% if rank %}
+<ol class="rank" aria-label="今日榜，{{ rank|length }} 件">
+{% for it in rank %}{{ rank_card(loop.index, it) }}
+{% endfor %}</ol>
+{% endif %}
+<section class="pool" id="pool" aria-labelledby="h-pool">
+  <p class="eb" aria-hidden="true">All Objects</p>
+  <h2 class="section" id="h-pool">全部藏品 <span class="mono cnt">{{ pool_total }}</span></h2>
+  <div class="sticky">
+    <div class="tabs" id="pool-tabs" data-swap>
+      {% for key, label, n in options.brand %}
+      {% set on = chosen.brand == key %}
+      <a class="tc{% if on %} on{% endif %}" role="button" aria-pressed="{{ 'true' if on else 'false' }}" aria-label="{{ label }}，{{ n }} 件"
+         href="{{ filter_href(chosen, brand=None if on else key) }}" data-filter><span class="idx mono" aria-hidden="true">{{ '%02d' % loop.index }}</span><b lang="en" aria-hidden="true">{{ label }}</b><span class="n mono" aria-hidden="true">{{ n }}</span></a>
+      {% endfor %}
+    </div>
+    <div class="facets" id="pool-facets" data-swap>
+      {% for key in ('form', 'band', 'pattern') %}
+      <a class="fbtn" id="t-{{ key }}" role="button" aria-haspopup="dialog" href="#sheet-{{ key }}" data-sheet="sheet-{{ key }}">{{ filter_labels[key] }}{% if chosen[key] %}：{{ chosen_labels[key] }}{% endif %} <span aria-hidden="true">▾</span></a>
+      {% endfor %}
+    </div>
+  </div>
+  <p class="fsum" id="pool-summary" role="status" data-swap>{% if labels %}已选{{ labels|join('、') }}，显示 <span class="mono">{{ shown_total }}</span> 件 · <a class="lnk lnk-pad" href="/#pool" data-filter>清除</a>{% else %}显示 <span class="mono">{{ shown_total }}</span> 件{% endif %}</p>
+  <div id="pool-list" data-swap>
+    {% if cards %}
+    <ol class="wf" aria-label="全部藏品" data-query="{{ query }}" data-next="{{ next_offset if next_offset is not none else '' }}" data-total="{{ shown_total }}">
+    {% for it in cards %}{{ card(it) }}
+    {% endfor %}</ol>
+    <div class="more" data-more>{% if next_offset is not none %}<a class="lnk lnk-pad" href="{{ more_href }}">加载更多</a>{% endif %}</div>
+    {% else %}
+    <div class="empty-state">
+      <p class="zero mono" aria-hidden="true">0</p>
+      <h3>此条件下暂无藏品</h3>
+      <p class="muted">{{ labels|join(' · ') }}</p>
+      <p class="muted">可放宽价格区间后再看。</p>
+      <a class="btn btn-primary" href="/#pool" data-filter>清除全部筛选</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+<div id="pool-sheets" data-swap>
+  {% for key in ('form', 'band', 'pattern') %}
+  <div class="sheet" id="sheet-{{ key }}" role="dialog" aria-modal="true" aria-labelledby="sheet-{{ key }}-h" data-trigger="t-{{ key }}">
+    <div class="sheet-head"><h2 id="sheet-{{ key }}-h">{{ filter_labels[key] }}</h2><a class="lnk lnk-pad" href="#pool" data-close>关闭</a></div>
+    <div class="opts" role="radiogroup" aria-labelledby="sheet-{{ key }}-h">
+      <a class="opt{% if not chosen[key] %} on{% endif %}" role="radio" aria-checked="{{ 'false' if chosen[key] else 'true' }}" href="{{ filter_href(chosen, **{key: None}) }}" data-filter>全部</a>
+      {% for k, label, n in options[key] %}
+      <a class="opt{% if chosen[key] == k %} on{% endif %}" role="radio" aria-checked="{{ 'true' if chosen[key] == k else 'false' }}" href="{{ filter_href(chosen, **{key: k}) }}" data-filter>{{ label }} <span class="mono muted">{{ n }}</span></a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 <footer class="site-foot">
   <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
   {{ logout_button() }}

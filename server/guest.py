@@ -1,20 +1,24 @@
-"""客人页面路由（CAP-13；AD-6、AD-8、AD-18）：注册/登录、找回、设置新密码、登录过期、停用、说明页、登录后首页占位。
+"""客人页面路由（CAP-9、CAP-13；AD-6、AD-8、AD-18）：注册/登录、找回、设置新密码、登录过期、停用、说明页、首页与单件页。
 
 - 服务器端渲染 HTML，表单是普通 POST（application/x-www-form-urlencoded），不依赖 JS；`static/guest.js` 只做增强。
 - 未登录访问任何客人路径（含 `/item/<货号>`）都只显示注册/登录页，原路径作为 `next` 带在表单里，完成后 303 回去。
 - 免登录的只有：注册/登录/找回/设置新密码页、说明页 `/legal`、静态外壳 `/static/`、`/healthz`。
-- 首页与单件页在故事 10；本故事登录后只显示空首页占位，不露任何货。
+- 首页（故事 10）：今日榜横滑 + 全部藏品（品牌分区、器型/价格区间/图案筛选、双列瀑布流、每批 20 件续载）；
+  筛选与续载都是普通链接（不跑 JS 也能用），`static/guest.js` 增强为就地刷新与滚到底自动续载（`/api/pool`）。
+- 单件页（故事 12 补全）：本故事只给图片、名称、价格、货号；已隐藏或墓碑显示"已售出 / 已移出"。
+- 快照数据（`/api/pool`）与图片（`/img/<name>`）只经会话鉴权提供（AD-6）：未登录 401、停用或待同意 403。
 """
 import html
 import logging
 import math
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.concurrency import run_in_threadpool
@@ -22,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 import accounts
 from accounts import MSG
 import mailer as mailer_mod
+import snapshot
 
 log = logging.getLogger('curiobject.server')
 HERE = Path(__file__).resolve().parent
@@ -34,6 +39,10 @@ _ITEM_RE = re.compile(r'/item/CO-[0-9]{4,8}')
 REG_FIELDS = ('invite', 'username', 'password', 'nickname', 'email', 'consent')
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; form-action 'self'; "
        "frame-ancestors 'none'; base-uri 'none'")
+PAGE_SIZE = 20                       # 每批件数（自动续载）
+MAX_SHOWN = 2000
+CN_TZ = timezone(timedelta(hours=8))   # 客人在中国：更新时间按北京时间显示
+FILTER_LABELS = {'form': '器型', 'band': '价格区间', 'pattern': '图案'}
 
 
 # ---------- 用户协议与隐私说明（AD-18：文本与版本号同一文件） ----------
@@ -97,6 +106,64 @@ def _render_md(body):
             para.append(line)
     flush()
     return '\n'.join(out)
+
+
+# ---------- 首页与单件页的显示小工具 ----------
+
+def price_text(value):
+    """€185 / €1,250 / €99.50（欧元为准）。"""
+    if isinstance(value, float) and not value.is_integer():
+        return '€{:,.2f}'.format(value)
+    return '€{:,}'.format(int(value))
+
+
+def updated_text(received_at):
+    try:
+        t = datetime.fromisoformat(received_at.replace('Z', '+00:00')).astimezone(CN_TZ)
+    except (AttributeError, ValueError):
+        return None
+    return t.strftime('%Y.%m.%d · %H:%M')
+
+
+def chosen_filters(params, options):
+    """只认商品池里实际有的取值；其它忽略。"""
+    out = {}
+    for key, values in options.items():
+        v = params.get(key)
+        if v and any(v == k for k, _, _ in values):
+            out[key] = v
+    return out
+
+
+def filter_query(chosen, **change):
+    q = dict(chosen)
+    for k, v in change.items():
+        if v is None:
+            q.pop(k, None)
+        else:
+            q[k] = v
+    return urlencode([(k, q[k]) for k in ('brand', 'form', 'band', 'pattern') if k in q])
+
+
+def filter_href(chosen, **change):
+    q = filter_query(chosen, **change)
+    return '/?' + q + '#pool' if q else '/#pool'
+
+
+def label_of(options, key, value):
+    return next((label for k, label, _ in options[key] if k == value), value)
+
+
+def summary_labels(options, chosen):
+    return [label_of(options, k, chosen[k]) for k in ('brand', 'form', 'band', 'pattern') if k in chosen]
+
+
+def _int(value, default, low, high):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, n))
 
 
 # ---------- 小工具 ----------
@@ -453,12 +520,95 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         clear_session(resp)
         return resp
 
+    # ----- 首页、单件页、快照数据与图片（AD-6：只经会话鉴权） -----
+
+    env.globals.update(price_text=price_text, filter_href=filter_href)
+
+    def api_gate(request):
+        """快照数据与图片的会话鉴权：返回 None（放行）或错误响应。"""
+        state, account = current(request)
+        if state != 'ok':
+            return JSONResponse({'ok': False, 'detail': '请先登录'}, status_code=401)
+        if account['status'] == 'disabled' or consent_missing(account):
+            return JSONResponse({'ok': False, 'detail': '无权查看'}, status_code=403)
+        return None
+
+    def load_view():
+        c = db()
+        try:
+            return snapshot.current_view(c, db_path)
+        finally:
+            c.close()
+
+    def pool_state(params):
+        view = load_view()
+        options = snapshot.filter_options(view.pool)
+        chosen = chosen_filters(params, options)
+        shown = snapshot.apply_filters(view.pool, chosen)
+        return view, options, chosen, shown
+
+    @app.get('/img/{name}')
+    def image(name: str, request: Request):
+        denied = api_gate(request)
+        if denied:
+            return denied
+        path = snapshot.image_dir(db_path) / name
+        if not snapshot.IMAGE_RE.fullmatch(name) or not path.is_file():
+            return JSONResponse({'ok': False, 'detail': '图片不存在'}, status_code=404)
+        # 文件名即内容哈希、不可变：私有长缓存。
+        return FileResponse(path, media_type='image/jpeg',
+                            headers={'Cache-Control': 'private, max-age=31536000, immutable'})
+
+    @app.get('/api/pool')
+    def api_pool(request: Request):
+        """自动续载：返回下一批卡片（HTML 片段，与首页同一模板）。"""
+        denied = api_gate(request)
+        if denied:
+            return denied
+        params = request.query_params
+        _, options, chosen, shown = pool_state(params)
+        # 最多显示 MAX_SHOWN 件：到上限就停，不再给下一批（否则会反复返回同一批）。
+        limit = min(len(shown), MAX_SHOWN)
+        offset = _int(params.get('offset'), 0, 0, limit)
+        batch = shown[offset:min(offset + PAGE_SIZE, limit)]
+        cards = env.get_template('_pool.html').module
+        html_ = ''.join(str(cards.card(it)) for it in batch)
+        end = offset + len(batch)
+        return JSONResponse({'ok': True, 'html': html_, 'count': len(batch), 'shown': end, 'total': len(shown),
+                             'next_offset': end if end < limit else None},
+                            headers={'Cache-Control': 'no-store'})
+
+    def home(params):
+        view, options, chosen, shown = pool_state(params)
+        n = _int(params.get('n'), PAGE_SIZE, PAGE_SIZE, MAX_SHOWN)
+        first = shown[:n]
+        labels = summary_labels(options, chosen)
+        more = filter_query(chosen)
+        more = (more + '&' if more else '') + f'n={len(first) + PAGE_SIZE}'
+        return page('home.html', '今日榜', view=view, rank=view.rank, pool_total=len(view.pool),
+                    options=options, chosen=chosen, cards=first, shown_total=len(shown), labels=labels,
+                    next_offset=len(first) if len(first) < min(len(shown), MAX_SHOWN) else None,
+                    query=filter_query(chosen),
+                    more_href='/?' + more + '#pool', updated=updated_text(view.received_at),
+                    chosen_labels={k: label_of(options, k, v) for k, v in chosen.items()},
+                    filter_labels=FILTER_LABELS)
+
+    def item_page(code):
+        view = load_view()
+        state = view.item_state(code)
+        it = view.items.get(code)
+        if state == 'show':
+            return page('item.html', it['title'], state=state, it=it, code=code)
+        if state in ('sold', 'removed'):
+            return page('item.html', '已售出' if state == 'sold' else '已移出', state=state, it=None, code=code)
+        return page('item.html', '此件已不在展出', 404, state=None, it=None, code=code)
+
     # ----- 客人路径（须登录）：放在最后，兜住其它所有 GET -----
 
     @app.get('/{path:path}')
     def guest(request: Request, path: str):
         full = '/' + path
-        if full.startswith(('/admin', '/static')) or full in ('/docs', '/redoc', '/openapi.json'):
+        if full.startswith(('/admin', '/static', '/api/', '/img/')) or full in ('/docs', '/redoc', '/openapi.json'):
             return HTMLResponse('Not Found', status_code=404)
         state, account = current(request)
         next_path = safe_next(full)
@@ -474,8 +624,9 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
             return page('disabled.html', '账号已停用', 403)
         if consent_missing(account):
             return page('consent.html', '确认用户协议', next=next_path)
-        if full == '/' or _ITEM_RE.fullmatch(full):
-            # 首页与单件页在故事 10；先显示空首页占位。
-            return page('home.html', '今日榜')
+        if full == '/':
+            return home(request.query_params)
+        if _ITEM_RE.fullmatch(full):
+            return item_page(full[len('/item/'):])
         return HTMLResponse('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>页面不存在 · Curiobject</title>'
                             '<p>页面不存在。<a href="/">返回首页</a></p></html>', status_code=404)

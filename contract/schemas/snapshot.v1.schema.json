@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "snapshot.v1.schema.json",
+  "title": "发布快照 v1（Mac → 服务器，AD-5、AD-6、AD-13、AD-22）",
+  "description": "完整快照，服务器整体原子替换。字段只限 AD-6 白名单：永不包含原平台链接与图片地址、分数与理由、自动移出的货、Kleinanzeigen 的货、GC 编号。publish_no 与 hide 的 hide_seq 出自 Mac 同一计数器；服务器拒收 publish_no ≤ 当前编号的快照（确认里 applied 为 false，不算错误），替换时保留 hide_seq 大于 hide_watermark 的隐藏项。引用的图片须先经 PUT /admin/images/<name> 上传，服务器缺任何一张即 400 拒收。rank 恰好 10 件且都在 pool 里；pool 为墨墨的顺序，items 与 pool 是同一组货。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "publish_no",
+    "hide_watermark",
+    "rank",
+    "pool",
+    "items",
+    "tombstones"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "publish_no": {
+      "type": "integer",
+      "description": "发布编号（1 到 2^63-1，单调递增）。"
+    },
+    "hide_watermark": {
+      "type": "integer",
+      "description": "生成快照时已纳入的 hide_seq 水位。"
+    },
+    "rank": {
+      "type": "array",
+      "description": "今日榜：恰好 10 个货号，按名次。",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "pattern": "^CO-[0-9]{4,8}$"
+      }
+    },
+    "pool": {
+      "type": "array",
+      "description": "商品池货号顺序（墨墨留下时间新到旧）。",
+      "items": {
+        "type": "string",
+        "pattern": "^CO-[0-9]{4,8}$"
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "std_name",
+          "title",
+          "price_eur",
+          "price_band",
+          "images",
+          "seller_text"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^CO-[0-9]{4,8}$"
+          },
+          "std_name": {
+            "type": "string",
+            "description": "标准名称（EM 西洋瓷器知识库命名）；未能命名时为空字符串。",
+            "maxLength": 200
+          },
+          "title": {
+            "type": "string",
+            "description": "中文标题：暂取标准名称；未能命名时为清洗后的卖家原标题（此时带 title_lang）。",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "title_lang": {
+            "type": "string",
+            "enum": [
+              "de",
+              "en"
+            ]
+          },
+          "brand": {
+            "type": "string",
+            "description": "品牌筛选值（标准名称的品牌段，如 Meissen、KPM Berlin）。",
+            "maxLength": 60
+          },
+          "form_id": {
+            "type": "string",
+            "description": "器型筛选值：标准名称的功能 ID（无功能时为器型 ID）。",
+            "maxLength": 60
+          },
+          "form": {
+            "type": "string",
+            "description": "器型筛选的中文名。",
+            "maxLength": 100
+          },
+          "pattern_id": {
+            "type": "string",
+            "description": "图案筛选值：标准名称的图案 ID。",
+            "maxLength": 60
+          },
+          "pattern": {
+            "type": "string",
+            "description": "图案筛选的中文名。",
+            "maxLength": 100
+          },
+          "price_band": {
+            "type": "string",
+            "description": "价格区间（欧元，左闭右开）：lt200 = 200 以下；200-500；500-1000；gte1000 = 1000 以上。",
+            "enum": [
+              "lt200",
+              "200-500",
+              "500-1000",
+              "gte1000"
+            ]
+          },
+          "price_eur": {
+            "type": "number",
+            "description": "卖家原价（欧元）。"
+          },
+          "fee_tier": {
+            "type": "string",
+            "description": "预估费用档位（故事 12 填）。",
+            "enum": [
+              "A",
+              "B",
+              "C",
+              "D",
+              "ask"
+            ]
+          },
+          "fee_eur": {
+            "type": "number",
+            "description": "预估费用金额（欧元，故事 12 填）。"
+          },
+          "images": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "w",
+                "h",
+                "thumb",
+                "tw",
+                "th",
+                "alt"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "大图（最长边不超过 1600 px）。",
+                  "pattern": "^[0-9a-f]{16}\\.jpg$"
+                },
+                "w": {
+                  "type": "integer"
+                },
+                "h": {
+                  "type": "integer"
+                },
+                "thumb": {
+                  "type": "string",
+                  "description": "缩略图（最长边不超过 600 px）。",
+                  "pattern": "^[0-9a-f]{16}\\.jpg$"
+                },
+                "tw": {
+                  "type": "integer"
+                },
+                "th": {
+                  "type": "integer"
+                },
+                "alt": {
+                  "type": "string",
+                  "description": "替代文字：墨墨改过的，否则「标准名称 · 第 N 张 / 共 M 张」。",
+                  "maxLength": 500
+                }
+              }
+            }
+          },
+          "seller_text": {
+            "type": "string",
+            "description": "清洗后的卖家原文（已去掉平台名、商品号、卖家名、店铺与链接）。",
+            "maxLength": 5000
+          },
+          "seller_lang": {
+            "type": "string",
+            "enum": [
+              "de",
+              "en"
+            ]
+          },
+          "comment": {
+            "type": "string",
+            "description": "墨墨点评（有才带）。",
+            "maxLength": 5000
+          }
+        }
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "description": "墓碑：曾发布、已离开商品池 90 天内的货号。",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "status",
+          "at"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^CO-[0-9]{4,8}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "sold",
+              "removed"
+            ]
+          },
+          "at": {
+            "type": "string",
+            "description": "UTC，ISO 8601 带 Z，精确到毫秒。",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+          }
+        }
+      }
+    },
+    "fx_rate": {
+      "type": "number",
+      "description": "CNY/EUR 参考汇率（故事 12 填）。"
+    },
+    "fx_date": {
+      "type": "string",
+      "description": "汇率日期（故事 12 填）。",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    }
+  }
+}

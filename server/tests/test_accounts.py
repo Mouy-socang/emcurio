@@ -115,6 +115,12 @@ def logged_in_home(r):
     return r.status_code == 200 and '<h1 class="display">今日榜</h1>' in r.text and '/register' not in r.text
 
 
+def logged_in_item(r):
+    """已登录并看到单件页（故事 10）：没有发布快照时为 404"此件已不在展出"，不是注册/登录或同意页。"""
+    return (r.status_code == 404 and '此件已不在展出' in r.text and 'data-signed-in' in r.text
+            and '/register' not in r.text and 'action="/consent"' not in r.text)
+
+
 # ---------- 注册 ----------
 
 def test_register_success_logs_in_records_consent_and_returns_to_path(client, db, clock):
@@ -127,7 +133,7 @@ def test_register_success_logs_in_records_consent_and_returns_to_path(client, db
     cookie = r.headers['set-cookie']
     assert 'HttpOnly' in cookie and 'SameSite=lax' in cookie.replace('Lax', 'lax')
     assert f'Max-Age={90 * 86400}' in cookie
-    assert logged_in_home(client.get('/item/CO-0001'))
+    assert logged_in_item(client.get('/item/CO-0001'))
     [acct] = rows(db, 'SELECT * FROM accounts')
     assert acct['username'] == 'wangjie' and acct['nickname'] == '王姐' and acct['email'] == 'lily@example.com'
     assert acct['status'] == 'active' and acct['account_rev'] == 1
@@ -316,7 +322,7 @@ def test_unauthenticated_item_then_login_returns_there(client):
     assert 'CO-0001' not in page.text.replace('/item/CO-0001', '')    # 不露货
     r = login(client, next='/item/CO-0001')
     assert r.status_code == 303 and r.headers['location'] == '/item/CO-0001'
-    assert logged_in_home(client.get('/item/CO-0001'))
+    assert logged_in_item(client.get('/item/CO-0001'))
 
 
 @pytest.mark.parametrize('bad', ['//evil.com', 'https://evil.com/', '/login', '/admin/events', '/\\evil',
@@ -615,7 +621,8 @@ def test_pages_follow_design_rules(client):
     css = client.get('/static/guest.css').text
     assert 'box-shadow' not in css and 'border-radius:0' in css and '--tap:44px' in css
     small = [rule for rule in re.findall(r'([^{}]+)\{[^}]*font-size:(?:[0-9]|1[0-3])px', css)]
-    assert [r.strip() for r in small] == ['.eb']      # 小于 14px 的只有装饰性 eyebrow（12px）
+    # 小于 14px 的只有装饰性 eyebrow 与辅助信息（12px caption：更新时间、卡片货号、名次、品牌编号、图片占位字）。
+    assert {r.strip() for r in small} <= {'.eb', '.upd', '.code', '.tc .idx', '.rk-n', '.ph-none', '.ph.broken::after'}
     html = client.get('/').text
     assert '<html lang="zh-CN">' in html
     assert 'content="width=device-width, initial-scale=1"' in html and 'user-scalable' not in html
@@ -796,7 +803,7 @@ def test_reconsent_after_terms_version_change(make, db, tmp_path):
     assert bad.status_code == 400 and '请先勾选同意用户协议与隐私政策' in bad.text
     ok = c2.post('/consent', data={'next': '/item/CO-0001', 'consent': 'yes'})
     assert ok.status_code == 303 and ok.headers['location'] == '/item/CO-0001'
-    assert logged_in_home(c2.get('/item/CO-0001'))
+    assert logged_in_item(c2.get('/item/CO-0001'))
     versions = rows(db, 'SELECT kind,terms_version FROM consents ORDER BY terms_version,kind')
     assert len(versions) == 4 and {v['terms_version'] for v in versions[2:]} == {'newer-' + guest.load_terms(
         guest.DEFAULT_TERMS)[0]}

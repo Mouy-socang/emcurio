@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% from "_macros.html" import logout_button %}
+{% block body %}
+<span hidden data-signed-in></span>
+<header class="site-head">
+  <p class="brand-line"><span class="brand">Curiobject</span></p>
+  <nav class="menu" aria-label="菜单">
+    <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
+    {{ logout_button() }}
+  </nav>
+</header>
+<p class="back"><a class="lnk lnk-pad" href="/">浏览全部</a></p>
+{% if state == 'show' %}
+<article class="obj">
+  {% for img in it.images %}
+  <p class="ph full"><img src="/img/{{ img.name }}" width="{{ img.w }}" height="{{ img.h }}" alt="{{ img.alt }}" decoding="async"{% if not loop.first %} loading="lazy"{% endif %}></p>
+  {% else %}
+  <p class="ph full ph-none">图片未能加载</p>
+  {% endfor %}
+  <p class="code mono">货号 {{ it.code }}</p>
+  <h1 class="h1s"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</h1>
+  <p class="price"><span class="mono big">{{ price_text(it.price_eur) }}</span> <span class="muted">卖家原价</span></p>
+</article>
+{% elif state %}
+<div class="head">
+  <p class="code mono">货号 {{ code }}</p>
+  <h1 class="h1s">{{ '此件已售出。' if state == 'sold' else '此件已移出。' }}</h1>
+</div>
+{% else %}
+<div class="head">
+  <h1 class="h1s">此件已不在展出</h1>
+</div>
+{% endif %}
+<p><a class="btn btn-primary" href="/">浏览全部</a></p>
+<footer class="site-foot">
+  <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
+  {{ logout_button() }}
+</footer>
+{% endblock %}

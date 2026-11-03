@@ -5,6 +5,11 @@
   遇失败即停、不跳过，下次从同一条重试；服务器 2xx 且回显 event_id 才写 sent_at。
 - 永久失败（服务器 400/409/413、本机契约校验不过、库里载荷坏掉）把该条标 `failed_at` 并停住（不跳过，顺序要紧），
   `sync_status: blocked`，通知点名这一条；由 `scripts/outbox.py requeue|drop` 人工处理。
+- 例外（AD-5 即时隐藏）：队首的快照发不出去（被拒收或暂时失败）时，排在它之后的 hide / unhide 照常按序发送
+  （服务器按 hide_seq 与快照水位合并，先到的隐藏不会被晚到的旧快照抹掉）；其它类别仍等在快照后面。
+- 快照送达（服务器 applied，或当前编号 ≥ 本次）后在同一事务里记为已送达（publish.on_snapshot_ack）。
+- 快照（kind=snapshot）发送前先经 `POST /admin/images/check` + `PUT /admin/images/<name>` 把服务器上还没有的图片
+  逐张上传、核对确认，再查一次全部在服务器上才提交（AD-13）；本机缺图按永久失败处理。
 - 发送前后都按 `contract/schemas/` 校验（标准库最小校验器，只支持这些 Schema 用到的关键字）。
 - 连续 3 次 flush 失败（含意外异常）发一次 macOS 通知；只有 ok 清零，timeout 不改计数。
 - 管理密钥只从 .env 读取，不进日志、错误信息或数据库。
@@ -33,6 +38,8 @@ REQUEST_TIMEOUT = 10         # 单次请求上限（仍受整轮时限约束）
 MAX_RESPONSE = 65536         # 确认响应最多读这么多字节
 FAIL_NOTIFY_AFTER = 3        # 连续失败几次后通知
 PERMANENT_STATUS = {400, 409, 413}
+MAX_PAYLOAD = 8_000_000      # 单条载荷（JSON）上限；服务器 MAX_BODY 9 MB、Caddy request_body 10MB 与之配套
+UPLOAD_TIMEOUT = 60          # 快照与图片上传的单次请求上限（仍受整轮时限约束）
 KV_FAIL_STREAK = 'sync_fail_streak'
 KV_NOTIFIED = 'sync_fail_notified'
 _KIND_RE = re.compile(r'^[a-z][a-z0-9_-]{0,63}$')
@@ -57,7 +64,7 @@ _TYPES = {
 # 只描述、不约束的关键字。
 _ANNOTATIONS = {'$schema', '$id', 'title', 'description'}
 _SUPPORTED = _ANNOTATIONS | {'type', 'required', 'properties', 'additionalProperties',
-                             'const', 'enum', 'pattern', 'minLength', 'maxLength'}
+                             'const', 'enum', 'pattern', 'minLength', 'maxLength', 'items', 'minItems', 'maxItems'}
 
 
 def check_schema(schema, path='$'):
@@ -74,7 +81,7 @@ def check_schema(schema, path='$'):
         raise ContractError(f'Schema {path} 的 required 应为文字列表')
     if 'enum' in schema and not isinstance(schema['enum'], list):
         raise ContractError(f'Schema {path} 的 enum 应为列表')
-    for key in ('minLength', 'maxLength'):
+    for key in ('minLength', 'maxLength', 'minItems', 'maxItems'):
         if key in schema and (type(schema[key]) is not int or schema[key] < 0):
             raise ContractError(f'Schema {path} 的 {key} 应为非负整数')
     if 'pattern' in schema:
@@ -92,6 +99,8 @@ def check_schema(schema, path='$'):
         check_schema(extra, f'{path}.*')
     elif not isinstance(extra, bool):
         raise ContractError(f'Schema {path} 的 additionalProperties 应为布尔或对象')
+    if 'items' in schema:
+        check_schema(schema['items'], f'{path}[]')
 
 
 def _same(a, b):
@@ -117,6 +126,14 @@ def _validate(instance, schema, path):
             errors.append(f'{path} 超过 {schema["maxLength"]} 字')
         if 'pattern' in schema and not re.search(schema['pattern'], instance):
             errors.append(f'{path} 格式不符')
+    if isinstance(instance, list):
+        if 'minItems' in schema and len(instance) < schema['minItems']:
+            errors.append(f'{path} 少于 {schema["minItems"]} 项')
+        if 'maxItems' in schema and len(instance) > schema['maxItems']:
+            errors.append(f'{path} 超过 {schema["maxItems"]} 项')
+        if 'items' in schema:
+            for n, value in enumerate(instance):
+                errors.extend(_validate(value, schema['items'], f'{path}[{n}]'))
     if isinstance(instance, dict):
         props = schema.get('properties', {})
         for key in schema.get('required', []):
@@ -216,13 +233,23 @@ def _envelope(event_id, kind, payload, created_at):
             'created_at': created_at, 'payload': payload}
 
 
+def wire(envelope):
+    """信封发出时的字节（UTF-8 JSON，中文不转义）：大小上限按它算，flush 也按它发。"""
+    return json.dumps(envelope, ensure_ascii=False).encode('utf-8')
+
+
 def enqueue(c, kind, payload):
     """校验后写入发件箱，返回 event_id。不提交：与调用方的状态变更同一事务。坏载荷抛 ContractError、不入队。"""
     event_id = str(uuid.uuid4())
     created_at = utc_now()
-    check_envelope(_envelope(event_id, kind, payload, created_at))
+    envelope = _envelope(event_id, kind, payload, created_at)
+    check_envelope(envelope)
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    # 按实际发出的字节计（flush 发的正是 wire(envelope)）。
+    if len(wire(envelope)) > MAX_PAYLOAD:
+        raise ContractError(f'{kind} 载荷超过 {MAX_PAYLOAD // 1_000_000} MB 上限')
     c.execute('INSERT INTO outbox(event_id,kind,payload,created_at) VALUES(?,?,?,?)',
-              (event_id, kind, json.dumps(payload, ensure_ascii=False, sort_keys=True), created_at))
+              (event_id, kind, text, created_at))
     return event_id
 
 
@@ -253,6 +280,18 @@ def enqueue_invite(c, code, at_least=None):
     seq = next_target_seq(c, 'invite', at_least)
     payload = {'schema_version': 1, 'command_id': str(uuid.uuid4()), 'target_seq': seq, 'code': code}
     return enqueue(c, 'set_invite_code', payload), seq
+
+
+def image_dir(store):
+    """发布图片（转码后、内容哈希命名）在本机的目录：curio.db 同目录下 publish_images/。"""
+    return Path(store.path).parent / 'publish_images'
+
+
+def next_publish_seq(c):
+    """AD-22：发布编号与 hide_seq 共用的计数器（kv `publish_seq`），单调递增。须在写事务内调用；不提交。"""
+    assert c.in_transaction, '发布序号必须在写事务内分配'
+    c.execute("INSERT INTO kv(k,v) VALUES('publish_seq','1') ON CONFLICT(k) DO UPDATE SET v=CAST(v AS INTEGER)+1")
+    return int(c.execute("SELECT v FROM kv WHERE k='publish_seq'").fetchone()[0])
 
 
 def pending(c):
@@ -311,58 +350,150 @@ def _record_round(store, status):
 
 # ---------- 发送 ----------
 
-def _post(session, url, token, envelope, timeout, deadline, monotonic):
-    """发一条；返回 (错误或 None, 是否永久失败)。错误为中文、不含密钥。读响应时按墙钟 deadline 截止。"""
+def _call(session, method, url, token, timeout, deadline, monotonic, **kw):
+    """发一个请求并按墙钟 deadline 读完响应。返回 (status, body 或 None, 错误或 None)；错误为中文、不含密钥。"""
+    headers = dict(kw.pop('headers', {}), Authorization='Bearer ' + token)
     try:
-        r = session.post(url + '/admin/events', json=envelope, timeout=timeout, stream=True,
-                         headers={'Authorization': 'Bearer ' + token})
+        r = getattr(session, method.lower())(url, timeout=timeout, stream=True, headers=headers, **kw)
     except requests.RequestException as e:
-        return f'连接服务器失败（{type(e).__name__}）', False
+        return None, None, f'连接服务器失败（{type(e).__name__}）'
     chunks, size = [], 0
     try:
         for chunk in r.iter_content(4096):
             if monotonic() > deadline:
-                return '服务器响应超时', False
+                return None, None, '服务器响应超时'
             chunks.append(chunk)
             size += len(chunk)
             if size > MAX_RESPONSE:
-                return '服务器响应过大', False
+                return None, None, '服务器响应过大'
     except requests.RequestException as e:
-        return f'读取服务器响应失败（{type(e).__name__}）', False
+        return None, None, f'读取服务器响应失败（{type(e).__name__}）'
     finally:
         r.close()
     try:
         body = json.loads(b''.join(chunks))
     except (ValueError, RecursionError):
         body = None
-    if not 200 <= r.status_code < 300:
-        detail = ''
-        if isinstance(body, dict) and isinstance(body.get('detail'), str):
-            detail = '：' + body['detail'][:200]
-        return f'服务器返回 {r.status_code}{detail}', r.status_code in PERMANENT_STATUS
-    if not isinstance(body, dict) or body.get('event_id') != envelope['event_id']:
-        return '服务器确认无效（未回显 event_id）', False
-    if envelope['kind'] == 'set_invite_code' and body.get('applied') is not True:
-        # 服务器已有序号更大的邀请码指令（例如 Mac 库从备份恢复后计数器回退）：重发也不会生效。
-        return INVITE_NOT_APPLIED, True
+    return r.status_code, body, None
+
+
+def _http_error(status, body):
+    detail = ''
+    if isinstance(body, dict) and isinstance(body.get('detail'), str):
+        detail = '：' + body['detail'][:200]
+    return f'服务器返回 {status}{detail}', status in PERMANENT_STATUS
+
+
+_IMAGE_RE = re.compile(r'[0-9a-f]{16}\.jpg')
+IMAGE_BATCH = 500            # 每次图片查询的名字数（契约上限 5000；响应须在 MAX_RESPONSE 内）
+
+
+def snapshot_images(payload):
+    """快照引用的全部图片名（大图与缩略图，去重保序）。"""
+    names = []
+    for item in payload.get('items', []):
+        for img in item.get('images', []):
+            for key in ('name', 'thumb'):
+                if img.get(key) not in names:
+                    names.append(img[key])
+    return names
+
+
+def _missing(session, url, token, names, deadline, monotonic):
+    """问服务器哪些图片还没有；返回 (missing 列表或 None, 错误, 是否永久)。"""
+    query = {'schema_version': 1, 'names': names}
+    status, body, error = _call(session, 'POST', url + '/admin/images/check', token,
+                                min(UPLOAD_TIMEOUT, max(0.1, deadline - monotonic())), deadline, monotonic, json=query)
+    if error:
+        return None, error, False
+    if not 200 <= status < 300:
+        return (None,) + _http_error(status, body)
+    try:
+        errors = validate(body, load_schema('image_check_result', 1)) if isinstance(body, dict) else ['$ 应为 object']
+    except ContractError as e:
+        errors = [str(e)]
+    if errors or not set(body['missing']) <= set(names):
+        return None, '服务器图片查询结果无效', False
+    return body['missing'], None, False
+
+
+def _upload_images(session, url, token, payload, image_dir, deadline, monotonic):
+    """AD-13：提交快照前把服务器上还没有的图片逐张上传，再查一次确认全部在服务器上（按 IMAGE_BATCH 分批）。
+    返回 (错误或 None, 是否永久)。"""
+    names = snapshot_images(payload)
+    for start in range(0, len(names), IMAGE_BATCH):
+        batch = names[start:start + IMAGE_BATCH]
+        missing, error, permanent = _missing(session, url, token, batch, deadline, monotonic)
+        if error:
+            return error, permanent
+        for name in missing:
+            if not _IMAGE_RE.fullmatch(name):
+                return f'图片名无效：{name[:40]}', True
+            path = Path(image_dir) / name
+            try:
+                data = path.read_bytes()
+            except OSError:
+                return f'本机缺少图片 {name}（请重新发布）', True
+            status, body, error = _call(session, 'PUT', url + '/admin/images/' + name, token,
+                                        min(UPLOAD_TIMEOUT, max(0.1, deadline - monotonic())), deadline, monotonic,
+                                        data=data, headers={'Content-Type': 'image/jpeg'})
+            if error:
+                return error, False
+            if not 200 <= status < 300:
+                return _http_error(status, body)
+            try:
+                bad = validate(body, load_schema('image_ack', 1)) if isinstance(body, dict) else ['$ 应为 object']
+            except ContractError as e:
+                bad = [str(e)]
+            if bad or body['name'] != name or body['bytes'] != len(data):
+                return f'服务器图片确认无效（{name}）', False
+        if missing:
+            again, error, permanent = _missing(session, url, token, batch, deadline, monotonic)
+            if error:
+                return error, permanent
+            if again:
+                return f'服务器仍缺 {len(again)} 张图片，未提交快照', False
     return None, False
 
 
-def _post_with_deadline(session, url, token, envelope, deadline, monotonic):
+def _post(session, url, token, envelope, timeout, deadline, monotonic, image_dir=None):
+    """发一条；返回 (错误或 None, 是否永久失败, 服务器确认)。快照先传图（AD-13）。错误为中文、不含密钥。
+    读响应时按墙钟 deadline 截止。"""
+    if envelope['kind'] == 'snapshot':
+        error, permanent = _upload_images(session, url, token, envelope['payload'], image_dir, deadline, monotonic)
+        if error:
+            return error, permanent, None
+        timeout = min(UPLOAD_TIMEOUT, max(0.1, deadline - monotonic()))
+    status, body, error = _call(session, 'POST', url + '/admin/events', token, timeout, deadline, monotonic,
+                                data=wire(envelope), headers={'Content-Type': 'application/json'})
+    if error:
+        return error, False, None
+    if not 200 <= status < 300:
+        return _http_error(status, body) + (None,)
+    if not isinstance(body, dict) or body.get('event_id') != envelope['event_id']:
+        return '服务器确认无效（未回显 event_id）', False, None
+    if envelope['kind'] == 'set_invite_code' and body.get('applied') is not True:
+        # 服务器已有序号更大的邀请码指令（例如 Mac 库从备份恢复后计数器回退）：重发也不会生效。
+        return INVITE_NOT_APPLIED, True, body
+    return None, False, body
+
+
+def _post_with_deadline(session, url, token, envelope, deadline, monotonic, image_dir=None):
     """在后台线程发送，主线程按墙钟截止；超时就放弃等待（服务器按 event_id 去重，晚到的重复无害）。"""
     left = deadline - monotonic()
     box = {}
 
     def work():
         try:
-            box['r'] = _post(session, url, token, envelope, min(REQUEST_TIMEOUT, left), deadline, monotonic)
+            box['r'] = _post(session, url, token, envelope, min(REQUEST_TIMEOUT, left), deadline, monotonic,
+                             image_dir)
         except Exception as e:
-            box['r'] = (f'发送失败（{type(e).__name__}）', False)
+            box['r'] = (f'发送失败（{type(e).__name__}）', False, None)
     t = threading.Thread(target=work, daemon=True)
     t.start()
     t.join(max(0.0, left))
     if t.is_alive():
-        return '服务器响应超时', False
+        return '服务器响应超时', False, None
     return box['r']
 
 
@@ -382,43 +513,66 @@ def flush(store, root=ROOT, seconds=FLUSH_SECONDS, session=None, monotonic=time.
         if note:
             result['sync_error'] = note
         return result
+    from .. import publish      # 延迟导入：publish 依赖本模块
     session = session or requests.Session()
     deadline = monotonic() + seconds
     sent, error, status, blocked_seq = 0, None, 'ok', None
+    stuck = None     # 本轮发不出去的快照（seq）：其后只放行 hide，保证即时隐藏（AD-5）
     while True:
         with store.connect() as c:
-            row = c.execute('SELECT seq,event_id,kind,payload,created_at,failed_at,last_error FROM outbox '
-                            'WHERE sent_at IS NULL ORDER BY seq LIMIT 1').fetchone()
+            sql = 'SELECT seq,event_id,kind,payload,created_at,failed_at,last_error FROM outbox WHERE sent_at IS NULL'
+            args = ()
+            if stuck is not None:
+                sql += " AND kind='hide' AND seq>?"
+                args = (stuck,)
+            row = c.execute(sql + ' ORDER BY seq LIMIT 1', args).fetchone()
         if row is None:
             break
-        if row['failed_at']:   # 已判永久失败：停在这里，不跳过
-            status, error, blocked_seq = 'blocked', row['last_error'] or '已被拒收', row['seq']
+        if row['failed_at']:   # 已判永久失败：停在这里，不跳过（快照例外：其后的 hide 照发）
+            if stuck is None:
+                status, error, blocked_seq = 'blocked', row['last_error'] or '已被拒收', row['seq']
+                if row['kind'] == 'snapshot':
+                    stuck = row['seq']
+                    continue
             break
         if deadline - monotonic() <= 1:
-            status = 'timeout'
+            if stuck is None:
+                status = 'timeout'
             break
         permanent = False
+        ack = None
         try:
             envelope = _envelope(row['event_id'], row['kind'], json.loads(row['payload']), row['created_at'])
             check_envelope(envelope)
         except ContractError as e:
-            error, permanent = str(e), True
+            error_now, permanent = str(e), True
         except (ValueError, RecursionError) as e:
-            error, permanent = f'库内载荷损坏（{type(e).__name__}）', True
+            error_now, permanent = f'库内载荷损坏（{type(e).__name__}）', True
         else:
-            error, permanent = _post_with_deadline(session, url, token, envelope, deadline, monotonic)
+            error_now, permanent, ack = _post_with_deadline(session, url, token, envelope, deadline, monotonic,
+                                                            image_dir(store))
         with store.connect() as c:
-            if error:
+            if error_now:
                 c.execute('UPDATE outbox SET attempts=attempts+1,last_error=?,failed_at=? WHERE seq=?',
-                          (error, utc_now() if permanent else None, row['seq']))
+                          (error_now, utc_now() if permanent else None, row['seq']))
             else:
                 c.execute('UPDATE outbox SET attempts=attempts+1,last_error=NULL,sent_at=? WHERE seq=?',
                           (utc_now(), row['seq']))
-        if error:
-            status = 'blocked' if permanent else 'error'
+                if row['kind'] == 'snapshot':
+                    # 服务器确认后才把这份快照记为已送达（curio/publish）。
+                    publish.on_snapshot_ack(c, envelope['payload'], ack)
+        if error_now:
+            error = error_now
             if permanent:
-                blocked_seq = row['seq']
-                _notify(_block_message(row['seq'], row['kind'], error))
+                blocked_seq = blocked_seq if stuck is not None else row['seq']
+                _notify(_block_message(row['seq'], row['kind'], error_now))
+            if stuck is None:
+                status = 'blocked' if permanent else 'error'
+                if row['kind'] == 'snapshot':
+                    stuck = row['seq']
+                    continue
+            elif permanent:
+                status = 'blocked'
             break
         sent += 1
     streak = _record_round(store, status)

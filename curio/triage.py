@@ -4,6 +4,7 @@
 - 系统（规则归口）只在未经人工决定的货上写状态：入库放入 new / auto_removed，重判时在两者间移动。
 - 人工动作：留下、去掉、捞回、移出商品池、放回商品池、撤销上一步。人工事件一经存在，系统不再改状态。
 - 每次状态变化追加一条 triage_events；货号在首次进入 kept 时分配，永不释放、永不复用。
+- 已发布的货因人工动作离开 / 回到商品池时，同一事务入发件箱隐藏 / 取消隐藏（AD-5，见 publish.reconcile）。
 
 本模块的函数都接收一个 sqlite3 连接，在调用方的事务里工作；若连接尚未开启事务，
 写操作会先执行 BEGIN IMMEDIATE。调用方自己开事务时须用 BEGIN IMMEDIATE（或已在事务里写过，
@@ -96,6 +97,12 @@ def _baseline_if_new(c, iid):
         refresh_baseline(c, iid)
     except sqlite3.OperationalError:
         pass  # scores / std_names 表尚未建立（只建了拣选表的连接）
+
+
+def _reconcile(c, iid):
+    """AD-5：已发布的货离开 / 回到在售时，同一事务入发件箱隐藏 / 取消隐藏（curio/publish）。"""
+    from .publish import reconcile  # 延迟导入：publish 依赖本模块
+    reconcile(c, iid)
 
 
 def _snapshot(c, item):
@@ -200,6 +207,7 @@ def transition(c, iid, action, reason=None, at=None, actor='human', source=None,
     if target == 'new':
         _baseline_if_new(c, iid)
     eid = _event(c, iid, cur, target, action, actor, item, reason, at=ts, source=source, grp=grp)
+    _reconcile(c, iid)
     return dict(state=target, code=assigned, event=eid)
 
 
@@ -264,6 +272,8 @@ def undo_event(c, ev):
             _baseline_if_new(c, e['item_id'])
         uid = _event(c, e['item_id'], cur, e['old_state'], 'undo', 'human', item, at=ts, undoes=e['id'])
         c.execute('UPDATE triage_events SET undone_by=? WHERE id=?', (uid, e['id']))
+    for iid in dict.fromkeys(e['item_id'] for e in group):
+        _reconcile(c, iid)
     last = group[-1]
     return dict(item_id=last['item_id'], state=last['old_state'], code=code(c, last['item_id']), undid=ev['action'])
 
@@ -424,6 +434,7 @@ def migrate(c, at=None):
             _assign_code(c, iid, when)
         c.execute('UPDATE triage SET state=?,updated_at=?,backlog=0 WHERE item_id=?', (target, when or now(), iid))
         _event(c, iid, cur, target, 'migrate', 'human', snap, reason, at=when or now(), source=source)
+        _reconcile(c, iid)
         last_human[iid] = _ts(when)
     # 其余货：补齐系统落位；未经人工、迁移前 7 天以上的新货进 backlog。
     for item in c.execute('SELECT i.* FROM items i LEFT JOIN triage t ON t.item_id=i.item_id WHERE t.item_id IS NULL').fetchall():

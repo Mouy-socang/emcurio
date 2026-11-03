@@ -17,15 +17,17 @@ contract/
 | 管理接口事件信封（`POST /admin/events`，按 `event_id` 去重） | Mac → 服务器 | `envelope.v1.schema.json` |
 | 通道测试 `ping`（信封 `kind: ping` 的 `payload`） | Mac → 服务器 | `ping.v1.schema.json` |
 | 指令：设置通用邀请码 `set_invite_code`（AD-2、AD-24；`command_id` + 按目标 `invite` 单调的 `target_seq`） | Mac → 服务器 | `set_invite_code.v1.schema.json` |
+| 发布快照 `snapshot`（AD-5、AD-6、AD-22；字段即 AD-6 白名单） | Mac → 服务器 | `snapshot.v1.schema.json` |
+| 隐藏推送 `hide`（含 `action: unhide`；`hide_seq` 与快照 `publish_no` 同一计数器） | Mac → 服务器 | `hide.v1.schema.json` |
+| 图片查询（`POST /admin/images/check` 的请求 / 响应，AD-13） | Mac ⇄ 服务器 | `image_check.v1.schema.json` / `image_check_result.v1.schema.json` |
+| 图片上传确认（`PUT /admin/images/<name>` 的响应，AD-13） | 服务器 → Mac | `image_ack.v1.schema.json` |
 
-信封的 `payload` 按 `<kind>.v<payload.schema_version>.schema.json` 另行校验；新增载荷类别时同时把它加进信封的 `kind` 枚举。Mac 端用标准库最小校验器（`curio/sync`，只支持 `type`、`required`、`properties`、`additionalProperties`、`const`、`enum`、`pattern`、`minLength`、`maxLength`），Schema 里出现其它关键字会直接报错；服务器端用 `jsonschema`。
+信封的 `payload` 按 `<kind>.v<payload.schema_version>.schema.json` 另行校验；新增载荷类别时同时把它加进信封的 `kind` 枚举。Mac 端用标准库最小校验器（`curio/sync`，只支持 `type`、`required`、`properties`、`additionalProperties`、`const`、`enum`、`pattern`、`minLength`、`maxLength`、`items`、`minItems`、`maxItems`），Schema 里出现其它关键字会直接报错；服务器端用 `jsonschema`。
 
 需要定义的载荷（由后续故事逐个加入 `schemas/`）：
 
 | 载荷 | 方向 | 建议文件名 |
 | --- | --- | --- |
-| 发布快照 | Mac → 服务器 | `snapshot.v1.schema.json` |
-| 隐藏推送 | Mac → 服务器 | `hide.v1.schema.json` |
 | 指令 | Mac → 服务器 | `command.v1.schema.json` |
 | 收件箱事件 | 服务器 → Mac（Mac 拉取） | `inbox-event.v1.schema.json` |
 | 账号副本 | 服务器 → Mac（Mac 拉取） | `account-copy.v1.schema.json` |

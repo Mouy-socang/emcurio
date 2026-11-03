@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "image_check.v1.schema.json",
+  "title": "图片查询 v1（Mac → 服务器，POST /admin/images/check）",
+  "description": "Mac 提交快照前问服务器哪些图片还没有；服务器以 image_check_result 回答。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "names"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "names": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "type": "string",
+        "description": "图片文件名：转码后 JPEG 内容 sha256 的前 16 位 + .jpg（AD-13，上传后不可变）。",
+        "pattern": "^[0-9a-f]{16}\\.jpg$"
+      }
+    }
+  }
+}

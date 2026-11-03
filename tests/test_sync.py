@@ -734,7 +734,7 @@ def test_invite_end_to_end_with_local_server(tmp_path, store):
         assert sync.flush(store, tmp_path)['sync_status'] == 'ok'
         r, s = register('oldcode1', 'first')
         assert r.status_code == 303 and r.headers['location'] == '/item/CO-0001'
-        assert '今日榜' in s.get(url + '/item/CO-0001').text
+        assert '此件已不在展出' in s.get(url + '/item/CO-0001').text      # 已登录；尚未发布（故事 10）
         assert outbox.main(db + ['invite', 'NEWCODE2'], out=lambda *_: None) == 0
         assert sync.flush(store, tmp_path)['sync_status'] == 'ok'
         r, _ = register('OLDCODE1', 'second')

@@ -11,6 +11,7 @@ from .rules import evaluate, standard_name, kb_fingerprint, kb_status, baseline_
 from .config import ROOT
 from . import triage
 from . import sync
+from . import publish
 from screening.pipeline import process
 
 
@@ -175,6 +176,8 @@ class Store:
             triage.ensure(c)
             # AD-23：Mac → 服务器的持久发件箱。
             sync.ensure(c)
+            # AD-5、AD-22：榜、发布记录、图片转码缓存、已发布货的隐藏状态。
+            publish.ensure(c)
     @contextmanager
     def connect(self):
         c=sqlite3.connect(self.path,timeout=30);c.row_factory=sqlite3.Row
@@ -230,6 +233,8 @@ class Store:
             if named:write_std_name(c,p['item_id'],named,ts)
             # CAP-4：新货随判断写规则基线分（变化后旧分过期即被替换，AI 分下轮重算）。
             refresh_baseline(c,p['item_id'])
+            # AD-5：已发布且曾因下架隐藏的货重新在售时，同一事务入发件箱取消隐藏。
+            publish.reconcile(c,p['item_id'])
         return 'new' if old is None else 'changed' if changed else 'unchanged'
     def similar_prices(self,std_key):
         """同类历史价：标准名称分组键相同（且已生成名称）的全部货的 price_history，按时间排序。"""
@@ -246,7 +251,11 @@ class Store:
             out['prices']=similar_prices(c,row['std_key']) if row['status']=='named' else []
             return out
     def mark_gone(self,iid):
-        with self.connect() as c:c.execute("UPDATE items SET status='gone',gone_at=?,checked_at=? WHERE item_id=? AND status='active'",(now(),now(),iid))
+        # AD-5：已发布的货判下架时，与状态变更同一事务入发件箱隐藏。
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if c.execute("UPDATE items SET status='gone',gone_at=?,checked_at=? WHERE item_id=? AND status='active'",(now(),now(),iid)).rowcount:
+                publish.reconcile(c,iid)
     def archive(self):
         # Missing/withdrawn is never asserted to be sold. Archive in SQLite only.
         with self.connect() as c:c.execute("UPDATE items SET status='archived' WHERE status='gone' AND julianday(gone_at)<julianday('now','-3 days')")

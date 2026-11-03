@@ -7,7 +7,8 @@
   uv run python scripts/outbox.py invite <新码> --seq N  恢复用：Mac 库从备份恢复后，服务器回"已有更新的邀请码命令"时，
                                                      用比服务器上更大的序号重发（序号只会往上抬）
   uv run python scripts/outbox.py requeue <seq>       清除该条的拒收标记，下次 flush 重发（修好服务器或契约后用）
-  uv run python scripts/outbox.py drop <seq> --yes    删除一条未送达的记录（之后的记录才能继续发；不可撤销）
+  uv run python scripts/outbox.py drop <seq> --yes    删除一条未送达的记录（之后的记录才能继续发；不可撤销）；
+                                                     丢掉快照时同时撤掉它的待送达记录，之后重新 publish
 
 被拒收的记录（failed_at 有值）会让同步停在它这里（sync_status: blocked），不会跳过。
 """
@@ -16,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from curio.config import ROOT
 from curio.store import Store
-from curio import sync
+from curio import publish, sync
 
 
 def _invite_summary(payload):
@@ -79,7 +80,14 @@ def cmd_drop(store, seq, yes, out):
         out('删除不可撤销：确认后加 --yes 再运行')
         return 2
     with store.connect() as c:
+        row = c.execute('SELECT kind,payload FROM outbox WHERE seq=? AND sent_at IS NULL', (seq,)).fetchone()
         n = c.execute('DELETE FROM outbox WHERE seq=? AND sent_at IS NULL', (seq,)).rowcount
+        if n and row['kind'] == 'snapshot':
+            # 丢掉的快照不会上线：撤掉它的待送达记录（curio/publish）。
+            try:
+                publish.discard_pending(c, json.loads(row['payload'])['publish_no'])
+            except (ValueError, KeyError, TypeError):
+                pass
     if not n:
         out(f'#{seq} 不存在或已送达')
         return 1
