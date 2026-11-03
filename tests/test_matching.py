@@ -86,7 +86,21 @@ def gc(tmp_path):
 @pytest.fixture
 def root(tmp_path):
     (tmp_path / '.env').write_text(f'CURIO_SERVER_URL={SITE}\nCURIO_ADMIN_TOKEN=test-token\n')
-    return tmp_path
+    return loose(tmp_path)
+
+
+def loose(root):
+    """这些用例测的是匹配机制本身（品牌、否定、分级、排序），沿用"只对上品牌也算"的宽松口径；
+    收紧（detail_required）另有用例按仓库里的 matching.yaml 测。"""
+    text = (ROOT / 'config' / 'matching.yaml').read_text().replace(
+        'detail_required: [need, explicit, inferred]', 'detail_required: []')
+    (Path(root) / 'config').mkdir(parents=True, exist_ok=True)
+    (Path(root) / 'config' / 'matching.yaml').write_text(text)
+    return root
+
+
+def loose_vocab():
+    return dict(match_rules_for(ROOT), detail_required=frozenset())
 
 
 @pytest.fixture
@@ -306,7 +320,7 @@ def test_gc_files_never_written(store, gc, root, scene):
 
 @pytest.fixture
 def vocab():
-    return match_rules_for(ROOT)
+    return loose_vocab()
 
 
 def facts(vocab, brand, title, function=None, pattern=None, pattern_id=None):
@@ -587,3 +601,48 @@ def test_api_match_bad_config_is_400(http, root):
     assert status == 400 and r['error'].startswith('匹配词表有误：')
     (root / 'config' / 'matching.yaml').unlink()
     assert http['get']('/api/match')[0] == 200
+
+
+# ---------- 收紧：品牌只是门槛（墨墨 2026-11-04） ----------
+
+def test_brand_alone_never_matches_with_repo_rules():
+    strict = match_rules_for(ROOT)
+    assert strict['detail_required'] == {'need', 'explicit', 'inferred'}
+    cup = facts(strict, 'Meissen', 'Meissen Tasse', function='杯')
+    # 只说了品牌：需求、明说喜欢、推算口味都不算
+    assert rules.match_customer(cup, [{'status': 'open', 'maker': ['梅森'], 'additional_description': '梅森的东西都可以'}],
+                                [], strict) is None
+    assert rules.match_customer(cup, [], [pref('maker', '梅森')], strict) is None
+    assert rules.match_customer(cup, [], [pref('maker', 'Meissen', source='purchase')], strict) is None
+    # 品牌 + 器型对上
+    m = rules.match_customer(cup, [], [pref('maker', 'Meissen', source='purchase'), pref('form', '杯碟', source='purchase')], strict)
+    assert m['grade'] == 'inferred'
+    assert rules.match_customer(cup, [], [pref('maker', '梅森'), pref('form', '杯')], strict)['grade'] == 'explicit'
+    assert rules.match_customer(cup, [{'status': 'open', 'maker': ['梅森'], 'additional_description': '梅森咖啡杯'}],
+                                [], strict)['grade'] == 'need'
+    # 器型对上但品牌没对上：仍不算
+    assert rules.match_customer(cup, [], [pref('maker', 'KPM'), pref('form', '杯')], strict) is None
+
+
+def test_pattern_satisfies_detail_and_scoped_pattern_names_brand():
+    strict = match_rules_for(ROOT)
+    plate = facts(strict, 'Meissen', 'Meissen Zwiebelmuster Teller', function='盘', pattern='蓝洋葱', pattern_id='MP-001')
+    assert rules.match_customer(plate, [], [pref('maker', '梅森'), pref('pattern', '蓝洋葱', source='purchase')],
+                                strict)['grade'] == 'explicit'
+    need = {'status': 'open', 'maker': ['Meissen'], 'pattern_names_raw': ['蓝洋葱']}
+    assert rules.match_customer(plate, [need], [], strict)['grade'] == 'need'
+
+
+def test_ashtray_is_not_a_cup():
+    strict = match_rules_for(ROOT)
+    tray = facts(strict, 'Meissen', 'Meissen Aschenbecher rote Rose')
+    assert 'cup' not in tray['forms'] and 'ashtray' in tray['forms']
+
+
+def test_detail_required_validated(tmp_path):
+    (tmp_path / 'config').mkdir()
+    good = (ROOT / 'config' / 'matching.yaml').read_text()
+    (tmp_path / 'config' / 'matching.yaml').write_text(good.replace('detail_required: [need, explicit, inferred]',
+                                                                   'detail_required: [brand]'))
+    with pytest.raises(ValueError, match='detail_required'):
+        match_rules(tmp_path)

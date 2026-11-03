@@ -747,6 +747,8 @@ def fee_tier(title, description='', std=None, fees=None):
 #             form/object_type → 器型；比较喜好的 value，value 为空才用 value_raw）；对上的喜好里须有一条提到
 #             这件货的品牌、或对上只属于该品牌的图案词组（只对上器型或通用图案不算）；
 #             明说（explicit）的品牌或只属于该品牌的图案对上即"明说喜欢"，否则"推算口味"（只对上器型的明说不升级）；
+#             detail_required 里的分级还须有一条图案或器型喜好也对上（只对上品牌太宽：一件梅森会推给大半客户）；
+#             明说想要在 detail_required 里时，需求也须对上图案或器型（品牌只是门槛，不单独构成匹配）；
 #   任一 status=active、polarity=dislike 的喜好对上同一维度 → 这位客人不匹配这件货（需求也不算）。
 # 结果只给后台 04 看，不进快照。
 
@@ -904,10 +906,14 @@ def _need_hit(need, facts, rules):
             return None
     elif not _brand_hit(words, facts['brand'], rules):
         return None
-    if pats and not any(_pattern_hit(_norm(p), facts, rules) for p in pats):
+    pat_ok = bool(pats) and any(_pattern_hit(_norm(p), facts, rules) for p in pats)
+    if pats and not pat_ok:
         return None
     want = _form_groups(words, rules)
     if want and facts['forms'] and not (want & facts['forms']):
+        return None
+    # 只说了品牌（"想要梅森的东西"）不够：须再对上图案或器型（detail_required 含 need 时）。
+    if 'need' in rules['detail_required'] and not (pat_ok or (want & facts['forms'])):
         return None
     return _cut(desc[0] if desc else '、'.join(pats + makers) or '、'.join(filters) or '需求')
 
@@ -962,7 +968,7 @@ def match_customer(facts, needs, prefs, rules):
         g = grades['need']
         return dict(grade='need', label=g['label'], weight=g['weight'],
                     reasons=[g['label'] + '：' + r for r in dict.fromkeys(wanted)][:3])
-    hits, brand_seen, explicit_brand = [], False, False
+    hits, brand_seen, explicit_brand, detail = [], False, False, False
     for p in prefs:
         dim = _pref_dim(p, rules)
         if not dim or p.get('polarity') != 'like':
@@ -980,6 +986,7 @@ def match_customer(facts, needs, prefs, rules):
         if not ok:
             continue
         hits.append(p)
+        detail = detail or dim in ('pattern', 'form')
         # 品牌须由喜好说出；"明说喜欢"只看明说的品牌 / 只属于这个品牌的图案，只对上器型的明说不算。
         brand_seen = brand_seen or names_brand
         if names_brand and dim in ('brand', 'pattern') and _source(p) == 'explicit':
@@ -987,6 +994,8 @@ def match_customer(facts, needs, prefs, rules):
     if not hits or not brand_seen:
         return None
     grade = 'explicit' if explicit_brand else 'inferred'
+    if grade in rules['detail_required'] and not detail:
+        return None
     g = grades[grade]
     shown = []
     for p in hits:

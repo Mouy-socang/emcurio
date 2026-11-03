@@ -72,7 +72,21 @@ def gc(tmp_path):
 
 @pytest.fixture
 def root(tmp_path):
-    return tmp_path
+    return loose(tmp_path)
+
+
+def loose(root):
+    """这些用例测的是匹配机制本身（品牌、否定、分级、排序），沿用"只对上品牌也算"的宽松口径；
+    收紧（detail_required）另有用例按仓库里的 matching.yaml 测。"""
+    text = (ROOT / 'config' / 'matching.yaml').read_text().replace(
+        'detail_required: [need, explicit, inferred]', 'detail_required: []')
+    (Path(root) / 'config').mkdir(parents=True, exist_ok=True)
+    (Path(root) / 'config' / 'matching.yaml').write_text(text)
+    return root
+
+
+def loose_vocab():
+    return dict(match_rules_for(ROOT), detail_required=frozenset())
 
 
 @pytest.fixture
@@ -301,7 +315,7 @@ def test_browse_signal_decays_and_caps():
 
 
 def test_personal_order_stable_and_set_preserving():
-    vocab, params = match_rules_for(ROOT), personalize_rules_for(ROOT)
+    vocab, params = loose_vocab(), personalize_rules_for(ROOT)
     pool = [(f'CO-{n:04d}', judge.match_facts({'brand': 'Meissen', 'segments': '{}'}, 'Meissen', vocab))
             for n in range(1, 8)]
     order, matched = rules.personal_order(pool, [], [], [], set(), vocab, params)
@@ -312,7 +326,7 @@ def test_personal_order_stable_and_set_preserving():
 
 
 def test_match_customer_unchanged_by_refactor():
-    vocab = match_rules_for(ROOT)
+    vocab = loose_vocab()
     f = judge.match_facts({'brand': 'Meissen', 'pattern_id': 'MP-001', 'segments': json.dumps({'pattern': '蓝洋葱'})},
                           'Meissen Zwiebelmuster Teller', vocab)
     assert judge.match_customer(f, [], [pref('maker', '梅森')], vocab)['grade'] == 'explicit'
@@ -610,7 +624,7 @@ def test_bad_personalize_config_publishes_without_orders(store, gc, root, cfg, c
     ranked_pool(store, cfg)
     customer(gc, 'GC000511', '丑', prefs=[pref('maker', '梅森')])
     account(store, customer_id='GC000511')
-    (root / 'config').mkdir()
+    (root / 'config').mkdir(exist_ok=True)
     (root / 'config' / 'personalize.yaml').write_text('browse: 3')
     (root / 'config' / 'matching.yaml').write_text('grades: nope')
     r = publish.publish(store, root, fetch=Fetch(), gc=gc)
@@ -645,7 +659,7 @@ def test_legacy_publishes_table_migrates(tmp_path, gc, cfg):
     ranked_pool(store, cfg)
     customer(gc, 'GC000513', '卯', prefs=[pref('maker', '梅森')])
     account(store, customer_id='GC000513')
-    r = publish.publish(store, tmp_path, fetch=Fetch(), gc=gc)
+    r = publish.publish(store, loose(tmp_path), fetch=Fetch(), gc=gc)
     assert r['orders'] == 1
     with store.connect() as c:
         assert ranking.publish_status(c)['orders'] == 1

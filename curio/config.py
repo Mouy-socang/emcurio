@@ -191,7 +191,7 @@ def _words(value,where):
 
 def match_rules(root=ROOT):
     """读取并校验 config/matching.yaml（故事 16，按文件修改时间缓存）。返回已规范化（小写、去变音）的词表：
-    grades{need,explicit,inferred: {label, weight}}、sources、dim_of{GC 维度: brand/pattern/form}、
+    grades{need,explicit,inferred: {label, weight}}、detail_required（须再对上图案或器型的分级）、sources、dim_of{GC 维度: brand/pattern/form}、
     brands{规范化品牌: [别名…]}、negations、negations_before、patterns[{ids, terms, brands}]、forms{组名: [词…]}。格式不对时报错（中文）。"""
     path=Path(root)/'config/matching.yaml'
     st=path.stat()
@@ -228,6 +228,9 @@ def match_rules(root=ROOT):
         if not isinstance(b,str) or not b.strip():raise ValueError('matching.brands 的品牌名不能为空')
         if _norm(b) in out['brands']:raise ValueError('matching.brands：'+b+' 与另一个品牌名规范化后相同')
         out['brands'][_norm(b)]=[_norm(a) for a in _words(v or [],'matching.brands.'+b)]
+    dr=raw.get('detail_required',[])
+    if not isinstance(dr,list) or any(x not in MATCH_GRADES for x in dr):raise ValueError('matching.detail_required 只能列 need、explicit、inferred')
+    out['detail_required']=frozenset(dr)
     out['negations']=[_norm(x) for x in _words(raw.get('negations') or [],'matching.negations')]
     out['negations_before']=[_norm(x) for x in _words(raw.get('negations_before') or [],'matching.negations_before')]
     out['exclusions_before']=[_norm(x) for x in _words(raw.get('exclusions_before') or [],'matching.exclusions_before')]

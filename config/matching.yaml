@@ -12,6 +12,11 @@ grades:
   explicit: {label: 明说喜欢, weight: 2}
   inferred: {label: 推算口味, weight: 1}
 
+# 品牌只是门槛，不单独构成匹配（墨墨 2026-11-04："品牌不能作为匹配对象，因为太多了"；
+# 原来一件梅森杯会推给约 87 位客户）。列在这里的分级，品牌对上之外还须图案或器型也对上：
+# 明说想要 = 需求写的图案或器型对上；明说喜欢 / 推算口味 = 有一条图案或器型的喜好对上。想放宽就从列表里去掉。
+detail_required: [need, explicit, inferred]
+
 # 推算口味理由里附注的来源（未列出的来源照原文写）。
 sources:
   purchase: 购买
@@ -85,3 +90,4 @@ forms:
   spoon: [勺, Löffel, spoon]
   plaque: [瓷板, Porzellanbild, Bildplatte, plaque]
   creamer: [奶罐, 奶盅, Milchkännchen, Sahnegießer, creamer]
+  ashtray: [烟灰缸, Aschenbecher, ashtray]
