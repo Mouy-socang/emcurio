@@ -621,8 +621,10 @@ def test_pages_follow_design_rules(client):
     css = client.get('/static/guest.css').text
     assert 'box-shadow' not in css and 'border-radius:0' in css and '--tap:44px' in css
     small = [rule for rule in re.findall(r'([^{}]+)\{[^}]*font-size:(?:[0-9]|1[0-3])px', css)]
-    # 小于 14px 的只有装饰性 eyebrow 与辅助信息（12px caption：更新时间、卡片货号、名次、品牌编号、图片占位字）。
-    assert {r.strip() for r in small} <= {'.eb', '.upd', '.code', '.tc .idx', '.rk-n', '.ph-none', '.ph.broken::after'}
+    # 小于 14px 的只有装饰性 eyebrow 与辅助信息（12px caption：更新时间、卡片货号、名次、品牌编号、图片占位字、
+    # 单件页编号小节的编号与状态牌——DESIGN.md numbered-section index = eyebrow、status-plate = caption）。
+    assert {r.strip() for r in small} <= {'.eb', '.upd', '.code', '.tc .idx', '.rk-n', '.ph-none', '.ph.broken::after',
+                                          '.ns h2 .ix', '.plate'}
     html = client.get('/').text
     assert '<html lang="zh-CN">' in html
     assert 'content="width=device-width, initial-scale=1"' in html and 'user-scalable' not in html

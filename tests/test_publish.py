@@ -177,7 +177,7 @@ def test_first_publish_snapshot_is_whitelisted(db, cfg, root, fetch):
     assert snap['pool'] == list(reversed(codes))            # 留下时间新到旧（同一秒按货号新到旧）
     assert ka_code not in snap['pool'] and removed_code not in snap['pool'] and snap['tombstones'] == []
     allowed = {'code', 'std_name', 'title', 'title_lang', 'brand', 'form_id', 'form', 'pattern_id', 'pattern',
-               'price_band', 'price_eur', 'fee_tier', 'fee_eur', 'images', 'seller_text', 'seller_lang', 'comment'}
+               'price_band', 'price_eur', 'fee_tier', 'fee_amount', 'fee_label', 'images', 'seller_text', 'seller_lang', 'comment'}
     for it in snap['items']:
         assert set(it) <= allowed
     text = json.dumps(snap, ensure_ascii=False)
@@ -363,7 +363,7 @@ def test_validator_supports_arrays():
     assert sync.validate(['a', 'ab'], schema) == []
     assert sync.validate(['a'], schema) and sync.validate(['a'] * 4, schema) and sync.validate(['a', 'b'], schema)
     with pytest.raises(sync.ContractError):
-        sync.validate([], {'items': {'minimum': 1}})
+        sync.validate([], {'items': {'exclusiveMinimum': 1}})
 
 
 def test_oversized_payload_refused(db):

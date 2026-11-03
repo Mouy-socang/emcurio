@@ -159,6 +159,7 @@ LABEL = {"want": "要", "probe": "询市", "skip": "不要"}
 # 生成结果全部是据卖家描述的候选，不是正式商品标题。
 import csv
 import hashlib
+import json
 import logging
 import os
 import unicodedata
@@ -581,3 +582,157 @@ def standard_name(title, description='', config=None):
         overpaint=painted,
         status='named' if named else 'insufficient',
         kb_status=kb_status, kb_fingerprint=fp)
+
+
+# ================================================================ 预估费用档位（CAP-10，FR-21a/21b，AD-15）
+# 档位金额与词表是数据（config/fee_tiers.yaml，经 curio/config.fee_tiers 读取校验）；推断只在这里。
+# 规则（fee-tiers.md）：从卖家标题/描述读尺寸（cm、mm、英寸；H、Höhe、Ø、Durchmesser 等），取读到的最大值；
+#   杯碟类：没写尺寸或不超过 A 档上限 → A；否则按尺寸：≤B → B、≤C → C、≤D → D、超过 → 请咨询；
+#   人物瓷偶等难包装的上跳一档（D 上跳为请咨询）；特别易碎或读不出尺寸 → 请咨询。
+# 结果带理由（如「高 28 cm → B」），只给后台看，不进快照。
+
+_NUM = r'\d{1,4}(?:[.,]\d{1,2})?'
+_UNIT = r'(cm|mm|zentimeter|centimeters?|inch(?:es)?|["″])'
+# 一组数值 + 单位：「28 cm」「28,5cm」「30 x 20 x 12 cm」「280 mm」「11"」。左边不能紧贴数字或小数点。
+_DIMS = re.compile(r'(?<![\d.,])(' + _NUM + r'(?:\s*(?:x|×|\*)\s*' + _NUM + r')*)\s*' + _UNIT + r'(?![a-z])')
+# 带高度/直径标签、没写单位的数值（按厘米）：「Höhe: 28」「Durchmesser 24」「Ø 24」。
+_LABELLED = re.compile(r'(?:hohe|height|durchmesser|diameter|ø|⌀)\s*[:=]?\s*(?:ca\.?|circa|approx\.?|etwa)?\s*'
+                       r'(' + _NUM + r')(?![\d.,]|\s*' + _UNIT + r'|\s*(?:m|l|ml|cl|g|kg)\b)')
+_HEIGHT_LABEL = re.compile(r'(?:\bh\b\.?|\bhohe\b|\bhoch\b|\bheight\b|\bhigh\b|\btall\b|\bgesamthohe\b)[^\d]{0,12}$')
+_DIAM_LABEL = re.compile(r'(?:ø|⌀|\bdurchmesser\b|\bdm\b\.?|\bd\b\.?|\bdiameter\b|\bdiam\b\.?)[^\d]{0,12}$')
+_HEIGHT_AFTER = re.compile(r'^\s*(?:hoch|high|tall)\b')
+_PACKAGE = re.compile(r'(?:karton|paket|verpackung|versand|shipping|package)\w*[^.;,\n]{0,40}$')
+_MIN_CM, _MAX_CM = 0.5, 500.0
+_ORDER = ('A', 'B', 'C', 'D', 'ask')
+_TIER_NAME = {'ask': '请咨询'}
+
+
+def _num(text):
+    return float(text.replace(',', '.'))
+
+
+def _cm(value, unit):
+    unit = unit.lower()
+    if unit == 'mm':
+        return value / 10
+    if unit.startswith('inch') or unit in ('"', '″'):
+        return value * 2.54
+    return value
+
+
+def read_size(*texts):
+    """从文字里读出最大的尺寸（厘米）及其种类（高 / 直径 / 尺寸）。读不出返回 None。"""
+    best = None
+    for text in texts:
+        t = _norm(str(text or '').replace('″', '"').replace('×', 'x'))
+        found = []
+        for m in _DIMS.finditer(t):
+            before = t[max(0, m.start() - 60):m.start()]
+            if _PACKAGE.search(before):
+                continue                    # 包装 / 运输尺寸不算
+            values = [_cm(_num(v), m.group(2)) for v in re.split(r'\s*[x*]\s*', m.group(1))]
+            labelled_h = _HEIGHT_LABEL.search(before) or _HEIGHT_AFTER.match(t[m.end():])
+            labelled_d = _DIAM_LABEL.search(before)
+            if m.group(2) == '"':
+                # 英寸符号只认紧贴数字、且在尺寸语境里（H / Höhe / Ø 标签或 a x b 多维）：「Nr. 30"」是型号不是尺寸。
+                if m.group(0)[-2].isspace() or (len(values) == 1 and not (labelled_h or labelled_d)):
+                    continue
+            kind = '尺寸' if len(values) > 1 else ('高' if labelled_h else '直径' if labelled_d else '尺寸')
+            found += [(v, kind) for v in values]
+        for m in _LABELLED.finditer(t):
+            if _PACKAGE.search(t[max(0, m.start() - 60):m.start()]):
+                continue
+            kind = '直径' if re.match(r'(?:durchmesser|diameter|ø|⌀)', m.group(0)) else '高'
+            found.append((_num(m.group(1)), kind))
+        for v, kind in found:
+            if _MIN_CM <= v <= _MAX_CM and (best is None or v > best[0]):
+                best = (v, kind)
+    return best
+
+
+def _cm_text(v):
+    return ('%d' % v) if float(v).is_integer() else ('%.1f' % v).rstrip('0').rstrip('.')
+
+
+def _std_get(std, key):
+    if std is None:
+        return None
+    try:
+        return std[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _std_words(std):
+    """标准名称里可用于器型判断的中文与 ID：功能 ID、器型/功能中文名、标准名称本身。"""
+    names = [_std_get(std, 'std_name') or '']
+    seg = _std_get(std, 'segments')
+    if isinstance(seg, str):
+        try:
+            seg = json.loads(seg)
+        except ValueError:
+            seg = None
+    if isinstance(seg, dict):
+        names += [seg.get('form') or '', seg.get('function') or '']
+    for k in ('form', 'function'):
+        v = _std_get(std, k)
+        if isinstance(v, str):
+            names.append(v)
+    return _std_get(std, 'function_id'), ' '.join(names)
+
+
+def _category(fees, function_id, t_title, zh):
+    """(人物瓷偶类, 杯碟类)。依据先后：标准名称的功能 ID → 标题里的词 → 标准名称的中文。
+    两类的词都出现时，取先出现的那个为货本身的器型（「Tasse mit Watteau-Figuren」是杯，后面是装饰）。"""
+    cups, figs = fees['cups'], fees['hard_to_pack']
+    if function_id and function_id in cups['function_ids']:
+        return False, True
+    if function_id and function_id in figs['function_ids']:
+        return True, False
+    for text, key in ((t_title, 'rx'), (zh, 'zh')):
+        c = cups[key].search(text) if cups[key] else None
+        f = figs[key].search(text) if figs[key] else None
+        if c or f:
+            fig = bool(f) and (not c or f.start() < c.start())
+            return fig, not fig
+    return False, False
+
+
+def fee_tier(title, description='', std=None, fees=None):
+    """推断预估费用档位。fees：config.fee_tiers() 的结果。std：std_names 行或 standard_name 结果（可空）。
+    返回 dict(tier='A'|'B'|'C'|'D'|'ask', amount=欧元整数或 None, label, reason, size_cm)。"""
+    if fees is None:
+        from .config import fee_tiers
+        fees = fee_tiers()
+    tiers = fees['tiers']
+    t_title, t_all = _norm(title), _norm(f'{title or ""}\n{description or ""}')
+    function_id, zh = _std_words(std)
+
+    def out(tier, reason, size=None):
+        info = tiers.get(tier)
+        return {'tier': tier, 'amount': info['amount'] if info else None,
+                'label': info['label'] if info else _TIER_NAME['ask'], 'reason': reason,
+                'size_cm': size}
+
+    frag = fees['fragile']['rx'].search(t_all) if fees['fragile']['rx'] else None
+    if frag:
+        return out('ask', f'特别易碎（{frag.group(0)}）→ 请咨询')
+
+    figure, cup = _category(fees, function_id, t_title, zh)
+    size = read_size(title, description)
+    if size is None:
+        if cup:
+            return out('A', '杯碟类，未写尺寸 → A')
+        return out('ask', ('人物瓷偶，' if figure else '') + '读不出尺寸 → 请咨询')
+    cm, kind = size
+    said = f'{kind} {_cm_text(cm)} cm'
+    if cup and cm <= tiers['A']['max_cm']:
+        return out('A', f'杯碟类，{said} → A', cm)
+    tier = next((k for k in ('B', 'C', 'D') if cm <= tiers[k]['max_cm']), 'ask')
+    if tier == 'ask':
+        return out('ask', f'{said}，超过 {_cm_text(tiers["D"]["max_cm"])} cm → 请咨询', cm)
+    if figure:
+        up = _ORDER[_ORDER.index(tier) + 1]
+        name = _TIER_NAME.get(up, up)
+        return out(up, f'人物瓷偶，{said} → {tier}，难包装上跳一档 → {name}', cm)
+    return out(tier, f'{said} → {tier}', cm)

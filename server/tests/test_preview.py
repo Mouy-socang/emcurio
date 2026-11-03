@@ -96,3 +96,31 @@ def test_cli_reads_stdin_and_writes_json(published):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out['status'] == 200 and '今日榜' in out['body']
+
+
+def test_preview_with_fee_and_fx_matches_live_page_except_local_switch(client, db, monkeypatch):
+    """故事 12：带费用档位与汇率的候选快照——预览按欧元显示、费用文字照常、币种切换只在页内（无表单、不提交）。"""
+    from datetime import datetime, timedelta, timezone
+    now = Clock()()
+    monkeypatch.setattr(preview.time, 'time', lambda: now)
+    items = [make_item(n, [(put_image(client, f'fb{n}'), put_image(client, f'ft{n}'))]) for n in range(1, 13)]
+    for it in items:
+        it.update(fee_tier='B', fee_amount=42, fee_label='30cm 以下花瓶')
+    payload = build(9, items)
+    payload.update(fx_rate=7.8, fx_date=(datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=1)).isoformat())
+    assert send(client, 'snapshot', payload).status_code == 200
+    sign_in(client)
+    with sqlite3.connect(db) as c:
+        received = c.execute('SELECT received_at FROM snapshots WHERE publish_no=9').fetchone()[0]
+    switch = re.compile(r'<form class="cur".*?</form>|<div class="cur".*?</div>\s*</div>', re.S)
+    for path in ('/', '/item/CO-0001'):
+        body = preview.render(payload, path, '', received)['body']
+        live = client.get(path).text
+        local = switch.search(body).group(0)
+        assert 'data-local' in local and '<form' not in local and 'action=' not in local and 'type="button"' in local
+        assert 'value="EUR" role="radio" aria-label="欧元" aria-checked="true"' in local     # 欧元默认
+        assert '<form class="cur" method="post" action="/currency"' in live
+        flat = lambda h: re.sub(r'\s+', ' ', switch.sub('', h))           # 模板分支留下的空行不算差异
+        assert flat(unprefix(body)) == flat(live)
+    item = preview.render(payload, '/item/CO-0001', '', received)['body']
+    assert '约 €42' in item and '（B 档：30cm 以下花瓶）' in item and '¥' not in item.replace('>¥<', '')

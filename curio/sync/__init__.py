@@ -64,7 +64,8 @@ _TYPES = {
 # 只描述、不约束的关键字。
 _ANNOTATIONS = {'$schema', '$id', 'title', 'description'}
 _SUPPORTED = _ANNOTATIONS | {'type', 'required', 'properties', 'additionalProperties',
-                             'const', 'enum', 'pattern', 'minLength', 'maxLength', 'items', 'minItems', 'maxItems'}
+                             'const', 'enum', 'pattern', 'minLength', 'maxLength', 'items', 'minItems', 'maxItems',
+                             'minimum', 'maximum', 'dependentRequired'}
 
 
 def check_schema(schema, path='$'):
@@ -84,6 +85,13 @@ def check_schema(schema, path='$'):
     for key in ('minLength', 'maxLength', 'minItems', 'maxItems'):
         if key in schema and (type(schema[key]) is not int or schema[key] < 0):
             raise ContractError(f'Schema {path} 的 {key} 应为非负整数')
+    for key in ('minimum', 'maximum'):
+        if key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], (int, float))):
+            raise ContractError(f'Schema {path} 的 {key} 应为数')
+    dep = schema.get('dependentRequired', {})
+    if not isinstance(dep, dict) or not all(isinstance(v, list) and all(isinstance(k, str) for k in v)
+                                            for v in dep.values()):
+        raise ContractError(f'Schema {path} 的 dependentRequired 应为 字段: 文字列表')
     if 'pattern' in schema:
         try:
             re.compile(schema['pattern'])
@@ -119,6 +127,11 @@ def _validate(instance, schema, path):
         errors.append(f'{path} 应为 {json.dumps(schema["const"], ensure_ascii=False)}')
     if 'enum' in schema and not any(_same(instance, v) for v in schema['enum']):
         errors.append(f'{path} 不在允许的取值内')
+    if _TYPES['number'](instance):
+        if 'minimum' in schema and instance < schema['minimum']:
+            errors.append(f'{path} 小于 {schema["minimum"]}')
+        if 'maximum' in schema and instance > schema['maximum']:
+            errors.append(f'{path} 大于 {schema["maximum"]}')
     if isinstance(instance, str):
         if 'minLength' in schema and len(instance) < schema['minLength']:
             errors.append(f'{path} 太短')
@@ -139,6 +152,9 @@ def _validate(instance, schema, path):
         for key in schema.get('required', []):
             if key not in instance:
                 errors.append(f'{path} 缺少 {key}')
+        for key, needs in schema.get('dependentRequired', {}).items():
+            if key in instance:
+                errors.extend(f'{path} 有 {key} 时须有 {k}' for k in needs if k not in instance)
         extra = schema.get('additionalProperties', True)
         for key, value in instance.items():
             if key in props:

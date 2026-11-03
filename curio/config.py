@@ -59,7 +59,67 @@ def load(root=ROOT):
     kb=defaults.get('em_kb_path') or DEFAULT_KB_PATH
     if not isinstance(kb,str) or not kb.strip():raise ValueError('em_kb_path 必须为文字路径')
     defaults['em_kb_path']=str(Path(kb.strip()).expanduser())
+    # CAP-10：预估费用档位（config/fee_tiers.yaml，数据；推断在 judge.fee_tier）。
+    defaults['fee_tiers']=fee_tiers(root)
     return defaults
+
+FEE_TIER_KEYS=('A','B','C','D')
+_FEE_CACHE={}
+
+def fees_for(root=ROOT):
+    """按调用方的 root 读费用档位：root 下有 config/fee_tiers.yaml 就用它，否则用仓库里的那份
+    （测试与后台的 root 常是只放 .env、图片的临时目录）。"""
+    return fee_tiers(root if (Path(root)/'config/fee_tiers.yaml').is_file() else ROOT)
+
+def fee_tiers(root=ROOT):
+    """读取并校验 config/fee_tiers.yaml（按文件修改时间缓存）。返回 dict(tiers, cups, hard_to_pack, fragile)，
+    词表已编译成正则（小写、去变音后匹配）。格式不对时报错（中文）。"""
+    path=Path(root)/'config/fee_tiers.yaml'
+    st=path.stat()
+    key=(str(path),st.st_mtime_ns,st.st_size)
+    if key in _FEE_CACHE:return _FEE_CACHE[key]
+    raw=yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw,dict):raise ValueError('fee_tiers.yaml 必须为映射')
+    tiers=raw.get('tiers')
+    if not isinstance(tiers,dict) or set(tiers)!=set(FEE_TIER_KEYS):raise ValueError('fee_tiers.tiers 必须恰好有 A、B、C、D 四档')
+    out={'tiers':{}}
+    prev=0
+    for k in FEE_TIER_KEYS:
+        t=tiers[k]
+        if not isinstance(t,dict):raise ValueError('fee_tiers.tiers.'+k+' 必须为映射')
+        amount,label,cap=t.get('amount'),t.get('label'),t.get('max_cm')
+        if type(amount) is not int or not 0<=amount<=10000:raise ValueError('fee_tiers.tiers.'+k+'.amount 必须为 0–10000 的整数欧元')
+        if not isinstance(label,str) or not label.strip():raise ValueError('fee_tiers.tiers.'+k+'.label 不能为空')
+        if isinstance(cap,bool) or not isinstance(cap,(int,float)) or not math.isfinite(cap) or cap<=0:
+            raise ValueError('fee_tiers.tiers.'+k+'.max_cm 必须为正数')
+        if k!='A':
+            if cap<=prev:raise ValueError('fee_tiers：B、C、D 的 max_cm 必须递增')
+            prev=cap
+        out['tiers'][k]={'amount':amount,'label':label.strip(),'max_cm':float(cap)}
+    from .judge import _norm
+    for group,need_ids in (('cups',True),('hard_to_pack',True),('fragile',False)):
+        g=raw.get(group) or {}
+        if not isinstance(g,dict):raise ValueError('fee_tiers.'+group+' 必须为映射')
+        ids=g.get('function_ids') or []
+        words=g.get('words') or []
+        if not isinstance(ids,list) or any(not isinstance(x,str) or not x.strip() for x in ids):
+            raise ValueError('fee_tiers.'+group+'.function_ids 必须为文字列表')
+        if not need_ids and ids:raise ValueError('fee_tiers.'+group+' 不按功能 ID 判断')
+        if not isinstance(words,list) or any(not isinstance(x,str) or not x.strip() for x in words):
+            raise ValueError('fee_tiers.'+group+'.words 必须为文字列表')
+        zh=g.get('zh_words') or []
+        if not isinstance(zh,list) or any(not isinstance(x,str) or not x.strip() for x in zh):
+            raise ValueError('fee_tiers.'+group+'.zh_words 必须为文字列表')
+        if not need_ids and zh:raise ValueError('fee_tiers.'+group+' 不按标准名称判断')
+        try:rx=re.compile('(?:'+'|'.join(_norm(w) for w in words)+r')(?!\w)') if words else None
+        except re.error as e:raise ValueError('fee_tiers.'+group+'.words 正则无效：'+str(e)) from None
+        try:zrx=re.compile('|'.join(zh)) if zh else None
+        except re.error as e:raise ValueError('fee_tiers.'+group+'.zh_words 正则无效：'+str(e)) from None
+        out[group]={'function_ids':frozenset(x.strip() for x in ids),'rx':rx,'zh':zrx}
+    out['root']=str(Path(root))
+    if len(_FEE_CACHE)>4:_FEE_CACHE.clear()
+    _FEE_CACHE[key]=out
+    return out
 
 def _env(root,keys):
     """只读项目根目录 .env 中指定的键；不读进程环境变量，避免被系统环境悄悄覆盖。"""

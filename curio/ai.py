@@ -117,8 +117,8 @@ def examples(c):
     out = {}
     for state, label in (('kept', 'keep'), ('removed', 'remove')):
         rows = c.execute('''SELECT e.item_id,i.title,e.reason FROM triage_events e JOIN items i ON i.item_id=e.item_id
-            WHERE e.actor='human' AND e.undone_by IS NULL AND e.new_state=? AND e.action!='undo'
-            AND e.id=(SELECT max(id) FROM triage_events x WHERE x.item_id=e.item_id AND x.actor='human' AND x.undone_by IS NULL AND x.action!='undo')
+            WHERE e.actor='human' AND e.undone_by IS NULL AND e.new_state=? AND e.action NOT IN ('undo','fee')
+            AND e.id=(SELECT max(id) FROM triage_events x WHERE x.item_id=e.item_id AND x.actor='human' AND x.undone_by IS NULL AND x.action NOT IN ('undo','fee'))
             ORDER BY e.id DESC LIMIT ?''', (state, EXAMPLES_PER_SIDE)).fetchall()
         out[label] = [{'title': r['title'], 'reason': r['reason'] or ''} for r in rows]
     return out

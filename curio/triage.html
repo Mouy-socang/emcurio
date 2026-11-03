@@ -120,6 +120,14 @@ img{display:block}
 .ti.multi{min-height:120px;font-family:var(--serif);font-size:15.5px;line-height:1.75;resize:vertical}
 .actbar{border-top:2px solid var(--ink);padding:14px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:12px}
 
+/* 03 费用档位（故事 12）：A–D 与请咨询单选，选中即保存；手动值优先，可恢复自动 */
+.feeauto{font-size:14px;color:var(--muted);margin-bottom:6px;overflow-wrap:anywhere}
+.feeopts{border-top:1px solid var(--hair)}
+.feeopt{display:flex;align-items:center;gap:10px;min-height:var(--tap);border-bottom:1px solid var(--hair);cursor:pointer;font-size:14px}
+.feeopt input{flex:none;width:18px;height:18px;margin:0;accent-color:var(--ink)}
+.feeopt .mono{min-width:4.5em}
+.feenow{font-size:14px;margin-top:8px}
+
 /* zoom-layer */
 .zl{position:fixed;inset:0;background:var(--surface);border-top:2px solid var(--ink);display:flex;flex-direction:column;z-index:20}
 .zl .top{display:flex;justify-content:space-between;align-items:center;padding:0 var(--m)}
@@ -247,6 +255,12 @@ img{display:block}
     <section class="ns"><h2><span class="ix" aria-hidden="true">01</span>卖家原文</h2><div class="src" id="dDesc"></div></section>
     <section class="ns"><h2><span class="ix" aria-hidden="true">02</span>来源与判断</h2>
       <dl class="kv"><dt>原平台</dt><dd id="dPlat"></dd><dt>链接</dt><dd id="dUrl"></dd><dt>理由</dt><dd id="dReason"></dd><dt>分数</dt><dd id="dScore"></dd></dl></section>
+    <section class="ns" aria-labelledby="dFeeH"><h2 id="dFeeH"><span class="ix" aria-hidden="true">03</span>费用档位</h2>
+      <p class="feeauto" id="dFeeAuto"></p>
+      <div class="feeopts" id="dFeeOpts" role="radiogroup" aria-labelledby="dFeeH"></div>
+      <p class="feenow" id="dFeeNow"></p>
+      <button class="lnk lnk-pad" id="dFeeReset" type="button" hidden>恢复自动</button>
+      <p class="im" id="dFeeMsg" hidden></p></section>
     <section class="ns"><h2><span class="ix" aria-hidden="true">04</span>墨墨点评</h2>
       <div class="field"><label class="flabel" for="dComment">点评</label><textarea id="dComment" class="ti multi" maxlength="5000"></textarea></div>
       <p class="im" id="dCommentMsg" hidden></p></section>

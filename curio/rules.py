@@ -202,3 +202,10 @@ def baseline_score(item,std=None):
     elif level:score-=15;parts.append('%d. Wahl'%level)
     if std.get('overpaint'):parts.append('外画（不减分）')
     return max(0,min(100,int(score))),'；'.join(parts)
+
+# ---- CAP-10 预估费用档位（AD-15）：推断逻辑在 judge.fee_tier，档位与词表在 config/fee_tiers.yaml。
+def fee_tier(item,std=None,fees=None):
+    """推断一件货的预估费用档位（不含墨墨的手动改档；手动优先由 store.fee_info 合并）。
+    item/std 可为 dict 或 sqlite3.Row。返回 dict(tier, amount, label, reason, size_cm)。"""
+    item=dict(item) if item is not None else {}
+    return judge.fee_tier(item.get('title',''),item.get('description',''),std,fees)

@@ -513,6 +513,9 @@ def run(root,clock=time.time):
         # CAP-4：抓取与在售检查之后，在 AI 预算内给新货打分；失败只记 ai_status，不影响其它结果。
         from . import ai
         result.update(ai.run(store,root,config,clock))
+        # AD-14：每天最多成功取一次 ECB 人民币参考汇率（失败沿用上次的值与日期），发布时随快照上线。
+        from . import fx
+        result.update(fx.run(store,clock))
         # AD-23：限时 30 秒把发件箱按序推到服务器；未配置服务器时 sync_status: disabled，失败下轮从同一条重试。
         from . import sync
         result.update(sync.run(store,root))

@@ -22,7 +22,7 @@ contract/
 | 图片查询（`POST /admin/images/check` 的请求 / 响应，AD-13） | Mac ⇄ 服务器 | `image_check.v1.schema.json` / `image_check_result.v1.schema.json` |
 | 图片上传确认（`PUT /admin/images/<name>` 的响应，AD-13） | 服务器 → Mac | `image_ack.v1.schema.json` |
 
-信封的 `payload` 按 `<kind>.v<payload.schema_version>.schema.json` 另行校验；新增载荷类别时同时把它加进信封的 `kind` 枚举。Mac 端用标准库最小校验器（`curio/sync`，只支持 `type`、`required`、`properties`、`additionalProperties`、`const`、`enum`、`pattern`、`minLength`、`maxLength`、`items`、`minItems`、`maxItems`），Schema 里出现其它关键字会直接报错；服务器端用 `jsonschema`。
+信封的 `payload` 按 `<kind>.v<payload.schema_version>.schema.json` 另行校验；新增载荷类别时同时把它加进信封的 `kind` 枚举。Mac 端用标准库最小校验器（`curio/sync`，只支持 `type`、`required`、`properties`、`additionalProperties`、`const`、`enum`、`pattern`、`minLength`、`maxLength`、`items`、`minItems`、`maxItems`、`minimum`、`maximum`、`dependentRequired`），Schema 里出现其它关键字会直接报错；服务器端用 `jsonschema`。
 
 需要定义的载荷（由后续故事逐个加入 `schemas/`）：
 

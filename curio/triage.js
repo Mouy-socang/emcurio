@@ -393,6 +393,8 @@ async function openDetail(id, mode, opener) {
   const sc = $('dScore'); sc.textContent = '';
   if (d.score != null) { const m = document.createElement('span'); m.className = 'mono'; m.textContent = d.score; sc.append(m); if (d.score_reason) sc.append(' · ' + d.score_reason); }
   else sc.textContent = '暂无分数';
+  // 03 费用档位（手动值优先，可恢复自动）
+  renderFee(d); $('dFeeMsg').hidden = true;
   // 04 点评
   $('dComment').value = savedComment = d.comment || ''; $('dCommentMsg').hidden = true;
   // 05 替代文字
@@ -462,6 +464,47 @@ function setGi(n) {
   $('gPg').textContent = (gi + 1) + ' / ' + ims.length;
   [...$('thumbs').querySelectorAll('button')].forEach((b, k) => b.setAttribute('aria-current', k === gi ? 'true' : 'false'));
   if (!$('zoom').hidden) { $('zImg').src = im.src; $('zImg').alt = alt; $('zPg').textContent = $('gPg').textContent; zReset(); }
+}
+/* ---------- 03 费用档位（故事 12） ---------- */
+function feeText(t) { return t.tier === 'ask' ? '请咨询' : t.tier + ' 档 · 约 €' + t.amount + ' · ' + t.label; }
+function renderFee(d) {
+  const f = d.fee, box = $('dFeeOpts'); if (!f) return;
+  const hadFocus = box.contains(document.activeElement);
+  $('dFeeAuto').textContent = '推断：' + feeText(f.auto) + '（' + f.auto.reason + '）';
+  box.textContent = '';
+  (d.fee_choices || []).forEach(ch => {
+    const l = document.createElement('label'); l.className = 'feeopt';
+    const r = document.createElement('input'); r.type = 'radio'; r.name = 'dFee'; r.value = ch.tier; r.checked = ch.tier === f.tier;
+    // 方向键在单选组里移动也会触发 change：短暂停顿后只保存最后选中的那一档。
+    r.addEventListener('change', () => { if (r.checked) queueFee(ch.tier); });
+    const k = document.createElement('span'); k.className = 'mono'; k.textContent = ch.tier === 'ask' ? '请咨询' : ch.tier + ' 档';
+    const t = document.createElement('span'); t.textContent = ch.tier === 'ask' ? '尺寸超出或特别易碎' : '约 €' + ch.amount + ' · ' + ch.label;
+    l.append(r, k, t); box.append(l);
+  });
+  if (hadFocus) { const c = box.querySelector('input:checked') || box.querySelector('input'); if (c) c.focus(); }
+  $('dFeeNow').textContent = f.manual ? '当前：手动改为 ' + feeText(f) + '（客人页以此为准）' : '当前：按推断';
+  $('dFeeReset').hidden = !f.manual;
+}
+let feeTimer = null, feeSeq = 0;
+function queueFee(tier) {
+  const id = detail.item_id;          // 计时期间换了货详情也只存到原来那件
+  clearTimeout(feeTimer);
+  feeTimer = setTimeout(() => saveFee(tier, id), 400);
+}
+async function saveFee(tier, id = detail.item_id) {
+  clearTimeout(feeTimer);
+  const msg = $('dFeeMsg'), before = detail && detail.fee, seq = ++feeSeq;
+  const current = () => detail && detail.item_id === id && seq === feeSeq;     // 晚到的旧响应不覆盖新选择
+  try {
+    const res = await post('/api/triage/fee', {item_id: id, tier, request_id: rid()});
+    if (!res.ok) throw new Error(res.data.error || '');
+    if (current()) { detail.fee = res.data.fee; renderFee(detail); fieldMsg(msg, '已保存'); }
+    setNet(false); if (current()) say('已保存');
+    return true;
+  } catch (e) {
+    if (current()) { renderFee(Object.assign({}, detail, {fee: before})); fieldMsg(msg, saveError(e), () => saveFee(tier, id)); shout('未保存，请重试'); }
+    return false;
+  }
 }
 function fieldMsg(el, text, retryFn) {
   el.textContent = text;
@@ -639,6 +682,7 @@ $('arReload').onclick = () => loadAr(false);
 $('dClose').onclick = () => closeDetail();
 $('dComment').addEventListener('blur', () => { if ($('dComment').value !== savedComment) saveComment(); });
 $('dRecheck').onclick = recheck;
+$('dFeeReset').onclick = () => saveFee(null);
 $('dPrimary').onclick = primary;
 $('gPrev').onclick = () => setGi(gi - 1);
 $('gNext').onclick = () => setGi(gi + 1);

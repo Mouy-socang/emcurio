@@ -51,9 +51,9 @@ uv run python -m curio.review
 - 拣选卡一次一件（分数高到低，捞回的在最前）：右滑留下、左滑去掉（拖过卡宽 35% 或快速甩动才生效，否则回弹），或按「去掉」「留下」，电脑上焦点不在输入框时 ← 去掉、→ 留下。界面先切到下一件再保存；保存失败时显示「N 件未保存 · 重试」、该件回到队首；断网显示「网络已断开，操作未保存 · 重试」。每个动作带 `request_id`（表 `triage_requests`），重放返回同一结果、不产生第二个事件。
 - 「撤销上一步」无时限、可连续多步（`triage.undo`，撤最近一次人工事件；货号保留不复用）。
 - 「已自动移出 N 件 · 查看」：列表附理由与移出时间，「捞回」后该件回到新货队首。
-- 点图进入货详情：货号（已留下才有）、名称与标签（外画、仅后台 · Kleinanzeigen）、图库与放大层（图片取 `product_snapshots` 已下载的图，否则 `items.image`）、卖家原文（照录、标 `lang`）、来源与判断、墨墨点评（表 `comments`）、图片替代文字（表 `alt_texts`，默认「标准名称 · 第 N 张 / 共 M 张」），点评与替代文字失焦自动保存。
+- 点图进入货详情：货号（已留下才有）、名称与标签（外画、仅后台 · Kleinanzeigen）、图库与放大层（图片取 `product_snapshots` 已下载的图，否则 `items.image`）、卖家原文（照录、标 `lang`）、来源与判断、费用档位（故事 12，可改，见下文"单件页、预估费用与币种"）、墨墨点评（表 `comments`）、图片替代文字（表 `alt_texts`，默认「标准名称 · 第 N 张 / 共 M 张」），点评与替代文字失焦自动保存。
 - 「复查」按平台即时确认这一件是否在售（`curio_monitor.recheck_item`，与批量在售检查共用单件判定，计入当日在售检查预算，写 `status_check_events`，下架即 `items.status='gone'`）；预算用完、平台暂停或查询失败时显示「暂时无法确认，请稍后再试」。
-- 接口：`GET /api/triage`、`/api/triage/auto-removed`、`/api/triage/item?id=`；`POST /api/triage/action`（keep / remove / rescue / undo）、`/api/triage/comment`、`/api/triage/alt`、`/api/triage/recheck`。
+- 接口：`GET /api/triage`、`/api/triage/auto-removed`、`/api/triage/item?id=`；`POST /api/triage/action`（keep / remove / rescue / undo）、`/api/triage/comment`、`/api/triage/alt`、`/api/triage/fee`、`/api/triage/recheck`。
 
 ### 后台 02 商品池、03 榜、预览与发布（CAP-7，故事 11；AD-5、AD-22、AD-28）
 
@@ -451,8 +451,50 @@ uv run python scripts/publish.py publish [--flush]            # 生成完整快�
 
 - `/`：页头（品牌 + 北京时间更新时间 + 用户协议与隐私说明 · 退出登录）→ 今日榜横滑（`<ol aria-label="今日榜，10 件">`，整卡一个链接）→ 全部藏品（品牌编号分区、器型 / 价格区间 / 图案底部面板、汇总行、双列瀑布流、每批 20 件续载）→ 页脚。从未发布显示"墨墨正在准备今天的藏品，请稍后再来。"；筛选无结果显示空状态与"清除全部筛选"。
 - 不跑 JS 也能用：筛选与"加载更多"都是普通链接（`/?form=…&n=40`），面板用 `:target` 打开；`static/guest.js` 增强为就地刷新、焦点管理、按阅读顺序放进较短一列的瀑布流（不用 CSS columns）与滚到底自动续载（`GET /api/pool?offset=…`）。
-- `/item/CO-NNNN`：本故事只有图片、名称、价格、货号（完整单件页在故事 12）；已隐藏或墓碑显示"此件已售出。/ 此件已移出。"，不在快照里显示"此件已不在展出"（404）。
+- `/item/CO-NNNN`：完整单件页见下节（故事 12）。
 - 快照数据 `/api/pool` 与图片 `/img/<name>` 只经会话鉴权：未登录 401，停用或待重新同意 403。图片 `Cache-Control: private, max-age=31536000, immutable`。
+
+## 单件页、预估费用与币种（故事 12，CAP-10、CAP-11；AD-2、AD-6、AD-14、AD-15、AD-29）
+
+### 费用档位推断（规则归口）
+
+- 档位、金额与词表是数据：`config/fee_tiers.yaml`（`curio/config.fee_tiers` 读取校验，`config.load()['fee_tiers']`）。推断代码只在 `curio/judge.fee_tier`，对外入口 `curio/rules.fee_tier`。
+- 档位：A 普通杯碟 约 €30、B 30cm 以下花瓶 约 €42、C 30–50cm 约 €67、D 50cm–1m 约 €140；含收货验货、材料、国际运费分摊、国内派送、服务费，不含保险与进口关税。
+- 尺寸从卖家标题与描述读：`cm`、`mm`、英寸（inch；`"` 只认紧贴数字且带 H / Höhe / Ø 标签或在 `a x b` 多维里的，「Nr. 30"」不算），`H`、`Höhe`、`hoch`、`Ø`、`Durchmesser` 等标签（标签后没写单位按厘米），`30 x 20 x 10 cm` 取最大；取读到的最大值。包装 / 运输尺寸（Karton、Paket、Versand…）不算；以米写的（`1,20 m`）读不出。
+- 器型依据（`cups` / `hard_to_pack` 各自的 `function_ids`、`words`、`zh_words`，都在 yaml 里）：标准名称的功能 ID 最优先；其次标题词（德语允许复合词，英语词带 `\b` 要求词首）；再次标准名称里的中文。两类词都出现时取标题里先出现的为货本身（「Tasse mit Watteau-Figuren」是杯）。
+- 规则：杯碟类（标准名称的功能 ID，或标题里 Tasse、Teller、Becher、cup、saucer 等）没写尺寸或不超过 30 cm → A；否则按尺寸 ≤30 → B、≤50 → C、≤100 → D、超过 1 米 → 请咨询；人物瓷偶等难包装（功能 FN-052 塑像，或 Figur、Gruppe、Putto…）上跳一档（D 上跳为请咨询）；特别易碎（Spitzenfigur 等蕾丝人物、Kronleuchter）或读不出尺寸 → 请咨询。
+- 每次推断带理由（如「高 28 cm → B」「人物瓷偶，尺寸 25 cm → B，难包装上跳一档 → C」），只在后台显示，不进快照。
+
+### 后台手动改档
+
+- 货详情 03「费用档位」：显示推断与理由；A / B / C / D / 请咨询 单选，选中稍停（约 0.4 秒，方向键连按只存最后一档）即保存，焦点留在选中项，晚到的旧响应不覆盖新选择（表 `fee_overrides`，手动值优先，AD-2）；选回推断值或「恢复自动」都删除手动值。每次实际改动记一条人工 `fee` 事件（`triage_events`，可追溯、不可撤销，不算拣选决定、不影响撤销与系统落位）。保存失败时选择回到原值，字段下"未保存 · 重试"。
+- 档位配置按调用方的 root 读（`config.fees_for`：root 下有 `config/fee_tiers.yaml` 就用它，否则用仓库里的），发布、预览、指纹、货详情都传同一份。
+- 接口 `POST /api/triage/fee`（`item_id`、`tier`：A–D / ask / null、`request_id`；页面令牌 + Origin；`request_id` 幂等，表 `triage_requests`）。保存后当前预览作废；生效档位、金额与名称进入"有未发布的修改"的指纹（`publish.status_fingerprint`），改档或改 yaml 里的金额 / 名称即显示"有未发布的修改"，改回原样即消失。
+
+### 汇率（AD-14）
+
+- `curio/fx.py`：每轮采集（`curio_monitor.run`，在同步之前）调用一次；ECB `EXR/D.CNY.EUR.SP00.A` 最近一个观测值（`requests`，超时 10/20 秒）。每天（柏林日期）最多成功取一次——取到的若还是前一天的观测值，工作日柏林 16:30 之后（ECB 约 16:00 CET 发布）再取一次；失败记一次警告，沿用最近一次成功的汇率与它原来的日期，1 小时后再试。存 kv `fx_cny_eur`（失败时间 `fx_attempt`）。采集结果写 `fx_status`（ok / fresh / wait / error）、`fx_rate`、`fx_date`。
+- 测试里 ECB 请求一律被替换（`tests/conftest.py` 默认拦截），不连外网。
+
+### 快照字段（`contract/schemas/snapshot.v1`，v1 内补齐）
+
+- 每件：`fee_tier`（A–D 或 `ask`）、`fee_amount`（欧元整数 0–10000）与 `fee_label`（档位名称，取自 yaml；AD-6「费用档位与金额」）；`ask` 时后两项不带。原占位字段 `fee_eur` 从未被填写过，改名为 `fee_amount`，两端同改。Schema 用 `minimum` / `maximum` / `dependentRequired`（Mac 端最小校验器已支持）；"A–D 必带金额、ask 不带"由 `publish.check_fees`（入队前）与服务器 `snapshot.check_snapshot` 同样核对。
+- 顶层：`fx_rate`（1–50）、`fx_date`，从未取到汇率时都不带，两者须同时出现。汇率不算"有未发布的修改"。
+
+### 客人单件页（服务器）
+
+- 顺序：页头 → 画廊（横向滑动、"上一张 / 下一张"、缩略图组 `aria-current`、页码、"放大"→ 放大层：双指缩放与拖动、"− / + / 复位 / 上一张 / 下一张"，只用"关闭"或 Esc 关闭）→ 货号 → 名称（标准名称，"外画"已在名称里）→ 卖家原价 → 01 品相（"据卖家描述："+ 原文块，带 `lang`，不高亮）→ 02 预估费用（"约 €42（B 档：30cm 以下花瓶）"或"请咨询"，附"不含保险与进口关税"）→ 03 墨墨点评（没有就整节不出现）→ 复制栏（"复制货号"，成功后常驻"已复制 CO-0123，回到微信粘贴到转账备注"；剪贴板不可用时显示已全选的只读输入框）→"浏览全部"→ 页脚。
+- 不跑 JS：画廊可横向滑动、缩略图是页内锚点；"上一张 / 下一张"、"放大"、"复制货号"按钮由 `static/guest.js` 显示。
+- 旧快照（故事 10，没有费用档位）不出现预估费用小节，点评顺延为 02。
+- 已隐藏（快照里还有这件货）90 天内：去色、"已售出 / 已移出"状态牌在名称之前、划线价前有视觉隐藏的"已售出，原价 / 已移出，原价"、无复制栏、主按钮"浏览全部"；只剩墓碑（货号 + 状态）时只显示状态牌、货号与"此件已售出。/ 此件已移出。"。隐藏或离开超过 90 天、或不在快照里：「此件已不在展出」（404）。
+
+### 币种（CAP-11）
+
+- 首页与单件页页头的 `role="radiogroup"`"欧元 / 人民币"（€ / ¥），默认欧元。选择存在服务器账号上（`accounts.currency`，改动递增 `account_rev`），换设备登录沿用。`POST /currency`（`currency`=EUR / CNY、`next`）：页面脚本以 `Accept: application/json` 调用并就地换算所有价格与预估费用（`data-eur` 原值）、播报"价格已切换为人民币，约数，以欧元为准"；不跑脚本时是普通表单提交，303 回到原页面。
+- 首页带筛选时 `next` 是 `/?form=…`（`safe_next` 只放行 brand / form / band / pattern / n 参数），不跑脚本切换后回到同一筛选。续载与就地筛选插入的新卡片按当前选中的币种重新换算（`window.curioMoney`）。
+- ¥ 显示"≈ ¥1,443"（读作"约 1443 元人民币"，四舍五入到元），页头下注"按当日汇率，以欧元为准"。快照没有汇率、汇率日期在未来、或距今超过 7 天时不出现切换、只显示欧元（选过 ¥ 的账号另注"汇率暂不可用，暂以欧元显示"）。
+- 预览（AD-28）按欧元显示，切换只在页面内换算、不保存（无表单、不提交到后台）。
+- 档位名称以快照的 `fee_label` 为准；`server/guest.py` 的 `FEE_LABELS` 只在快照没带名称时兜底（测试核对它与 yaml 一致）。
 
 ## 验证
 

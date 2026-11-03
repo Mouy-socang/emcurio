@@ -122,7 +122,7 @@
           },
           "fee_tier": {
             "type": "string",
-            "description": "预估费用档位（故事 12 填）。",
+            "description": "预估费用档位（故事 12）：A 普通杯碟、B 30cm 以下花瓶、C 30–50cm、D 50cm–1m、ask 请咨询。墨墨手动改档优先；推断理由不上线。",
             "enum": [
               "A",
               "B",
@@ -131,9 +131,16 @@
               "ask"
             ]
           },
-          "fee_eur": {
-            "type": "number",
-            "description": "预估费用金额（欧元，故事 12 填）。"
+          "fee_amount": {
+            "type": "integer",
+            "description": "预估费用金额（欧元整数，0–10000）。fee_tier 为 A–D 时必带，为 ask 时不带（Mac 发布前与服务器都按此核对）。",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "fee_label": {
+            "type": "string",
+            "description": "预估费用档位名称（如「30cm 以下花瓶」，取自 config/fee_tiers.yaml；AD-6「费用档位与金额」）。fee_tier 为 A–D 时带。",
+            "maxLength": 60
           },
           "images": {
             "type": "array",
@@ -198,6 +205,14 @@
             "description": "墨墨点评（有才带）。",
             "maxLength": 5000
           }
+        },
+        "dependentRequired": {
+          "fee_amount": [
+            "fee_tier"
+          ],
+          "fee_label": [
+            "fee_tier"
+          ]
         }
       }
     },
@@ -234,12 +249,22 @@
     },
     "fx_rate": {
       "type": "number",
-      "description": "CNY/EUR 参考汇率（故事 12 填）。"
+      "description": "ECB 日参考汇率 D.CNY.EUR（1 欧元兑人民币，AD-14；合理范围 1–50）；Mac 从未取到汇率时不带。与 fx_date 同时出现。",
+      "minimum": 1,
+      "maximum": 50
     },
     "fx_date": {
       "type": "string",
-      "description": "汇率日期（故事 12 填）。",
+      "description": "该汇率的 ECB 日期（YYYY-MM-DD；取不到新值时沿用旧值的原日期）。距今超过 7 天时客人页只显示欧元。",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
     }
+  },
+  "dependentRequired": {
+    "fx_rate": [
+      "fx_date"
+    ],
+    "fx_date": [
+      "fx_rate"
+    ]
   }
 }

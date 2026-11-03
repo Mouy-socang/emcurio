@@ -5,7 +5,11 @@
 - 免登录的只有：注册/登录/找回/设置新密码页、说明页 `/legal`、静态外壳 `/static/`、`/healthz`。
 - 首页（故事 10）：今日榜横滑 + 全部藏品（品牌分区、器型/价格区间/图案筛选、双列瀑布流、每批 20 件续载）；
   筛选与续载都是普通链接（不跑 JS 也能用），`static/guest.js` 增强为就地刷新与滚到底自动续载（`/api/pool`）。
-- 单件页（故事 12 补全）：本故事只给图片、名称、价格、货号；已隐藏或墓碑显示"已售出 / 已移出"。
+- 单件页（故事 12）：画廊（左右滑、上一张/下一张、缩略图、页码、放大层）→ 货号 → 名称 → 卖家原价 → 01 品相（卖家原文）
+  → 02 预估费用（档位与金额，或"请咨询"）→ 03 墨墨点评（有才出现）→ 复制货号 → 浏览全部。隐藏后 90 天内去色并标
+  "已售出 / 已移出"（无复制栏），超过 90 天或不在快照里显示"此件已不在展出"。
+- 币种（故事 12，AD-14）：页头 €/¥ 切换，选择存在账号（accounts.currency，POST /currency，无 JS 时是表单提交）；
+  ¥ 按快照汇率换算并标"约"，汇率缺失或日期距今超过 7 天时只显示欧元、不出现切换。
 - 快照数据（`/api/pool`）与图片（`/img/<name>`）只经会话鉴权提供（AD-6）：未登录 401、停用或待同意 403。
 """
 import html
@@ -14,6 +18,7 @@ import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -21,6 +26,7 @@ from fastapi import Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup, escape
 from starlette.concurrency import run_in_threadpool
 
 import accounts
@@ -43,6 +49,9 @@ PAGE_SIZE = 20                       # 每批件数（自动续载）
 MAX_SHOWN = 2000
 CN_TZ = timezone(timedelta(hours=8))   # 客人在中国：更新时间按北京时间显示
 FILTER_LABELS = {'form': '器型', 'band': '价格区间', 'pattern': '图案'}
+FX_MAX_DAYS = 7                       # AD-14：汇率日期距今超过 7 天只显示欧元
+# 预估费用档位的展示文字（fee-tiers.md；金额来自快照，这里只有名称）。
+FEE_LABELS = {'A': '普通杯碟', 'B': '30cm 以下花瓶', 'C': '30–50cm', 'D': '50cm–1m'}
 
 
 # ---------- 用户协议与隐私说明（AD-18：文本与版本号同一文件） ----------
@@ -117,6 +126,59 @@ def price_text(value):
     return '€{:,}'.format(int(value))
 
 
+# ---------- 币种（CAP-11、AD-14：欧元为准，¥ 只是按快照汇率的约数） ----------
+
+def fx_usable(rate, date, now):
+    """快照里的汇率可用：有汇率与日期，且日期距今不超过 7 天（按 UTC 日期）。"""
+    if not isinstance(rate, (int, float)) or isinstance(rate, bool) or not math.isfinite(rate) or not 1 <= rate <= 50:
+        return False
+    try:
+        day = datetime.strptime(date, '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return False
+    today = datetime.fromtimestamp(now, timezone.utc).date()
+    return 0 <= (today - day).days <= FX_MAX_DAYS          # 未来日期（时钟或数据有误）不用
+
+
+def currency_ctx(chosen, view, now, local=False):
+    """本页的币种显示：chosen 为账号里存的选择（EUR / CNY）。汇率不可用时一律欧元、不出现切换。
+    local：预览里切换只在页面内生效、不保存。"""
+    ok = fx_usable(view.fx_rate, view.fx_date, now)
+    chosen = chosen if chosen in ('EUR', 'CNY') else 'EUR'
+    return {'code': 'CNY' if chosen == 'CNY' and ok else 'EUR', 'chosen': chosen,
+            'rate': float(view.fx_rate) if ok else None, 'available': ok,
+            'fallback': chosen == 'CNY' and not ok, 'local': local}
+
+
+EUR_ONLY = {'code': 'EUR', 'chosen': 'EUR', 'rate': None, 'available': False, 'fallback': False, 'local': False}
+
+
+def cny(value, rate):
+    """欧元 → 人民币整数（四舍五入）。"""
+    return int(Decimal(repr(float(value) * rate)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def money_text(value, cur=None, approx=False):
+    """读屏与 aria-label 用的纯文字：€185 / 约 €42 / 约 1443 元人民币。"""
+    cur = cur or EUR_ONLY
+    if cur['code'] == 'CNY':
+        return f'约 {cny(value, cur["rate"])} 元人民币'
+    return ('约 ' if approx else '') + price_text(value)
+
+
+def money(value, cur=None, approx=False):
+    """价格（HTML）：€185；approx 时"约 €42"；人民币显示"≈ ¥1,443"、读作"约 1443 元人民币"。
+    data-eur 带欧元原值，页内切换币种时由 guest.js 就地换算。"""
+    cur = cur or EUR_ONLY
+    attrs = f' data-eur="{escape(repr(float(value)))}"' + (' data-approx' if approx else '')
+    if cur['code'] == 'CNY':
+        n = cny(value, cur['rate'])
+        inner = (f'<span aria-hidden="true">≈ ¥{n:,}</span><span class="vh">约 {n} 元人民币</span>')
+    else:
+        inner = escape(('约 ' if approx else '') + price_text(value))
+    return Markup(f'<span class="m"{attrs}>{inner}</span>')
+
+
 def updated_text(received_at):
     try:
         t = datetime.fromisoformat(received_at.replace('Z', '+00:00')).astimezone(CN_TZ)
@@ -168,9 +230,13 @@ def _int(value, default, low, high):
 
 # ---------- 小工具 ----------
 
+_HOME_QUERY_RE = re.compile(r'/\?(?:(?:brand|form|band|pattern|n)=[A-Za-z0-9%+._-]{1,120}&?){1,5}')
+
+
 def safe_next(value):
-    """只接受 `/` 与 `/item/CO-NNNN`；其它一律回首页（防开放跳转）。"""
-    if isinstance(value, str) and (value == '/' or _ITEM_RE.fullmatch(value)):
+    """只接受 `/`、带筛选参数的首页 `/?brand=…&form=…`（只认 brand/form/band/pattern/n）与 `/item/CO-NNNN`；
+    其它一律回首页（防开放跳转）。"""
+    if isinstance(value, str) and (value == '/' or _ITEM_RE.fullmatch(value) or _HOME_QUERY_RE.fullmatch(value)):
         return value
     return '/'
 
@@ -220,7 +286,8 @@ def minutes(seconds):
 def make_env():
     """客人页模板环境（server/templates）。Mac 预览经 server/preview.py 用同一个环境渲染。"""
     env = Environment(loader=FileSystemLoader(str(TEMPLATES)), autoescape=select_autoescape(['html']))
-    env.globals.update(price_text=price_text, filter_href=filter_href)
+    env.globals.update(price_text=price_text, filter_href=filter_href, money=money, money_text=money_text,
+                       fee_labels=FEE_LABELS)
     return env
 
 
@@ -236,8 +303,9 @@ def pool_state(view, params):
     return options, chosen, shown
 
 
-def home_page(env, view, params):
-    """首页：今日榜 + 全部藏品（筛选、首批卡片）。返回 (status, html)。"""
+def home_page(env, view, params, cur=None):
+    """首页：今日榜 + 全部藏品（筛选、首批卡片）。cur：currency_ctx 结果（缺省欧元）。返回 (status, html)。"""
+    cur = cur or EUR_ONLY
     options, chosen, shown = pool_state(view, params)
     n = _int(params.get('n'), PAGE_SIZE, PAGE_SIZE, MAX_SHOWN)
     first = shown[:n]
@@ -250,29 +318,33 @@ def home_page(env, view, params):
                        query=filter_query(chosen),
                        more_href='/?' + more + '#pool', updated=updated_text(view.received_at),
                        chosen_labels={k: label_of(options, k, v) for k, v in chosen.items()},
-                       filter_labels=FILTER_LABELS)
+                       filter_labels=FILTER_LABELS, cur=cur, here='/?' + filter_query(chosen) if chosen else '/')
 
 
-def item_view_page(env, view, code):
-    """单件页。返回 (status, html)。"""
-    state = view.item_state(code)
+def item_view_page(env, view, code, cur=None, now=None):
+    """单件页。now：Unix 秒，用于 90 天保留期（None 时不判）。返回 (status, html)。"""
+    cur = cur or EUR_ONLY
+    state = view.item_state(code, now)
     it = view.items.get(code)
+    here = '/item/' + code
     if state == 'show':
-        return render_page(env, 'item.html', it['title'], state=state, it=it, code=code)
+        return render_page(env, 'item.html', it['title'], state=state, it=it, code=code, cur=cur, here=here)
     if state in ('sold', 'removed'):
-        return render_page(env, 'item.html', '已售出' if state == 'sold' else '已移出', state=state, it=None, code=code)
-    return render_page(env, 'item.html', '此件已不在展出', 404, state=None, it=None, code=code)
+        title = it['title'] if it else ('已售出' if state == 'sold' else '已移出')
+        return render_page(env, 'item.html', title, state=state, it=it, code=code, cur=cur, here=here)
+    return render_page(env, 'item.html', '此件已不在展出', 404, state=None, it=None, code=code, cur=cur, here=here)
 
 
-def pool_batch(env, view, params):
+def pool_batch(env, view, params, cur=None):
     """自动续载的下一批卡片（HTML 片段，与首页同一模板）。返回 JSON 字典。"""
+    cur = cur or EUR_ONLY
     _, _, shown = pool_state(view, params)
     # 最多显示 MAX_SHOWN 件：到上限就停，不再给下一批（否则会反复返回同一批）。
     limit = min(len(shown), MAX_SHOWN)
     offset = _int(params.get('offset'), 0, 0, limit)
     batch = shown[offset:min(offset + PAGE_SIZE, limit)]
     cards = env.get_template('_pool.html').module
-    html_ = ''.join(str(cards.card(it)) for it in batch)
+    html_ = ''.join(str(cards.card(it, cur)) for it in batch)
     end = offset + len(batch)
     return {'ok': True, 'html': html_, 'count': len(batch), 'shown': end, 'total': len(shown),
             'next_offset': end if end < limit else None}
@@ -613,21 +685,64 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         return FileResponse(path, media_type='image/jpeg',
                             headers={'Cache-Control': 'private, max-age=31536000, immutable'})
 
+    def cur_for(account, view):
+        chosen = account['currency'] if account is not None and 'currency' in account.keys() else 'EUR'
+        return currency_ctx(chosen, view, clock())
+
     @app.get('/api/pool')
     def api_pool(request: Request):
         """自动续载：返回下一批卡片（HTML 片段，与首页同一模板）。"""
         denied = api_gate(request)
         if denied:
             return denied
-        return JSONResponse(pool_batch(env, load_view(), request.query_params), headers={'Cache-Control': 'no-store'})
+        _, account = current(request)
+        view = load_view()
+        return JSONResponse(pool_batch(env, view, request.query_params, cur_for(account, view)),
+                            headers={'Cache-Control': 'no-store'})
 
-    def home(params):
-        status, body = home_page(env, load_view(), params)
+    def home(params, account):
+        view = load_view()
+        status, body = home_page(env, view, params, cur_for(account, view))
         return HTMLResponse(body, status_code=status)
 
-    def item_page(code):
-        status, body = item_view_page(env, load_view(), code)
+    def item_page(code, account):
+        view = load_view()
+        status, body = item_view_page(env, view, code, cur_for(account, view), clock())
         return HTMLResponse(body, status_code=status)
+
+    @app.post('/currency')
+    async def currency(request: Request):
+        """改显示币种（CAP-11）：存进账号（换设备沿用），递增 account_rev。
+        页面脚本以 Accept: application/json 调用、就地换算；不跑脚本时是普通表单提交，303 回到原页面。"""
+        wants_json = 'application/json' in request.headers.get('accept', '')
+        if not same_origin(request):
+            return (JSONResponse({'ok': False, 'detail': '来源不符'}, status_code=403) if wants_json
+                    else HTMLResponse('来源不符', status_code=403))
+        form = await read_form(request)
+        if form is None or form.get('currency') not in accounts.CURRENCIES:
+            return (JSONResponse({'ok': False, 'detail': '请求无效'}, status_code=400) if wants_json
+                    else HTMLResponse('请求无效', status_code=400))
+        next_path = safe_next(form.get('next', '/'))
+        state, account = current(request)
+        if state != 'ok':
+            if wants_json:
+                return JSONResponse({'ok': False, 'detail': '请先登录'}, status_code=401)
+            return RedirectResponse('/login?' + urlencode({'next': next_path}), status_code=303)
+        if account['status'] == 'disabled' or consent_missing(account):
+            if wants_json:
+                return JSONResponse({'ok': False, 'detail': '无权操作'}, status_code=403)
+            return RedirectResponse(next_path, status_code=303)
+
+        def work():
+            c = db()
+            try:
+                accounts.set_currency(c, account['account_id'], form['currency'], clock())
+            finally:
+                c.close()
+        await run_in_threadpool(work)
+        if wants_json:
+            return JSONResponse({'ok': True, 'currency': form['currency']}, headers={'Cache-Control': 'no-store'})
+        return RedirectResponse(next_path, status_code=303)
 
     # ----- 客人路径（须登录）：放在最后，兜住其它所有 GET -----
 
@@ -651,8 +766,8 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         if consent_missing(account):
             return page('consent.html', '确认用户协议', next=next_path)
         if full == '/':
-            return home(request.query_params)
+            return home(request.query_params, account)
         if _ITEM_RE.fullmatch(full):
-            return item_page(full[len('/item/'):])
+            return item_page(full[len('/item/'):], account)
         return HTMLResponse('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>页面不存在 · Curiobject</title>'
                             '<p>页面不存在。<a href="/">返回首页</a></p></html>', status_code=404)

@@ -1,39 +1,130 @@
 {% extends "base.html" %}
-{% from "_macros.html" import logout_button %}
+{% from "_macros.html" import site_head, site_foot %}
+{# 单件页（CAP-10，故事 12）。顺序：画廊 → 货号 → 名称 → 卖家原价 → 01 品相 → 02 预估费用 → 03 墨墨点评（有才出现）
+   → 复制货号 → 浏览全部 → 页脚。已售出 / 已移出（隐藏后 90 天内）：去色、状态牌在名称之前、划线价、无复制栏。
+   不跑脚本时：画廊横向滑动、缩略图是页内锚点；上一张/下一张、放大、复制按钮由 guest.js 显示。 #}
+{% macro gallery(it, plate=None) -%}
+{% set n = it.images|length %}
+<div class="gal" data-gallery>
+  {% if plate %}<p class="plate">{{ plate }}</p>{% endif %}
+  {% if n %}
+  <div class="gal-track" data-track>
+    {% for img in it.images %}
+    <figure class="slide" id="g-{{ loop.index }}"><img src="/img/{{ img.name }}" width="{{ img.w }}" height="{{ img.h }}" alt="{{ img.alt }}" decoding="async"{% if not loop.first %} loading="lazy"{% endif %}></figure>
+    {% endfor %}
+  </div>
+  {% if n > 1 %}
+  <button class="gbtn prev" type="button" data-prev hidden>上一张</button>
+  <button class="gbtn next" type="button" data-next hidden>下一张</button>
+  {% endif %}
+  <button class="zm" type="button" data-open-zoom hidden>放大</button>
+  <p class="pg mono" data-page aria-hidden="true">1 / {{ n }}</p>
+  {% else %}
+  <p class="ph-none gal-none">图片未能加载</p>
+  {% endif %}
+</div>
+{% if n > 1 %}
+<ul class="thumbs" aria-label="选择图片">
+  {% for img in it.images %}
+  <li><a class="tb" href="#g-{{ loop.index }}" data-thumb="{{ loop.index0 }}" aria-label="第 {{ loop.index }} 张"{% if loop.first %} aria-current="true"{% endif %}><img src="/img/{{ img.thumb }}" width="{{ img.tw }}" height="{{ img.th }}" alt="" loading="lazy" decoding="async"></a></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{%- endmacro %}
+
 {% block body %}
 <span hidden data-signed-in></span>
-<header class="site-head">
-  <p class="brand-line"><span class="brand">Curiobject</span></p>
-  <nav class="menu" aria-label="菜单">
-    <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
-    {{ logout_button() }}
-  </nav>
-</header>
-<p class="back"><a class="lnk lnk-pad" href="/">浏览全部</a></p>
+{{ site_head(cur, here) }}
 {% if state == 'show' %}
 <article class="obj">
-  {% for img in it.images %}
-  <p class="ph full"><img src="/img/{{ img.name }}" width="{{ img.w }}" height="{{ img.h }}" alt="{{ img.alt }}" decoding="async"{% if not loop.first %} loading="lazy"{% endif %}></p>
-  {% else %}
-  <p class="ph full ph-none">图片未能加载</p>
-  {% endfor %}
+  {{ gallery(it) }}
   <p class="code mono">货号 {{ it.code }}</p>
   <h1 class="h1s"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</h1>
-  <p class="price"><span class="mono big">{{ price_text(it.price_eur) }}</span> <span class="muted">卖家原价</span></p>
+  <p class="price"><span class="mono big">{{ money(it.price_eur, cur) }}</span> <span class="muted">卖家原价</span></p>
+
+  <section class="ns" aria-labelledby="h-cond">
+    <h2 id="h-cond"><span class="ix mono" aria-hidden="true">01</span>品相</h2>
+    {% if it.seller_text %}
+    <div class="said"><p class="said-h">据卖家描述：</p><p class="said-t"{% if it.seller_lang %} lang="{{ it.seller_lang }}"{% endif %}>{{ it.seller_text }}</p></div>
+    {% else %}
+    <p class="muted">卖家未提供描述。</p>
+    {% endif %}
+  </section>
+
+  {# 编号按实际出现的小节连续编（旧快照没有费用档位时整节不出现，点评顺延为 02）。 #}
+  {% set has_fee = it.fee_tier == 'ask' or (it.fee_tier in fee_labels and it.fee_amount is not none) %}
+  {% if has_fee %}
+  <section class="ns" aria-labelledby="h-fee">
+    <h2 id="h-fee"><span class="ix mono" aria-hidden="true">02</span>预估费用</h2>
+    {% if it.fee_tier == 'ask' %}
+    <p class="ask">请咨询</p>
+    <p class="muted">此件尺寸超出常规档位或特别易碎，包装与运输需单独评估，请在微信中联系墨墨。</p>
+    {% else %}
+    <p class="fee"><span class="mono fee-n">{{ money(it.fee_amount, cur, approx=True) }}</span><span class="fee-t">（{{ it.fee_tier }} 档：{{ it.fee_label or fee_labels[it.fee_tier] }}）</span></p>
+    <p class="muted">含收货验货、包装材料、国际运费分摊、国内派送与服务费。</p>
+    {% endif %}
+    <p class="note">不含保险与进口关税。</p>
+  </section>
+  {% endif %}
+
+  {% if it.comment %}
+  <section class="ns" aria-labelledby="h-comment">
+    <h2 id="h-comment"><span class="ix mono" aria-hidden="true">{{ '03' if has_fee else '02' }}</span>墨墨点评</h2>
+    <blockquote class="cq"><p>{{ it.comment }}</p></blockquote>
+    <p class="sig muted">— 墨墨</p>
+  </section>
+  {% endif %}
+
+  <div class="copy-bar" data-copybar data-code="{{ it.code }}">
+    <div class="cb-row">
+      <p class="cb-code"><span class="muted">货号</span><span class="mono cb-n">{{ it.code }}</span></p>
+      <button class="btn btn-primary cb-btn" type="button" data-copy hidden>复制货号</button>
+    </div>
+    <p class="cb-help">回到微信转账给墨墨，在转账备注里写上货号。</p>
+    <p class="im" data-copy-msg hidden></p>
+    <div class="field" data-copy-fallback hidden>
+      <label class="flabel" for="copy-code">货号</label>
+      <input class="ti mono" id="copy-code" type="text" value="{{ it.code }}" readonly>
+    </div>
+  </div>
+  <p class="more-all"><a class="lnk lnk-pad" href="/">浏览全部</a></p>
 </article>
 {% elif state %}
-<div class="head">
+{% set plate = '已售出' if state == 'sold' else '已移出' %}
+<article class="obj sold">
+  {% if it %}
+  {{ gallery(it, plate) }}
   <p class="code mono">货号 {{ code }}</p>
-  <h1 class="h1s">{{ '此件已售出。' if state == 'sold' else '此件已移出。' }}</h1>
-</div>
+  <h1 class="h1s"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</h1>
+  <p class="price"><span class="vh">{{ plate }}，原价</span><s class="mono big">{{ money(it.price_eur, cur) }}</s></p>
+  <p class="gone">{{ '此件已售出。' if state == 'sold' else '此件已移出。' }}</p>
+  {% else %}
+  <div class="head">
+    <p class="plate inline">{{ plate }}</p>
+    <p class="code mono">货号 {{ code }}</p>
+    <h1 class="h1s">{{ '此件已售出。' if state == 'sold' else '此件已移出。' }}</h1>
+  </div>
+  {% endif %}
+</article>
+<p class="more-all"><a class="btn btn-primary" href="/">浏览全部</a></p>
 {% else %}
 <div class="head">
   <h1 class="h1s">此件已不在展出</h1>
 </div>
+<p class="more-all"><a class="btn btn-primary" href="/">浏览全部</a></p>
 {% endif %}
-<p><a class="btn btn-primary" href="/">浏览全部</a></p>
-<footer class="site-foot">
-  <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
-  {{ logout_button() }}
-</footer>
+{% if it and state and it.images %}
+<div class="zl" role="dialog" aria-modal="true" aria-label="放大查看" hidden data-zoom-layer>
+  <div class="zl-top"><span class="mono" data-zpage></span><button class="linkbtn zl-close" type="button" data-zclose>关闭</button></div>
+  <div class="zl-stage" data-zstage><img data-zimg src="data:," alt=""></div>
+  <div class="zl-ctl">
+    <button class="btn btn-sec" type="button" data-zout aria-label="缩小">−</button>
+    <button class="btn btn-sec" type="button" data-zin aria-label="放大">+</button>
+    <button class="btn btn-sec" type="button" data-zreset>复位</button>
+    {% if it.images|length > 1 %}<button class="btn btn-sec" type="button" data-zprev>上一张</button>
+    <button class="btn btn-sec" type="button" data-znext>下一张</button>{% endif %}
+  </div>
+</div>
+{% endif %}
+{{ site_foot() }}
 {% endblock %}

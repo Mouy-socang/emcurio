@@ -161,6 +161,14 @@ def ensure(c):
         applied INTEGER NOT NULL,
         at TEXT NOT NULL);
     ''')
+    # 故事 12（CAP-11、AD-14）：客人自选的显示币种，记在账号下（换设备沿用），改动递增 account_rev。
+    if 'currency' not in {r[1] for r in c.execute('PRAGMA table_info(accounts)')}:
+        try:
+            c.execute("ALTER TABLE accounts ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR' "
+                      "CHECK(currency IN ('EUR','CNY'))")
+        except sqlite3.OperationalError as e:
+            if 'duplicate column' not in str(e):
+                raise
 
 
 def _tx(c):
@@ -345,6 +353,19 @@ def set_status(c, account_id, status, now):
                   (status, iso(now), account_id))
         if status == 'disabled':
             _revoke_all(c, account_id, now)
+
+
+CURRENCIES = ('EUR', 'CNY')
+
+
+def set_currency(c, account_id, currency, now):
+    """客人改显示币种（AD-3 客人侧允许的写操作）。值不变时不写、不递增 account_rev。返回是否改动。"""
+    if currency not in CURRENCIES:
+        raise ValueError('未知币种')
+    with _tx(c):
+        n = c.execute('UPDATE accounts SET currency=?,updated_at=?,account_rev=account_rev+1 '
+                      'WHERE account_id=? AND currency!=?', (currency, iso(now), account_id, currency)).rowcount
+    return n > 0
 
 
 def _revoke_all(c, account_id, now):

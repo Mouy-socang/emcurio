@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .price import prices, money
 from .rules import evaluate, standard_name, kb_fingerprint, kb_status, baseline_score
-from .config import ROOT
+from . import rules
+from .config import ROOT, fees_for
 from . import triage
 from . import sync
 from . import publish
@@ -159,6 +160,9 @@ class Store:
             -- CAP-6 后台拣选：动作请求幂等（同一 request_id 重放返回同一结果）、墨墨点评、图片替代文字。
             CREATE TABLE IF NOT EXISTS triage_requests(request_id TEXT PRIMARY KEY, payload TEXT NOT NULL, result TEXT NOT NULL, at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS comments(item_id TEXT PRIMARY KEY, text TEXT NOT NULL, updated_at TEXT NOT NULL);
+            -- CAP-10：墨墨手动改的预估费用档位（手动优先，AD-2）；删除该行即恢复自动推断。
+            CREATE TABLE IF NOT EXISTS fee_overrides(item_id TEXT PRIMARY KEY,
+                tier TEXT NOT NULL CHECK(tier IN ('A','B','C','D','ask')), updated_at TEXT NOT NULL);
             ''')
             # 替代文字按图片身份（本机图文件名或图片地址）保存，图片增减时不串位；image_index 只作显示参考。
             cols={r[1] for r in c.execute('PRAGMA table_info(alt_texts)')}
@@ -433,8 +437,54 @@ class Store:
             if text.strip():c.execute('INSERT OR REPLACE INTO alt_texts(item_id,image_key,image_index,text,updated_at) VALUES(?,?,?,?,?)',(iid,key,index,text.strip(),now()))
             else:c.execute('DELETE FROM alt_texts WHERE item_id=? AND image_key=?',(iid,key))
         return dict(item_id=iid,index=index,text=text.strip())
-
+    def save_fee(self,iid,tier,request_id,root=ROOT):
+        """CAP-10 手动改档：tier 为 A/B/C/D/ask；None 恢复自动推断。选的正好是推断值时同样清掉手动值（不留"粘住"的手动档）。
+        每次改动记一条人工 fee 事件（triage_events，可追溯、不可撤销）。同一 request_id 重放返回首次结果。
+        返回 dict(item_id, fee=fee_info)。"""
+        if not isinstance(iid,str) or not iid:raise ValueError('商品编号无效')
+        if tier is not None and tier not in FEE_TIERS:raise ValueError('档位无效')
+        if not isinstance(request_id,str) or not 1<=len(request_id)<=100:raise ValueError('请求编号无效')
+        payload=json.dumps(['fee',iid,tier],ensure_ascii=False)
+        fees=fees_for(root)
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            prev=c.execute('SELECT * FROM triage_requests WHERE request_id=?',(request_id,)).fetchone()
+            if prev:
+                if prev['payload']!=payload:raise ValueError('重复请求内容不同')
+                return json.loads(prev['result'])
+            item=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
+            if not item:raise ValueError('商品不存在')
+            before=fee_info(c,item,fees)
+            if tier is None or tier==before['auto']['tier']:c.execute('DELETE FROM fee_overrides WHERE item_id=?',(iid,))
+            else:c.execute('INSERT OR REPLACE INTO fee_overrides(item_id,tier,updated_at) VALUES(?,?,?)',(iid,tier,now()))
+            after=fee_info(c,item,fees)
+            if (before['tier'],before['manual'])!=(after['tier'],after['manual']):
+                note=('%s→%s'%(before['tier'],after['tier']))+('（手动）' if after['manual'] else '（自动）')
+                triage.note_fee(c,iid,note,source='backoffice')
+            result=dict(item_id=iid,fee=after)
+            c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False),now()))
+            return result
 MAX_IMAGES=16
+FEE_TIERS=('A','B','C','D','ask')
+
+def fee_info(c,item,fees=None):
+    """一件货当前生效的预估费用档位：墨墨手动改过的优先（AD-2），否则规则推断（rules.fee_tier）。
+    fees：已读好的 config.fee_tiers（调用方按自己的 root 读一次传进来；缺省读仓库里的）。
+    返回 dict(tier, amount（欧元整数，请咨询为 None）, label, manual, auto={tier, amount, label, reason})。"""
+    fees=fees or fees_for()
+    item=dict(item)
+    auto=rules.fee_tier(item,_std(c,item['item_id']),fees)
+    row=c.execute('SELECT tier FROM fee_overrides WHERE item_id=?',(item['item_id'],)).fetchone()
+    tier=row[0] if row else auto['tier']
+    info=fees['tiers'].get(tier)
+    return dict(tier=tier,amount=info['amount'] if info else None,label=info['label'] if info else '请咨询',
+                manual=row is not None,auto={k:auto[k] for k in ('tier','amount','label','reason')})
+
+def fee_choices(fees=None):
+    """后台 03 费用档位的选项：[{tier, amount, label}]（A–D 与请咨询）。"""
+    fees=fees or fees_for()
+    return [dict(tier=k,amount=v['amount'],label=v['label']) for k,v in fees['tiers'].items()]+[dict(tier='ask',amount=None,label='请咨询')]
+
 PLATFORM_LABELS=dict(ebay='eBay',etsy='Etsy',kleinanzeigen='Kleinanzeigen')
 _DE=re.compile(r'[äöüßÄÖÜ]|\b(und|der|die|das|mit|nicht|keine?|sehr|guter?|zustand|tasse|teller|unterglasur)\b',re.I)
 _EN=re.compile(r'\b(the|and|with|no|not|very|good|condition|cup|saucer|plate|porcelain|chips?|cracks?|please|see|photos?|pattern|marked?)\b',re.I)
@@ -517,4 +567,6 @@ def item_detail(c,iid,root=ROOT):
                title=item['title'],url=url if re.match(r'https?://',url) else '',
                agent_reason=item['agent_reason'] or '',comment=comment[0] if comment else '',
                state=triage.state(c,iid))
+    fees=fees_for(root)
+    out.update(fee=fee_info(c,item,fees),fee_choices=fee_choices(fees))
     return out

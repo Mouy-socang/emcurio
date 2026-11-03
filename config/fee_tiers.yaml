@@ -1,0 +1,36 @@
+# 预估费用档位（CAP-10、FR-21a/21b；规则见 _bmad-output/specs/.../fee-tiers.md）。
+# 本文件只是数据；推断代码只在 curio/judge.py（AD-15），对外入口 curio/rules.fee_tier。
+# 含：收货验货、材料、国际运费分摊、国内派送、服务费；不含保险与进口关税。
+#
+# 档位：amount 为欧元整数；max_cm 为该档允许的最大高度/直径（含）。
+#   A 普通杯碟：杯碟类不写尺寸也判 A；写了尺寸且不超过 max_cm 仍为 A，超过则按尺寸判。
+#   B/C/D 按读到的最大高度/直径：≤30 → B，≤50 → C，≤100 → D，超过 1 米 → 请咨询。
+tiers:
+  A: {amount: 30, label: 普通杯碟, max_cm: 30}
+  B: {amount: 42, label: 30cm 以下花瓶, max_cm: 30}
+  C: {amount: 67, label: 30–50cm, max_cm: 50}
+  D: {amount: 140, label: 50cm–1m, max_cm: 100}
+
+# 器型判断依据（三类各自的）：
+#   function_ids：标准名称的功能 ID（EM 西洋瓷器知识库《功能词表》）——最优先；
+#   words：标题里的词，正则片段，按小写、去变音（ü→u、ß→ss）匹配。德语词左侧允许复合词（Kaffeetasse 命中 tasse），
+#          英语词前加 \b 要求词首（cups 不命中 hiccups，plates 不命中 templates）；
+#   zh_words：标准名称（器型 / 功能中文名与标准名称本身）里的中文，正则片段。
+# 杯碟类与人物瓷偶类的词都出现时（如「Tasse mit Watteau-Figuren」「Teller mit Figuren」），以标题里先出现的为这件货
+# 本身的器型，后面的是装饰描述；标准名称的功能 ID 在杯碟类里时一律按杯碟。
+cups:
+  function_ids: [FN-001, FN-002, FN-003, FN-005, FN-006, FN-007, FN-008, FN-009, FN-010, FN-011, FN-012,
+                 FN-013, FN-039, FN-065, FN-067, FN-087]
+  words: ['tassen?', 'gedecke?', 'teller', 'becher', '\bcups?', '\bsaucers?', '\bplates?']
+  zh_words: ['杯', '碟', '(?<!托)盘']
+
+# 人物瓷偶等难包装的货：上跳一档（D 上跳为请咨询）；读不出尺寸时仍是请咨询。
+hard_to_pack:
+  function_ids: [FN-052]
+  words: ['figur(?:en|ine)?', 'gruppe', 'putt[oi]', 'statuette', 'skulptur', 'buste', '\bfigurines?', '\bstatues?',
+          '\bsculptures?']
+  zh_words: ['塑像', '人物', '瓷偶', '雕像', '群像', '动物']
+
+# 特别易碎（如蕾丝人物）：一律请咨询。标题与描述都看。
+fragile:
+  words: ['spitzenfigur\w*', 'spitzenkleid\w*', 'spitzenrock\w*', '\blace\s+figur\w*', 'kronleuchter', '\bchandeliers?']

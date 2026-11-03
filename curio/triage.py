@@ -123,7 +123,9 @@ def _agent_reason(item):
 
 
 def has_human(c, iid):
-    return c.execute("SELECT 1 FROM triage_events WHERE item_id=? AND actor='human' LIMIT 1", (iid,)).fetchone() is not None
+    # 改费用档位（action 'fee'）只是记录，不算拣选上的人工决定。
+    return c.execute("SELECT 1 FROM triage_events WHERE item_id=? AND actor='human' AND action!='fee' LIMIT 1",
+                     (iid,)).fetchone() is not None
 
 
 def state(c, iid):
@@ -236,6 +238,14 @@ def note_probe(c, iid, reason=None, source=None):
     return _event(c, iid, cur, cur, 'probe', 'human', item, reason, source=source)
 
 
+def note_fee(c, iid, reason, source=None):
+    """墨墨改费用档位（CAP-10）：记一条人工 fee 事件（不改拣选状态、不可撤销），供追溯。"""
+    _begin(c)
+    item = _item(c, iid)
+    cur = _row(c, iid, item)
+    return _event(c, iid, cur, cur, 'fee', 'human', item, reason, source=source)
+
+
 def rescue(c, iid, reason=None, source=None):
     return transition(c, iid, 'rescue', reason, source=source)
 
@@ -250,7 +260,7 @@ def back_to_pool(c, iid, reason=None):
 
 def _later_human(c, ev):
     return c.execute('''SELECT 1 FROM triage_events WHERE item_id=? AND id>? AND actor='human' AND undone_by IS NULL
-        AND action NOT IN ('undo','probe') AND (grp IS NULL OR grp IS NOT ?) LIMIT 1''', (ev['item_id'], ev['id'], ev['grp'])).fetchone()
+        AND action NOT IN ('undo','probe','fee') AND (grp IS NULL OR grp IS NOT ?) LIMIT 1''', (ev['item_id'], ev['id'], ev['grp'])).fetchone()
 
 
 def undo_event(c, ev):

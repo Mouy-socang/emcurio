@@ -15,3 +15,46 @@
 {% macro logout_button(label='退出登录') -%}
 <form method="post" action="/logout"><button class="linkbtn" type="submit">{{ label }}</button></form>
 {%- endmacro %}
+
+{# 页头（首页与单件页共用）：品牌、更新时间、€/¥ 切换（汇率可用时才有）、菜单。 #}
+{% macro site_head(cur, here, updated=None) -%}
+<header class="site-head">
+  <p class="brand-line"><span class="brand">Curiobject</span>{% if updated %} <span class="upd mono">{{ updated }} 更新</span>{% endif %}</p>
+  {% if cur.available %}{{ currency_switch(cur, here) }}{% endif %}
+  <nav class="menu" aria-label="菜单">
+    <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
+    {{ logout_button() }}
+  </nav>
+</header>
+{% if cur.available %}<p class="fxnote" data-cny-note{% if cur.code != 'CNY' %} hidden{% endif %}>按当日汇率，以欧元为准</p>
+{% elif cur.fallback %}<p class="fxnote">汇率暂不可用，暂以欧元显示</p>
+{% endif %}
+{%- endmacro %}
+
+{# 币种切换（CAP-11）：单选组"欧元 / 人民币"；不跑脚本时两颗按钮就是表单提交，选择存进账号。 #}
+{% macro currency_switch(cur, here) -%}
+{% if cur.local %}
+{# 预览：只在页面内换算，不提交到任何地方（无表单、无 action）。 #}
+<div class="cur" data-currency data-local data-fx="{{ cur.rate }}">
+  <div class="cur-g" role="radiogroup" aria-label="欧元 / 人民币">
+    <button class="cur-o mono" type="button" value="EUR" role="radio" aria-label="欧元" aria-checked="{{ 'true' if cur.code == 'EUR' else 'false' }}">€</button>
+    <button class="cur-o mono" type="button" value="CNY" role="radio" aria-label="人民币" aria-checked="{{ 'true' if cur.code == 'CNY' else 'false' }}">¥</button>
+  </div>
+</div>
+{% else %}
+<form class="cur" method="post" action="/currency" data-currency data-fx="{{ cur.rate }}">
+  <input type="hidden" name="next" value="{{ here }}">
+  <div class="cur-g" role="radiogroup" aria-label="欧元 / 人民币">
+    <button class="cur-o mono" type="submit" name="currency" value="EUR" role="radio" aria-label="欧元" aria-checked="{{ 'true' if cur.code == 'EUR' else 'false' }}">€</button>
+    <button class="cur-o mono" type="submit" name="currency" value="CNY" role="radio" aria-label="人民币" aria-checked="{{ 'true' if cur.code == 'CNY' else 'false' }}">¥</button>
+  </div>
+</form>
+{% endif %}
+{%- endmacro %}
+
+{% macro site_foot() -%}
+<footer class="site-foot">
+  <a class="lnk lnk-pad" href="/legal">用户协议与隐私说明</a>
+  {{ logout_button() }}
+</footer>
+{%- endmacro %}

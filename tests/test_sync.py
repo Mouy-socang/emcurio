@@ -212,7 +212,14 @@ def test_enqueue_is_part_of_caller_transaction(store):
 
 def test_validator_refuses_unsupported_keywords():
     with pytest.raises(sync.ContractError):
-        sync.validate(1, {'type': 'integer', 'minimum': 0})
+        sync.validate(1, {'type': 'integer', 'exclusiveMinimum': 0})
+    # 故事 12 起支持 minimum / maximum / dependentRequired
+    assert sync.validate(-1, {'type': 'integer', 'minimum': 0}) and not sync.validate(0, {'minimum': 0, 'maximum': 0})
+    dep = {'type': 'object', 'dependentRequired': {'a': ['b']}}
+    assert sync.validate({'a': 1}, dep) and not sync.validate({'a': 1, 'b': 2}, dep) and not sync.validate({}, dep)
+    for bad in ({'minimum': '0'}, {'dependentRequired': {'a': 'b'}}):
+        with pytest.raises(sync.ContractError):
+            sync.validate(1, bad)
     assert sync.validate(True, {'const': 1}) and not sync.validate(1, {'const': 1})
     assert sync.validate(1, {'type': 'boolean'}) and sync.validate(True, {'type': 'integer'})
 
@@ -220,7 +227,7 @@ def test_validator_refuses_unsupported_keywords():
 @pytest.mark.parametrize('schema', [
     {'type': ['string', 'null']},
     {'type': 'date'},
-    {'properties': {'a': {'minimum': 1}}},                # 实例里没有 a 也要报
+    {'properties': {'a': {'exclusiveMinimum': 1}}},       # 实例里没有 a 也要报
     {'additionalProperties': {'format': 'uuid'}},
     {'additionalProperties': 'no'},
     {'pattern': '('},
@@ -531,10 +538,11 @@ def test_collection_round_calls_sync_after_ai(tmp_path):
          patch('curio.schedule.Scheduler.mark_check_started'), \
          patch.object(curio_monitor, 'check_existing', return_value={}), \
          patch('curio.ai.run', side_effect=lambda *a, **k: calls.append('ai') or {'ai_status': 'disabled'}), \
+         patch('curio.fx.run', side_effect=lambda *a, **k: calls.append('fx') or {'fx_status': 'fresh'}), \
          patch('curio.sync.run', side_effect=lambda *a, **k: calls.append('sync') or {'sync_status': 'ok'}), \
          patch('curio.store.Store.archive', side_effect=lambda *a: calls.append('archive')):
         result = curio_monitor.run(tmp_path)
-    assert calls == ['ai', 'sync', 'archive'] and result['sync_status'] == 'ok'
+    assert calls == ['ai', 'fx', 'sync', 'archive'] and result['sync_status'] == 'ok' and result['fx_status'] == 'fresh'
 
 
 # ---------- 本机真服务器端到端 ----------

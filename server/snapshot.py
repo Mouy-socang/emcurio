@@ -7,6 +7,7 @@
   只保留最近 3 份快照（当前 + 之前两次）引用的图与 1 天内新传的图，其余在新快照生效后清理。
 - 客人页读取：current_view() 给出当前快照减去隐藏集合后的榜、商品池与筛选数据（解析结果按 publish_no 缓存）。
 """
+import datetime
 import hashlib
 import json
 import math
@@ -25,6 +26,9 @@ FRESH_IMAGE_SECONDS = 86400
 MAX_IMAGE = 8_000_000
 BANDS = (('lt200', '€200 以下'), ('200-500', '€200–500'), ('500-1000', '€500–1000'), ('gte1000', '€1000 以上'))
 BRAND_ORDER = ('Meissen', 'KPM Berlin')
+FEE_TIERS = ('A', 'B', 'C', 'D')
+MAX_FEE = 10000
+TOMBSTONE_DAYS = 90                 # AD-29：隐藏后单件页保留 90 天
 
 
 class BadSnapshot(ValueError):
@@ -91,10 +95,31 @@ def check_snapshot(payload):
     for t in payload['tombstones']:
         if not TS_RE.fullmatch(t['at']):
             raise BadSnapshot('墓碑时间格式不对')
+    # 汇率与汇率日期同时出现（AD-14）。
+    rate, date = payload.get('fx_rate'), payload.get('fx_date')
+    if (rate is None) != (date is None):
+        raise BadSnapshot('汇率与汇率日期须同时提供')
+    if rate is not None:
+        if not (isinstance(rate, (int, float)) and math.isfinite(rate) and 1 <= rate <= 50):
+            raise BadSnapshot('汇率无效')
+        try:
+            datetime.date.fromisoformat(date)
+        except ValueError:
+            raise BadSnapshot('汇率日期无效') from None
     for item in payload['items']:
         price = item['price_eur']
         if not (isinstance(price, (int, float)) and math.isfinite(price) and price >= 0):
             raise BadSnapshot('价格无效')
+        # 故事 12：A–D 档必带欧元整数金额，请咨询不带金额；旧快照可以没有档位。
+        tier, amount = item.get('fee_tier'), item.get('fee_amount')
+        if tier is None and amount is not None:
+            raise BadSnapshot('有费用金额却没有档位')
+        if tier is None and 'fee_label' in item:
+            raise BadSnapshot('有费用金额却没有档位')
+        if tier == 'ask' and (amount is not None or 'fee_label' in item):
+            raise BadSnapshot('请咨询的货不应带费用金额')
+        if tier in FEE_TIERS and not (type(amount) is int and 0 <= amount <= MAX_FEE):
+            raise BadSnapshot('费用金额无效')
         for img in item['images']:
             if not (IMAGE_RE.fullmatch(img['name']) and IMAGE_RE.fullmatch(img['thumb'])):
                 raise BadSnapshot('图片名格式不对')
@@ -209,31 +234,51 @@ _lock = threading.Lock()
 class View:
     """当前快照减去隐藏集合。"""
 
-    def __init__(self, publish_no, received_at, payload, hidden):
+    def __init__(self, publish_no, received_at, payload, hidden, hidden_at=None):
         self.publish_no = publish_no
         self.received_at = received_at
         self.items = {it['code']: it for it in payload['items']} if payload else {}
         self.hidden = hidden                         # code -> reason
+        self.hidden_at = hidden_at or {}             # code -> 隐藏时间（UTC 文字）
         self.tombstones = {t['code']: t for t in payload['tombstones']} if payload else {}
         self.rank = [self.items[c] for c in (payload['rank'] if payload else []) if c not in hidden]
         self.pool = [self.items[c] for c in (payload['pool'] if payload else []) if c not in hidden]
+        self.fx_rate = payload.get('fx_rate') if payload else None
+        self.fx_date = payload.get('fx_date') if payload else None
 
-    def item_state(self, code):
-        """'show' / 'sold' / 'removed' / None（不在快照里）。"""
+    def item_state(self, code, now=None):
+        """'show' / 'sold' / 'removed' / None（不在快照里，或隐藏、离开已超过 90 天）。now：Unix 秒，None 时不判保留期。"""
         if code in self.items:
-            return self.hidden[code] or 'removed' if code in self.hidden else 'show'
+            if code not in self.hidden:
+                return 'show'
+            if _expired(self.hidden_at.get(code), now):
+                return None
+            return self.hidden[code] or 'removed'
         if code in self.tombstones:
-            return self.tombstones[code]['status']
+            t = self.tombstones[code]
+            return None if _expired(t['at'], now) else t['status']
         return None
+
+
+def _expired(at, now):
+    if now is None or not at:
+        return False
+    try:
+        t = datetime.datetime.fromisoformat(at.replace('Z', '+00:00')).timestamp()
+    except (AttributeError, ValueError):
+        return False
+    return now - t > TOMBSTONE_DAYS * 86400
 
 
 def current_view(c, db_key=''):
     """db_key：库的标识（路径），解析缓存按 (库, 编号, 接收时间) 区分。"""
     row = c.execute('SELECT publish_no, payload, received_at FROM snapshots ORDER BY publish_no DESC LIMIT 1'
                     ).fetchone()
-    hidden = {r[0]: r[1] for r in c.execute('SELECT code, reason FROM hides WHERE hidden=1')}
+    hides = c.execute('SELECT code, reason, at FROM hides WHERE hidden=1').fetchall()
+    hidden = {r[0]: r[1] for r in hides}
+    hidden_at = {r[0]: r[2] for r in hides}
     if row is None:
-        return View(0, None, None, hidden)
+        return View(0, None, None, hidden, hidden_at)
     no = row[0]
     key = (str(db_key), no, row[2])
     with _lock:
@@ -243,7 +288,7 @@ def current_view(c, db_key=''):
             if len(_cache) > 8:
                 _cache.clear()
             _cache[key] = payload
-    return View(no, row[2], payload, hidden)
+    return View(no, row[2], payload, hidden, hidden_at)
 
 
 def filter_options(pool):

@@ -14,6 +14,7 @@ Mac 生成的候选快照（隐藏集合为空），页内地址加上前缀（�
 import json
 import re
 import sys
+import time
 from urllib.parse import parse_qs
 
 import guest
@@ -38,14 +39,16 @@ def render(payload, path, query='', received_at=None, prefix='/preview'):
     env = guest.make_env()
     view = snapshot.View(payload.get('publish_no', 0), received_at, payload, {})
     params = {k: v[0] for k, v in parse_qs(query or '', keep_blank_values=True).items()}
+    # 预览按未关联客人的默认（欧元）显示；币种切换只在页面内换算、不保存（无账号）。
+    cur = guest.currency_ctx('EUR', view, time.time(), local=True)
     if path == '/api/pool':
-        body = guest.pool_batch(env, view, params)
+        body = guest.pool_batch(env, view, params, cur)
         body['html'] = prefix_urls(body['html'], prefix)
         return {'status': 200, 'type': 'json', 'body': body}
     if path == '/':
-        status, html = guest.home_page(env, view, params)
+        status, html = guest.home_page(env, view, params, cur)
     elif ITEM_RE.fullmatch(path):
-        status, html = guest.item_view_page(env, view, path[len('/item/'):])
+        status, html = guest.item_view_page(env, view, path[len('/item/'):], cur)
     elif path == '/legal':
         version, terms_html = guest.load_terms(guest.DEFAULT_TERMS)
         status, html = guest.render_page(env, 'legal.html', '用户协议与隐私说明', version=version, html=terms_html,

@@ -230,7 +230,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
                     if url.path=='/api/triage':return self.reply(200,store.triage_state(num('limit',50),num('offset',0)))
                     if url.path=='/api/triage/auto-removed':return self.reply(200,store.auto_removed_list(num('limit',50),num('offset',0)))
                     if url.path=='/api/triage/item':
-                        iid=q.get('id',[''])[0];d=store.item_detail(iid)
+                        iid=q.get('id',[''])[0];d=store.item_detail(iid,root)
                         d['rank_reason']=ranking.detail_rank_reason(store,iid)      # 能否加入榜（榜满由界面判断）
                         return self.reply(200,d)
                 except ValueError as e:return self.reply(400,{'error':str(e) or '参数无效'})
@@ -264,7 +264,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
             hosts={h.lower() for h in (self.headers.get('Host'),self._forwarded_host()) if h}
             if self.headers.get('X-Curio-Token')!=token or (origin and urlparse(origin).netloc.lower() not in hosts):
                 return self.reply(403,{'error':'请刷新本机审核页后重试'})
-            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/recheck','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
+            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<=150000:raise ValueError('请求过大或为空')
@@ -287,6 +287,9 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
                     result=store.save_comment(data['item_id'],data['text']);drop_preview();return self.reply(200,result)
                 if self.path=='/api/triage/alt':
                     result=store.save_alt(data['item_id'],data['index'],data['text']);drop_preview();return self.reply(200,result)
+                if self.path=='/api/triage/fee':
+                    # CAP-10：手动改费用档位（tier 为 null 即恢复自动）；改档后预览作废、榜显示有未发布的修改。
+                    result=store.save_fee(data['item_id'],data['tier'],data['request_id'],root);drop_preview();return self.reply(200,result)
                 if self.path=='/api/triage/recheck':
                     from . import curio_monitor
                     if not isinstance(data['item_id'],str):raise ValueError('商品编号无效')

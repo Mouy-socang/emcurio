@@ -426,7 +426,7 @@ def _cut(value, limit):
     return value[:limit] if isinstance(value, str) else value
 
 
-def _item_payload(c, item, root, out_dir, attempted):
+def _item_payload(c, item, root, out_dir, attempted, fees=None):
     from .store import item_images
     iid = item['item_id']
     std = c.execute('SELECT * FROM std_names WHERE item_id=?', (iid,)).fetchone()
@@ -475,7 +475,51 @@ def _item_payload(c, item, root, out_dir, attempted):
     comment = c.execute('SELECT text FROM comments WHERE item_id=?', (iid,)).fetchone()
     if comment and comment[0].strip():
         out['comment'] = comment[0][:5000]
+    # CAP-10：预估费用档位、金额与档位名称（手动改档优先；请咨询时不带金额与名称）。推断理由不上线。
+    fee = fee_info(c, item, fees)
+    out['fee_tier'] = fee['tier']
+    if fee['amount'] is not None:
+        out['fee_amount'] = int(fee['amount'])
+        out['fee_label'] = _cut(fee['label'], 60)
     return out
+
+
+def fee_info(c, item, fees=None):
+    from .store import fee_info as info
+    return info(c, item, fees)
+
+
+def _fees(root):
+    from .config import fees_for
+    return fees_for(root)
+
+
+FEE_TIERS = ('A', 'B', 'C', 'D')
+
+
+def check_fees(payload):
+    """快照里费用与汇率字段的一致性（Schema 表达不了的部分，服务器 snapshot.check_snapshot 同样核对）：
+    A–D 必带 0–10000 的整数金额；ask 不带金额与名称；有金额必有档位；汇率与日期同时出现、汇率 1–50。不合抛 PublishError。"""
+    for it in payload['items']:
+        tier, amount = it.get('fee_tier'), it.get('fee_amount')
+        if tier is None and (amount is not None or 'fee_label' in it):
+            raise PublishError(f'{it["code"]} 有费用金额却没有档位')
+        if tier == 'ask' and (amount is not None or 'fee_label' in it):
+            raise PublishError(f'{it["code"]} 请咨询的货不应带费用金额')
+        if tier in FEE_TIERS and not (type(amount) is int and 0 <= amount <= 10000):
+            raise PublishError(f'{it["code"]} 费用金额无效')
+    rate, date = payload.get('fx_rate'), payload.get('fx_date')
+    if (rate is None) != (date is None):
+        raise PublishError('汇率与汇率日期须同时提供')
+    if rate is not None and not (isinstance(rate, (int, float)) and 1 <= rate <= 50):
+        raise PublishError('汇率超出合理范围')
+
+
+def fx_fields(c):
+    """AD-14：快照里的人民币参考汇率与日期（kv 里最近一次成功取到的）；从未取到时为空 dict。"""
+    from . import fx
+    got = fx.current(c)
+    return {'fx_rate': got[0], 'fx_date': got[1]} if got else {}
 
 
 def _iso(ts):
@@ -521,18 +565,24 @@ def content_fingerprint(rank_, pool, items):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-def status_fingerprint(c):
-    """"有未发布的修改"用的轻量指纹（不转码图片）：榜、入选的货号（含顺序）、欧元价、点评与替代文字原文。"""
-    rows = c.execute("""SELECT e.code, e.listed_price,
+def status_fingerprint(c, fees=None):
+    """"有未发布的修改"用的轻量指纹（不转码图片）：榜、入选的货号（含顺序）、欧元价、点评与替代文字原文、
+    生效的预估费用档位（故事 12：手动改档或推断变化都算修改）。汇率不算（每天会变，不该让榜显示有修改）。"""
+    fees = fees or _fees(ROOT)
+    rows = c.execute("""SELECT e.*,
         (SELECT text FROM comments m WHERE m.item_id=e.item_id) comment,
         (SELECT json_group_array(json_array(a.image_key, a.text)) FROM
             (SELECT image_key, text FROM alt_texts WHERE item_id=e.item_id ORDER BY image_key) a) alts
         FROM (""" + ELIGIBLE_SQL + """) e""").fetchall()
-    data = {'rank': rank(c), 'pool': [list(r) for r in rows]}
+    pool = []
+    for r in rows:
+        fee = fee_info(c, r, fees)
+        pool.append([r['code'], r['listed_price'], r['comment'], r['alts'], fee['tier'], fee['amount'], fee['label']])
+    data = {'rank': rank(c), 'pool': pool}
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
 
 
-def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=None):
+def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=None, fees=None):
     """在调用方的写事务里生成完整快照、分配发布编号并入发件箱（记为待送达）。返回摘要。
     expect_fingerprint：预览时的 content_fingerprint；内容已不同则抛 PublishStale（不分配编号、不入队）。"""
     assert c.in_transaction, '快照必须在写事务内生成'
@@ -540,14 +590,16 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=
     items = eligible(c)
     codes = [it['code'] for it in items]
     ranked = check_rank(c)
-    payload_items = [_item_payload(c, it, root, out_dir, attempted) for it in items]
+    fees = fees or _fees(root)
+    payload_items = [_item_payload(c, it, root, out_dir, attempted, fees) for it in items]
     if expect_fingerprint is not None and content_fingerprint(ranked, codes, payload_items) != expect_fingerprint:
         raise PublishStale('内容在预览后有变化，请重新预览')
     at = _iso(now)
     tombstones = _tombstones(c, set(codes), now)
     publish_no = sync.next_publish_seq(c)
     payload = {'schema_version': 1, 'publish_no': publish_no, 'hide_watermark': publish_no,
-               'rank': ranked, 'pool': codes, 'items': payload_items, 'tombstones': tombstones}
+               'rank': ranked, 'pool': codes, 'items': payload_items, 'tombstones': tombstones, **fx_fields(c)}
+    check_fees(payload)
     event_id = sync.enqueue(c, 'snapshot', payload)
     # 待送达快照里的货也算"可能在客人页上"：之后的下架、去掉照样推隐藏。
     c.executemany('INSERT OR IGNORE INTO published(code,item_id,publish_no,changed_at) VALUES(?,?,?,?)',
@@ -559,7 +611,7 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=
     c.execute('INSERT INTO publishes(publish_no,event_id,created_at,rank,pool_size,tombstones,images,status,tomb_json,'
               "status_fp) VALUES(?,?,?,?,?,?,?,'pending',?,?)",
               (publish_no, event_id, at, json.dumps(ranked), len(codes), len(tombstones), images,
-               json.dumps(tombstones, ensure_ascii=False), status_fingerprint(c)))
+               json.dumps(tombstones, ensure_ascii=False), status_fingerprint(c, fees)))
     return dict(publish_no=publish_no, event_id=event_id, rank=len(ranked), pool=len(codes),
                 tombstones=len(tombstones), images=images, no_images=no_images, published_at=at)
 
@@ -620,9 +672,12 @@ def candidate(store, root=ROOT, fetch=None, sips='sips'):
     with store.connect() as c:
         ranked = check_rank(c)
         items = eligible(c)
-        payload_items = [_item_payload(c, it, root, sync.image_dir(store), attempted) for it in items]
+        fees = _fees(root)
+        payload_items = [_item_payload(c, it, root, sync.image_dir(store), attempted, fees) for it in items]
+        fx = fx_fields(c)
     payload = {'schema_version': 1, 'publish_no': 0, 'hide_watermark': 0, 'rank': ranked,
-               'pool': [it['code'] for it in items], 'items': payload_items, 'tombstones': []}
+               'pool': [it['code'] for it in items], 'items': payload_items, 'tombstones': [], **fx}
+    check_fees(payload)
     return payload, failures
 
 
