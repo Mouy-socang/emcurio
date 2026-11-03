@@ -52,12 +52,12 @@ uv run python -m curio.review
 - 「撤销上一步」无时限、可连续多步（`triage.undo`，撤最近一次人工事件；货号保留不复用）。
 - 「已自动移出 N 件 · 查看」：列表附理由与移出时间，「捞回」后该件回到新货队首。
 - 点图进入货详情：货号（已留下才有）、名称与标签（外画、仅后台 · Kleinanzeigen）、图库与放大层（图片取 `product_snapshots` 已下载的图，否则 `items.image`）、卖家原文（照录、标 `lang`）、来源与判断、费用档位（故事 12，可改，见下文"单件页、预估费用与币种"）、墨墨点评（表 `comments`）、图片替代文字（表 `alt_texts`，默认「标准名称 · 第 N 张 / 共 M 张」），点评与替代文字失焦自动保存。
-- 「复查」按平台即时确认这一件是否在售（`curio_monitor.recheck_item`，与批量在售检查共用单件判定，计入当日在售检查预算，写 `status_check_events`，下架即 `items.status='gone'`）；预算用完、平台暂停或查询失败时显示「暂时无法确认，请稍后再试」。
+- 「复查」按平台即时确认这一件是否在售（`curio_monitor.recheck_item`，与批量在售检查共用单件判定，计入当日在售检查预算，写 `status_check_events`，下架即 `items.status='gone'`；已发布的货同一事务入队隐藏，后台随即在后台线程触发一次限时 `sync.flush`，失败的下一轮采集重试）；预算用完、平台暂停或查询失败时显示「暂时无法确认，请稍后再试」。
 - 接口：`GET /api/triage`、`/api/triage/auto-removed`、`/api/triage/item?id=`；`POST /api/triage/action`（keep / remove / rescue / undo）、`/api/triage/comment`、`/api/triage/alt`、`/api/triage/fee`、`/api/triage/recheck`。
 
 ### 后台 02 商品池、03 榜、预览与发布（CAP-7，故事 11；AD-5、AD-22、AD-28）
 
-- **02 商品池**（`/#pool`，计数 = 已留下件数）：拣选状态"留下"的货，按分数高到低；每件显示货号、名称与标签、欧元价、来源平台、在售 / 已下架、在榜第几名。「加入榜」（榜满 10 件或 Kleinanzeigen、已下架、没有欧元标价的货为 `aria-disabled` 并写明原因）/「移出榜」、「移出商品池」（经 `triage.out_of_pool`：已发布的货同一事务入队隐藏；在榜的同时移出榜）；下方「已移出商品池」可「放回商品池」（入队取消隐藏，不自动回榜）。点卡片打开货详情（主按钮为"加入榜 / 移出榜"）。
+- **02 商品池**（`/#pool`，计数 = 已留下件数）：拣选状态"留下"的货，按分数高到低；每件显示货号、名称与标签、欧元价、来源平台、在售 / 已下架、在榜第几名。「加入榜」（榜满 10 件或 Kleinanzeigen、已下架、没有欧元标价的货为 `aria-disabled` 并写明原因）/「移出榜」、「移出商品池」（经 `triage.out_of_pool`：已发布的货同一事务入队隐藏；在榜的同时移出榜）；「标记售出」（需确认：先展开确认行，再点「确认标记售出」；经 `triage.mark_sold`：带售出标记的移出商品池，事件 reason 记"售出"，已发布的货同一事务入队隐藏、原因 sold，客人单件页墓碑"已售出"；在榜的同时移出榜；货详情里留下的货同样有此按钮）。移出、标记售出入队隐藏后，后台立即触发一次限时发送。下方「已移出商品池」可「放回商品池」（入队取消隐藏，不自动回榜）；标记售出的那件显示"已售出"，按钮为「撤销售出」（撤销该次标记售出、回到留下、入队取消隐藏）。点卡片打开货详情（主按钮为"加入榜 / 移出榜"）。
 - **03 榜**（`/#rank`，计数 `N / 10`）：行 = 名次、缩略图、名称、货号与价格、右侧拖动把手 ≡。只在把手上长按（约 0.35 秒）后拖动，触摸与鼠标一致；把手获得焦点时 ↑/↓ 也能移动。点行其它区域选中并展开「上移 / 下移 / 移出榜 / 查看详情」。播报"已拿起，第 N 名""已放到第 N 名"。每次改动立即保存（`publish.set_rank`，表 `publish_rank`；已在榜上、之后下架或不再合格的货允许原样留着以便先排序再补位），失败时保留当前排序并显示"排序未保存 · 重试"。下架或不再合格的行去色、标"已下架"，并提示移出补位。
 - **预览**：榜不足 10 件、排序尚未保存、或榜里有不能发布的货时「预览」为 `aria-disabled` 并写明原因。点「预览」→ Mac 用 `publish.candidate` 生成候选快照（与发布同样的入选、榜校验、字段白名单与图片：本机转码，必要时先转码；**不分配编号、不写发件箱、不改发布记录、不取发布锁**），存在后台进程内存里，再打开 `/preview/`。页面由 `server/preview.py` 用客人页同一份 `server/templates` 与 `guest.py` 里同一组渲染函数渲染（Mac 端不装 Jinja2：经 `server/.venv/bin/python server/preview.py` 子进程，标准输入 JSON → 标准输出 JSON），页内地址加 `/preview` 前缀，由后台路由提供：`/preview/`、`/preview/item/CO-…`、`/preview/legal`、`/preview/api/pool`（续载）、`/preview/img/<哈希>.jpg`（只限本次候选快照引用的本机转码图）、`/preview/static/…`（同一份 guest.css / guest.js，续载地址换成预览路由）。响应带与客人页相同的 CSP（只许本机资源），不连服务器、不记录任何行为；"退出登录"在预览里只回到预览首页。同一份预览的页面渲染一次后缓存。改排序、移出 / 放回商品池、改点评或替代文字、在 01 留下 / 去掉 / 捞回 / 撤销、以及发布，都会让预览作废（显示"预览已失效"）；生成途中被作废的预览不保存。同一时刻只生成一个预览。有货没有可用图片时，先列出这些货号，再由墨墨点"继续预览"。需先在 `server/` 下 `uv sync`。
 - **发布**：只从预览顶部横条（反色）的「发布」发起：`POST /api/rank/publish` 带预览所见的榜与 `request_id`；须有当前预览且榜未变；后台在调用前即作废该预览，然后调用故事 10 的 `publish.publish`（发布锁、转码、入发件箱）：在发布锁内、入队的同一事务里再核对榜与内容指纹（候选快照的榜、商品池与全部字段的哈希，不含编号与时间），不同则拒绝"内容在预览后有变化，请重新预览"；`request_id` 的结果与快照在同一事务里记下，同一 `request_id` 的重试（含第一次还在进行时）只返回第一次的结果。入队后在后台线程触发一次 `sync.flush`。成功回到 03，显示"已发布 · HH:MM"（最近一次入队的发布时间）；发布时记下内容指纹（榜、入选货号与顺序、欧元价、点评与替代文字，表 `publishes.status_fp`）；当前指纹与之不同即显示"已发布 · HH:MM · 有未发布的修改"（改回原样则消失）。失败（另一个发布进行中、排序已变等）在横条下显示"未发布（原因） · 重试"，排序不动。
@@ -70,14 +70,17 @@ uv run python -m curio.review
 launchd 每 5 分钟唤醒一次 `curio.curio_monitor`，由 `curio/schedule.py` 按 kv 里的状态决定本轮做什么：
 
 - **新货抓取**：基础间隔初始 30 分钟；每轮抓完按三平台合计新货调整——≥10 件减半、0 件 ×1.5、其余不变，夹在 5–60 分钟。柏林时间 01:00–06:59 实际间隔再 ×2（仍不超过 60）。唤醒时刻允许 30 秒抖动。
+- **已发布货下架检查**（`check_published`，故事 13，CAP-2、AD-10）：独立节拍，每 15 分钟最多一轮，每次唤醒都判断是否到期（不受新货抓取间隔影响）。只查当前可能在客人页上的货（表 `published` 中已送达 + 待送达快照里、未隐藏、仍在售的 eBay / Etsy 货；Kleinanzeigen 不上线、不查），最久没查的在前。计入当天**在售检查**预算（`purpose=check`），在新货抓取与普通在售检查之前占用、不受每轮份额限制（优先级：复查 > 已发布货检查 > 新货 > 普通在售检查）。单件判定复用 `_check_one` / Etsy 批量判定：判下架即 `mark_gone`，同一事务入发件箱隐藏，本轮末尾的同步就把它发出去。某平台本轮全部判定完成（预算未耗尽、无请求失败、没有 Etsy 未返回的货、未超 240 秒——Etsy 每批之前也检查时限）才记该平台"最近成功时间"（kv `published_check_ok_at:<平台>`，UTC 带 Z）——这就是心跳；没有已发布货的平台视为"无需检查"、同样记为成功（这种轮次不算有工作，不写 `collection_runs`）。结果写 `published_check`：`items`、`attempted`、`active`、`gone`、`errors`、`unknown`、`paused`、`budget_skipped` 与 `platforms.<平台>`（`items`、`ok`、`status`：ok / nothing_published / unavailable / budget_exhausted / error / timeout）。
+- **已发布货检查间隔（如实）：** 调度器只在 launchd 唤醒时判断，所以实际间隔 = 15 分钟向上取整到唤醒间隔。`scripts/install_hourly.py` 自故事 2 起就写的是每 300 秒唤醒（→ 15 分钟），本故事没有改它；但本机现装的任务仍是旧的 `StartInterval` 1800（**→ 实际 30 分钟一轮**），待墨墨授权后重装（`uv run python scripts/install_hourly.py`）。每轮结果里的 `published_check_interval_min`（以及 `launchd_interval_min`，读本机 `~/Library/LaunchAgents/com.curiobject.collect.plist`；读不出时按设计值 300 秒计算）显示当前真实值。
+- **已发布货检查容量：** 每天预计调用数 = 每轮请求数（eBay 每件一次，Etsy 每 100 件一次）× 每天轮数（1440 ÷ 实际间隔）。超过该平台在售检查保底份额（每日预算 − 新货 60% 份额，默认 eBay 1800）时，当轮结果写 `published_check_warning`（中文说明），日志每天记一次（kv `published_capacity_warned`）。例：间隔 15 分钟（每天 96 轮）时 eBay 已发布超过 18 件即超出默认份额，部分轮次会因预算用完不算成功，客人页可能出现状态未更新提示——需调高 `api_budget` 或减少已发布件数。
 - **在售检查**（`check_existing`）：独立节拍，每 30 分钟最多一轮，每轮最多 `status_check_limit` 件，在还有检查预算的平台间平分；每平台本轮份额再不超过「剩余检查预算 ÷ 到柏林午夜还剩的检查轮数」（至少 1），让检查份额撑满一整天。Etsy 按 100 个编号一批查。预算中途用完而没发出的检查不写检查记录、不算错误，计入 `budget_skipped`。
 - 新货抓取后只有至少一个平台状态为 ok 时才调整间隔；全部出错、暂停或预算用完时间隔保持不变。
-- 两者都没到期时本轮直接结束（输出 `{"status":"idle",...}`），不写 `collection_runs`。同一时间只有一轮（kv 锁）。
+- 三者都没到期时本轮不采集（输出 `{"status":"idle",...}`）、不写 `collection_runs`，但仍做一次同步：flush 发件箱 + 发心跳（AD-10）。同一时间只有一轮（kv 锁）。
 - **每日预算** `config/settings.yaml` 的 `api_budget`（默认 eBay 4500、Etsy 4500、Kleinanzeigen 1500）：每个外部 HTTP 请求（含 eBay OAuth——令牌缓存在 `data/ebay_oauth.json`（gitignore，权限 0600，不进数据库），到期前 60 秒内复用，遇 401 换一次令牌重试，不是每次唤醒都换；Etsy 换 key 写法与 429 重试、Kleinanzeigen 每次 curl）发出前计数，按柏林日期归零，计数存 kv `api_usage`。新货抓取最多用 60%，在售检查保底 40%。某平台用完当天跳过，结果写 `<平台>_status: budget_exhausted`（在售检查写入 `status_check_summary.budget_exhausted`）。
-- 每轮结果（`collection_runs.result` 与 kv `last_collection_result`）含：`fetch_ran` / `status_check_ran`、`ebay_status` / `kleinanzeigen_status` / `etsy_status`（ok、error、paused、page_limit、budget_exhausted、disabled、not_due）、各平台 `*_new` 与 `new_total`、`api_usage`（当日各平台已用、上限、新货份额）、`fetch_interval_min`、`fetch_base_interval_min`、`night_mode`、`next_fetch_at`。另有：
+- 每轮结果（`collection_runs.result` 与 kv `last_collection_result`）含：`fetch_ran` / `published_check_ran` / `status_check_ran`、`published_check`、`published_check_interval_min`、`ebay_status` / `kleinanzeigen_status` / `etsy_status`（ok、error、paused、page_limit、budget_exhausted、disabled、not_due）、各平台 `*_new` 与 `new_total`、`api_usage`（当日各平台已用、上限、新货份额）、`fetch_interval_min`、`fetch_base_interval_min`、`night_mode`、`next_fetch_at`。另有：
   - 文字说明 `ebay`、`etsy`（出错原因）与 `kleinanzeigen_error`；只做在售检查的轮次 eBay 缺凭据时 `ebay_status` 为 error。
   - `status_check_summary`：`attempted`、`active`、`gone`、`errors`、`paused`、`unknown`（Etsy 未返回该货或无 state，保持原状态）、`budget_skipped`、`budget_exhausted`、`etsy_error`、`remaining_active`；整轮检查失败时写 `status_checks`。
-  - `collection_runs.status`：三平台状态都是 ok / disabled / not_due、且在售检查没有 errors 与 `etsy_error` 时为 ok，否则 partial。
+  - `collection_runs.status`：三平台状态都是 ok / disabled / not_due、且已发布货检查与在售检查都没有 errors（在售检查也没有 `etsy_error`）时为 ok，否则 partial。
 
 ```sh
 sqlite3 data/curio.db "SELECT result FROM collection_runs ORDER BY id DESC LIMIT 1"
@@ -108,7 +111,7 @@ want / probe 进入 cheap / deep 记录。`daily_budget: 0` 时不调用任何 p
 
 拣选状态只经 `curio/triage.py` 写入（表 `triage`、追加式事件表 `triage_events`、货号表 `item_codes`，由 `Store` 建表）：
 
-- 状态：`new` 新货、`kept` 留下、`removed` 去掉、`auto_removed` 自动移出、`out_of_pool` 移出商品池。
+- 状态：`new` 新货、`kept` 留下、`removed` 去掉、`auto_removed` 自动移出、`out_of_pool` 移出商品池。标记售出（故事 13）不新增状态：`kept` → `out_of_pool` 并置 `triage.sold=1`（独立字段，不复用 `items.status`），事件 action `mark_sold`、reason"售出"；其余任何转换清除该标记，撤销按被撤销动作之前的有效动作恢复。
 - 系统（规则归口）：入库时判断 `skip` → `auto_removed`，其余 → `new`；重判（改价、屏蔽词全量重判）只在**没有任何人工事件**的货上于 `new` / `auto_removed` 间移动。有人工事件的货只更新分数与理由，不改状态。
 - `cases` / `market_decisions` 仍是决定日志（追加/覆盖照旧，旧读者不变），**拣选状态以 `triage` 为准**；撤销只写 `triage_events`，不改写 cases。
 - 人工动作：留下（`new`/`removed` → `kept`）、去掉（`new`/`kept`/`auto_removed`/`out_of_pool` → `removed`）、捞回（`auto_removed` → `new`，排新货队列最前）、移出商品池（`kept` → `out_of_pool`）、放回商品池（`out_of_pool` → `kept`）、撤销上一步（`undo`：撤销最近一个未撤销的人工动作，可连续多步，系统动作不进撤销栈；之后又有人工动作时抛「状态已变化」）。任何人工转换与撤销都清除 `backlog`。非法转换抛中文 `TriageError`。
@@ -238,7 +241,7 @@ uv run python scripts/top20_keep_rate.py    # 按日复算「决定前分数最�
 
 ## 每5分钟唤醒的本机自动采集（launchd）
 
-只安装一个定时任务 `com.curiobject.collect`：每 300 秒唤醒一次 `curio.curio_monitor`，由调度器决定是否真正抓取（见上文「调度与接口调用预算」），由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。
+只安装一个定时任务 `com.curiobject.collect`：每 300 秒唤醒一次 `curio.curio_monitor`（**本机现装版本仍是 1800 秒，已发布货检查因此实际 30 分钟一轮；重装需墨墨授权**），由调度器决定是否真正抓取（见上文「调度与接口调用预算」），由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。
 
 视觉识别进程（`scripts/install_visual_worker.py`，`com.curio.visual.phase1`）与微信机器人代码保留在仓库中，但**不安装**它们的定时任务。
 
@@ -300,9 +303,9 @@ launchctl kickstart gui/$(id -u)/com.curiobject.collect
 - 写入只用 `curio.sync.enqueue(c, kind, payload)`：先按契约校验（坏载荷抛错、不入队），与触发它的状态变更同一事务、由调用方提交。
 - `curio.sync.flush()` 按 `seq` 逐条发送；遇失败即停、不跳过，`attempts` 加一、`last_error` 记中文原因，下次从同一条重试；服务器 2xx 且回显 `event_id` 才写 `sent_at`。
 - 暂时失败（网络、超时、5xx、401）下轮自动重试。永久失败（服务器 400 / 409 / 413、本机契约校验不过、库里载荷 JSON 坏掉）把该条标 `failed_at` 并停在这里——**不跳过**（顺序要紧），之后每轮都是 `sync_status: blocked`（附 `sync_blocked_seq`），并立刻发一条点名该条的系统通知。处理办法见下方 `scripts/outbox.py`。
-- 采集轮在 AI 打分之后、归档之前调用一次 flush（墙钟限时 30 秒，含慢速响应；没发完的下轮继续）；结果写入 `sync_status`：`disabled`（`.env` 未配置服务器，发件箱保留）、`ok`、`error`（附 `sync_error`、`sync_fail_streak`）、`blocked`、`timeout`，另有 `sync_sent`、`sync_pending`。只做调度判断、两项都不到期的空转轮次不 flush。
-- 连续 3 次 flush 失败（含同步模块的意外异常）时发一次 macOS 系统通知（`osascript`）；只有 `ok` 清零，`timeout` 与 `blocked` 不改计数。
-- 本故事只有测试载荷 `ping`；快照、隐藏、指令、收件箱由后续故事加入。
+- 采集轮在 AI 打分之后、归档之前调用一次 `sync.run`：flush（墙钟限时 30 秒，含慢速响应；没发完的下轮继续）再发一次心跳；空闲轮（什么都不到期）同样调用。结果写入 `sync_status`：`disabled`（`.env` 未配置服务器，发件箱保留，也不发心跳）、`ok`、`error`（附 `sync_error`、`sync_fail_streak`）、`blocked`、`timeout`，另有 `sync_sent`、`sync_pending`、`heartbeat_status`（ok / error，附 `heartbeat_error`）。
+- **心跳（AD-10，`heartbeat.v1`）：** 每轮直接 POST `/admin/events`（`kind: heartbeat`，限时 10 秒），**不进发件箱**（它是状态不是事件，只有最新的有意义）。载荷：`sent_at` 与 eBay、Etsy 各自已发布货下架检查最近成功时间；当前没有可能在线的货的平台报发送时间（无需检查，同时把该平台的成功时间更新为此刻，之后再有已发布货时不沿用旧时间），有货却从未成功过的平台不带时间；还有未送达的隐藏 / 取消隐藏时，各平台报的时间不晚于其中最早一条的入队时间（下架已判定、客人页还没更新，久了照样提示）。心跳构造或发送中的意外只记 `heartbeat_status: error`，不影响 flush 结果。服务器要求 ebay、etsy 各一项、成功时间不晚于发送时间；已存心跳的 `sent_at` 比服务器现在还晚时（Mac 时钟曾快、已校正）以后到的为准。心跳失败计入同步连续失败（与 flush 失败合并、一轮最多计一次）。服务器只留 `sent_at` 最新的一份、不存入 `events` 表；取各平台最早的成功时间，距今（Mac 两个时间之差 + 服务器收到后经过的时间，不依赖两端时钟一致）超过 2 小时、或发布过快照却从未收到心跳 / 某平台没有成功时间时，客人首页与单件页页头下方显示 `inline-message`"部分货品状态可能未更新，下单前请先问墨墨。"（页面加载时 polite 读一次），其余照常；从未发布过快照时不显示；Mac 预览从不显示。
+- 连续 3 次同步失败（flush 或心跳，含同步模块的意外异常）时发一次 macOS 系统通知（`osascript`）；只有 `ok` 清零，`timeout` 与 `blocked` 不改计数。
 - 已送达的发件箱记录与服务器 `events` 表目前不清理，清理策略留到快照故事一并定。
 
 ```sh
@@ -435,7 +438,7 @@ uv run python scripts/publish.py publish [--flush]            # 生成完整快�
 - **价格区间（欧元，左闭右开）：** €200 以下、€200–500、€500–1000、€1000 以上。器型、图案只列商品池里实际出现的；品牌分区按实际出现的品牌（Meissen 在前）。
 - **序号与锁（AD-22）：** 发布编号与 `hide_seq` 共用 `kv.publish_seq`，在生成快照的同一写事务内分配；快照水位 = 本次发布编号。`kv.publish_lock` 保证同一时刻只有一个发布（第二个提示"另一个发布正在进行，请稍后再试"）。锁在处理每件货时续期 30 分钟，入队前再核对仍由本次发布持有（被接手则本次不入队）；崩溃留下的锁最迟 30 分钟后失效，锁值格式坏掉视为无锁。
 - **待送达与已送达：** 快照入队只记为待送达；同步模块收到服务器确认（applied，或服务器当前编号 ≥ 本次）才记为已送达并更新曾发布记录（墓碑来源）。`scripts/outbox.py drop` 丢掉快照时同时撤掉它的待送达记录，已送达快照里的货照常推隐藏/取消隐藏；之后重新 `publish`。
-- **即时隐藏（AD-5）：** 可能在客人页上的货（已送达 ∪ 待送达快照，表 `published`）一旦原平台下架（`Store.mark_gone`）、被去掉、移出商品池、不再是有效欧元标价，与状态变更同一事务入发件箱 `hide`；撤销或重新在售时入 `unhide`。不需要重新发布，下一次 flush 即生效：队首快照发不出去（被拒收或暂时失败）时，其后的 hide/unhide 照常按序越过它发送，其它类别仍排在快照后面。离开商品池 90 天内的货随下一次发布作为墓碑（已售出 / 已移出）。
+- **即时隐藏（AD-5）：** 可能在客人页上的货（已送达 ∪ 待送达快照，表 `published`）一旦原平台下架（`Store.mark_gone`，含已发布货检查与复查）、被去掉、移出商品池、标记售出、不再是有效欧元标价，与状态变更同一事务入发件箱 `hide`；撤销或重新在售时入 `unhide`。不需要重新发布，下一次 flush 即生效：队首快照发不出去（被拒收或暂时失败）时，其后的 hide/unhide 照常按序越过它发送，其它类别仍排在快照后面。离开商品池 90 天内的货随下一次发布作为墓碑（已售出 / 已移出）。
 
 ### 图片（AD-13）
 

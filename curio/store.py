@@ -566,7 +566,7 @@ def item_detail(c,iid,root=ROOT):
     out.update(description=item['description'] or '',description_lang=guess_lang(item['description']),
                title=item['title'],url=url if re.match(r'https?://',url) else '',
                agent_reason=item['agent_reason'] or '',comment=comment[0] if comment else '',
-               state=triage.state(c,iid))
+               state=triage.state(c,iid),sold=triage.is_sold(c,iid))
     fees=fees_for(root)
     out.update(fee=fee_info(c,item,fees),fee_choices=fee_choices(fees))
     return out

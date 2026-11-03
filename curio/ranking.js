@@ -1,5 +1,5 @@
 /* 后台 02 商品池与 03 榜（故事 11，CAP-7）：分区切换（#new / #pool / #rank）、商品池列表（加入榜、移出 / 放回商品池、
-   货详情）、排榜（把手长按拖动、上移 / 下移 / 移出榜、播报）、排序即时保存与重试、预览入口与发布状态。
+   标记售出（需确认）/ 撤销售出（故事 13）、货详情）、排榜（把手长按拖动、上移 / 下移 / 移出榜、播报）、排序即时保存与重试、预览入口与发布状态。
    原生 JS，无构建、无外部库；与 triage.js 共用 $、rid、get、post、say、shout、setNet、openDetail、viewTitle。
    发布不在这里：只从预览横条（/preview/，preview-bar.js）发起。 */
 (function () {
@@ -126,13 +126,18 @@
     const t = el('button', 't'); t.type = 'button'; t.append(...nameEl('span', c).childNodes);
     t.dataset.k = c.item_id + ':open';
     const p = el('p', 'p'); p.append(el('span', 'mono', c.price), ' · 来源 ' + c.platform);
-    const st = el('p', 'st', c.on_sale ? '在售' : '已下架');
+    const st = el('p', 'st', out && c.sold ? '已售出' : c.on_sale ? '在售' : '已下架');
     const pos = order.indexOf(c.code);
     if (!out && pos >= 0) st.append(' · 在榜第 ', el('span', 'mono', String(pos + 1)), ' 名');
     const why = el('p', 'reason'); why.id = 'why-' + c.item_id.replace(/[^\w-]/g, '_'); why.hidden = true;
     const msg = el('p', 'im'); msg.hidden = true; msg.setAttribute('role', 'alert');
     const acts = el('div', 'acts2');
-    if (out) {
+    let confirmBox = null;
+    if (out && c.sold) {
+      const undo = el('button', 'btn', '撤销售出'); undo.type = 'button'; undo.dataset.k = c.item_id + ':back';
+      undo.onclick = () => poolAct('undo_sold', c, msg, undo);
+      acts.append(undo); acts.style.gridTemplateColumns = '1fr';
+    } else if (out) {
       const back = el('button', 'btn', '放回商品池'); back.type = 'button'; back.dataset.k = c.item_id + ':back';
       back.onclick = () => poolAct('back_to_pool', c, msg, back);
       acts.append(back); acts.style.gridTemplateColumns = '1fr';
@@ -146,9 +151,25 @@
       };
       const ob = el('button', 'btn', '移出商品池'); ob.type = 'button'; ob.dataset.k = c.item_id + ':out';
       ob.onclick = () => poolAct('out_of_pool', c, msg, ob);
-      acts.append(rb, ob);
+      // 标记售出需确认：先展开确认行，再点"确认标记售出"才提交。
+      const sb = el('button', 'btn', '标记售出'); sb.type = 'button'; sb.dataset.k = c.item_id + ':sold';
+      confirmBox = el('div', 'confirm'); confirmBox.hidden = true;
+      const ctext = el('p', null, '标记售出后，这件货立即从客人页消失，单件页显示"已售出"。可撤销。');
+      ctext.id = 'sold-' + c.item_id.replace(/[^\w-]/g, '_');
+      const yes = el('button', 'btn primary', '确认标记售出'); yes.type = 'button'; yes.dataset.k = c.item_id + ':soldyes';
+      yes.setAttribute('aria-describedby', ctext.id);
+      const no = el('button', 'btn', '取消'); no.type = 'button';
+      const crow = el('div', 'acts2'); crow.append(yes, no);
+      confirmBox.append(ctext, crow);
+      sb.setAttribute('aria-expanded', 'false');
+      sb.onclick = () => { confirmBox.hidden = false; sb.setAttribute('aria-expanded', 'true'); yes.focus(); };
+      no.onclick = () => { confirmBox.hidden = true; sb.setAttribute('aria-expanded', 'false'); sb.focus(); };
+      yes.onclick = () => poolAct('mark_sold', c, msg, yes);
+      acts.append(rb, ob, sb);
     }
-    body.append(code, t, p, st, acts, why, msg);
+    body.append(code, t, p, st, acts);
+    if (confirmBox) body.append(confirmBox);
+    body.append(why, msg);
     li.append(th, body);
     th.onclick = () => openDetail(c.item_id, out ? 'new' : 'pool', th);
     t.onclick = () => openDetail(c.item_id, out ? 'new' : 'pool', t);
@@ -188,10 +209,13 @@
     const d = res.data;
     // 不用响应里的榜覆盖本地（可能是重放的旧结果）：只拿掉移出商品池的那件，其余以重新读取的榜为准。
     if (d.left_rank) { order = order.filter(x => x !== c.code); saved = saved.filter(x => x !== c.code); }
-    const next = action === 'out_of_pool' ? '已移出商品池' + (d.left_rank ? '，并已移出榜' : '') : '已放回商品池';
+    const rankNote = d.left_rank ? '，并已移出榜' : '';
+    const next = {out_of_pool: '已移出商品池' + rankNote, mark_sold: '已标记售出' + rankNote,
+                  undo_sold: '已撤销售出', back_to_pool: '已放回商品池'}[action];
     // 焦点：移到下一行的同一个按钮，没有则到列表标题。
     const li = btn.closest('li'), sib = li && (li.nextElementSibling || li.previousElementSibling);
-    const k = sib ? sib.dataset.id + (action === 'out_of_pool' ? ':out' : ':back') : null;
+    const part = {out_of_pool: ':out', mark_sold: ':sold'}[action] || ':back';
+    const k = sib ? sib.dataset.id + part : null;
     await loadPool();
     loadRank();
     refocus(k, $('h02'));
@@ -449,6 +473,8 @@
 
   /* ---------- 货详情里的"加入榜 / 移出榜" ---------- */
   window.curioRank = {
+    // 货详情里标记售出之后：与 poolAct 一样重新读取商品池与榜。
+    reload() { loadPool(); loadRank(); },
     // d：/api/triage/item 的结果；rank_reason 由服务端判定（null 为可以上榜），榜满按当前件数判断。
     primary(d) {
       const code = d.code;

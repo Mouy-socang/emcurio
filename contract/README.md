@@ -18,7 +18,8 @@ contract/
 | 通道测试 `ping`（信封 `kind: ping` 的 `payload`） | Mac → 服务器 | `ping.v1.schema.json` |
 | 指令：设置通用邀请码 `set_invite_code`（AD-2、AD-24；`command_id` + 按目标 `invite` 单调的 `target_seq`） | Mac → 服务器 | `set_invite_code.v1.schema.json` |
 | 发布快照 `snapshot`（AD-5、AD-6、AD-22；字段即 AD-6 白名单） | Mac → 服务器 | `snapshot.v1.schema.json` |
-| 隐藏推送 `hide`（含 `action: unhide`；`hide_seq` 与快照 `publish_no` 同一计数器） | Mac → 服务器 | `hide.v1.schema.json` |
+| 隐藏推送 `hide`（含 `action: unhide`；`hide_seq` 与快照 `publish_no` 同一计数器；`reason: sold` 含原平台下架与墨墨标记售出） | Mac → 服务器 | `hide.v1.schema.json` |
+| 心跳 `heartbeat`（AD-10；每轮直接发送、不进发件箱；各平台已发布货下架检查最近成功时间，服务器只留 `sent_at` 最新的一份、不存入事件表） | Mac → 服务器 | `heartbeat.v1.schema.json` |
 | 图片查询（`POST /admin/images/check` 的请求 / 响应，AD-13） | Mac ⇄ 服务器 | `image_check.v1.schema.json` / `image_check_result.v1.schema.json` |
 | 图片上传确认（`PUT /admin/images/<name>` 的响应，AD-13） | 服务器 → Mac | `image_ack.v1.schema.json` |
 

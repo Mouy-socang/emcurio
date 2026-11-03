@@ -16,7 +16,7 @@
     "kind": {
       "type": "string",
       "description": "载荷类别；新增类别时同时新增对应的 <kind>.v1.schema.json。",
-      "enum": ["ping", "set_invite_code", "snapshot", "hide"]
+      "enum": ["ping", "set_invite_code", "snapshot", "hide", "heartbeat"]
     },
     "created_at": {
       "type": "string",

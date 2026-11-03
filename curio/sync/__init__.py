@@ -517,11 +517,12 @@ def _block_message(seq, kind, error):
     return f'发件箱第 {seq} 条（{kind}）被拒收，已暂停同步：{error[:120]}。请用 scripts/outbox.py 处理。'
 
 
-def flush(store, root=ROOT, seconds=FLUSH_SECONDS, session=None, monotonic=time.monotonic):
+def flush(store, root=ROOT, seconds=FLUSH_SECONDS, session=None, monotonic=time.monotonic, record=True):
     """按 seq 顺序发送未确认的发件箱记录。返回 sync_status 等结果字段。
 
     sync_status：disabled（未配置）、ok（全部送达）、error（暂时失败，下次从它重试）、
-    blocked（某条永久失败，需人工处理）、timeout（时限到，下轮继续）。"""
+    blocked（某条永久失败，需人工处理）、timeout（时限到，下轮继续）。
+    record=False：不更新连续失败计数（由调用方连同心跳结果一起记，见 run）。"""
     url, token, note = server_settings(root)
     if url is None:
         with store.connect() as c:
@@ -591,22 +592,90 @@ def flush(store, root=ROOT, seconds=FLUSH_SECONDS, session=None, monotonic=time.
                 status = 'blocked'
             break
         sent += 1
-    streak = _record_round(store, status)
+    streak = _record_round(store, status) if record else None
     with store.connect() as c:
         result = {'sync_status': status, 'sync_sent': sent, 'sync_pending': pending(c)}
     if error:
         result['sync_error'] = error
-        result['sync_fail_streak'] = streak
+        if record:
+            result['sync_fail_streak'] = streak
         if blocked_seq is not None:
             result['sync_blocked_seq'] = blocked_seq
         log.warning('同步未完成：%s', error)
     return result
 
 
-def run(store, root=ROOT):
-    """采集轮末尾调用：限时 flush，任何意外都只变成 sync_status: error 并计入连续失败。"""
+# ---------- 心跳（AD-10） ----------
+
+HEARTBEAT_SECONDS = 10       # 心跳单次发送限时
+HEARTBEAT_PLATFORMS = ('ebay', 'etsy')   # 会上线的平台（Kleinanzeigen 不上线，FR-6）
+
+
+def heartbeat_payload(store, clock=time.time):
+    """heartbeat.v1：各平台"已发布货下架检查最近一次全部判定完成"的时间。
+    当前没有可能在线的货的平台视为无需检查：此刻记为成功（kv 随之更新，之后再有已发布货时不会沿用旧时间）。
+    有货却从未成功过的平台不带时间（服务器视为过期）。
+    还有未送达的隐藏 / 取消隐藏时，报告的时间不晚于其中最早一条的入队时间——下架已判定但客人页还没更新。"""
+    from .. import publish
+    from ..schedule import KV_PUBLISHED_OK, iso_z
+    at = iso_z(clock())
+    with store.connect() as c:
+        online = publish.online_platforms(c)
+        row = c.execute("SELECT min(created_at) FROM outbox WHERE kind='hide' AND sent_at IS NULL").fetchone()
+    oldest_hide = row[0] if row else None
+    platforms = []
+    for p in HEARTBEAT_PLATFORMS:
+        entry = {'platform': p}
+        if p not in online:
+            store.set(KV_PUBLISHED_OK + p, at)
+        last = store.get(KV_PUBLISHED_OK + p)
+        if last and oldest_hide:
+            last = min(last, oldest_hide)
+        if last:
+            entry['last_success_at'] = last
+        platforms.append(entry)
+    return {'schema_version': 1, 'sent_at': at, 'platforms': platforms}
+
+
+def send_heartbeat(store, root=ROOT, session=None, monotonic=time.monotonic, clock=time.time,
+                   seconds=HEARTBEAT_SECONDS):
+    """直接发一次心跳（不进发件箱：它是状态而不是事件，只有最新的有意义）。
+    返回 (结果字段, 是否失败)。未配置服务器时返回 ({}, False)。"""
+    url, token, _ = server_settings(root)
+    if url is None:
+        return {}, False
     try:
-        return flush(store, root)
+        envelope = _envelope(str(uuid.uuid4()), 'heartbeat', heartbeat_payload(store, clock), utc_now())
+        check_envelope(envelope)
+    except ContractError as e:
+        return {'heartbeat_status': 'error', 'heartbeat_error': str(e)}, True
+    session = session or requests.Session()
+    error, _, _ = _post_with_deadline(session, url, token, envelope, monotonic() + seconds, monotonic)
+    if error:
+        log.warning('心跳未发出：%s', error)
+        return {'heartbeat_status': 'error', 'heartbeat_error': error}, True
+    return {'heartbeat_status': 'ok', 'heartbeat_at': envelope['payload']['sent_at']}, False
+
+
+def run(store, root=ROOT, session=None, monotonic=time.monotonic, clock=time.time):
+    """采集调度每轮（含空闲轮）调用：限时 flush 发件箱，再发一次心跳（AD-10）。
+    flush 或心跳失败都计入连续失败（一轮最多计一次）；任何意外都只变成 sync_status: error。"""
+    try:
+        result = flush(store, root, session=session, monotonic=monotonic, record=False)
+        failed = result['sync_status'] == 'error'
+        if result['sync_status'] != 'disabled':
+            try:
+                beat, beat_failed = send_heartbeat(store, root, session, monotonic, clock)
+            except Exception as e:      # 心跳的意外不丢掉 flush 的结果
+                log.warning('心跳未发出（%s）', type(e).__name__)
+                beat, beat_failed = {'heartbeat_status': 'error', 'heartbeat_error': f'心跳未发出（{type(e).__name__}）'}, True
+            result.update(beat)
+            failed = failed or beat_failed
+        status = 'error' if failed else result['sync_status']
+        streak = _record_round(store, status)
+        if failed or 'sync_error' in result:
+            result['sync_fail_streak'] = streak
+        return result
     except Exception as e:
         log.warning('同步未完成（%s）', type(e).__name__)
         result = {'sync_status': 'error', 'sync_error': f'同步未完成（{type(e).__name__}）'}

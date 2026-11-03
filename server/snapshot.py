@@ -6,6 +6,8 @@
 - 图片：PUT 上来的 JPEG 核对 sha256 前 16 位与文件名一致后落盘，文件不可变；
   只保留最近 3 份快照（当前 + 之前两次）引用的图与 1 天内新传的图，其余在新快照生效后清理。
 - 客人页读取：current_view() 给出当前快照减去隐藏集合后的榜、商品池与筛选数据（解析结果按 publish_no 缓存）。
+- 心跳（AD-10）：只留 sent_at 最新的一份；heartbeat_stale() 判断已发布货下架检查是否超过 2 小时未成功
+  （从未发布过快照时不提示；发布过但从未收到心跳、或某平台没有成功时间时提示）。
 """
 import datetime
 import hashlib
@@ -29,6 +31,7 @@ BRAND_ORDER = ('Meissen', 'KPM Berlin')
 FEE_TIERS = ('A', 'B', 'C', 'D')
 MAX_FEE = 10000
 TOMBSTONE_DAYS = 90                 # AD-29：隐藏后单件页保留 90 天
+STALE_SECONDS = 2 * 3600            # AD-10：已发布货下架检查超过 2 小时未成功 → 客人页提示
 
 
 class BadSnapshot(ValueError):
@@ -47,6 +50,8 @@ def ensure(c):
         PRIMARY KEY(publish_no, name));
     CREATE TABLE IF NOT EXISTS hides(code TEXT PRIMARY KEY, hide_seq INTEGER NOT NULL, hidden INTEGER NOT NULL,
         reason TEXT, at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), sent_at TEXT NOT NULL,
+        payload TEXT NOT NULL, received_at TEXT NOT NULL);
     ''')
 
 
@@ -187,6 +192,68 @@ def apply_hide(c, payload):
     c.execute('INSERT OR REPLACE INTO hides(code,hide_seq,hidden,reason,at) VALUES(?,?,?,?,?)',
               (payload['code'], seq, 1 if payload['action'] == 'hide' else 0, payload.get('reason'), payload['at']))
     return True
+
+
+# ---------- 心跳（AD-10） ----------
+
+def _epoch(text):
+    return datetime.datetime.fromisoformat(text.replace('Z', '+00:00')).timestamp()
+
+
+HEARTBEAT_PLATFORMS = {'ebay', 'etsy'}
+
+
+def check_heartbeat(payload):
+    names = [p['platform'] for p in payload['platforms']]
+    if len(set(names)) != len(names) or set(names) != HEARTBEAT_PLATFORMS:
+        raise BadSnapshot('心跳须恰好包含 ebay 与 etsy 各一项')
+    stamps = [payload['sent_at']] + [p['last_success_at'] for p in payload['platforms'] if 'last_success_at' in p]
+    for t in stamps:
+        if not TS_RE.fullmatch(t):
+            raise BadSnapshot('心跳时间格式不对')
+        try:
+            _epoch(t)
+        except ValueError:
+            raise BadSnapshot('心跳时间无效') from None
+    sent = _epoch(payload['sent_at'])
+    if any(_epoch(t) > sent for t in stamps[1:]):
+        raise BadSnapshot('成功时间晚于发送时间')
+
+
+def apply_heartbeat(c, payload, received_at, now):
+    """只保留 sent_at 最新的一份（晚到的旧心跳不覆盖）。例外：已存的 sent_at 比服务器现在还晚（Mac 时钟曾经快了、
+    已被校正），则以后到的为准，免得卡死在一个"未来"的心跳上。返回是否生效。"""
+    row = c.execute('SELECT sent_at FROM heartbeat WHERE id=1').fetchone()
+    if row and _epoch(row[0]) > _epoch(payload['sent_at']) and _epoch(row[0]) <= now:
+        return False
+    c.execute('INSERT OR REPLACE INTO heartbeat(id,sent_at,payload,received_at) VALUES(1,?,?,?)',
+              (payload['sent_at'], json.dumps(payload, ensure_ascii=False, separators=(',', ':')), received_at))
+    return True
+
+
+def heartbeat_age(c, now):
+    """最早一个平台的最近成功距今多少秒；从未收到心跳或某平台没有成功时间时 None。
+    距今 = (Mac 发送时间 − 最早成功时间，两者同一时钟) + (服务器现在 − 服务器收到时间)，不依赖两端时钟一致。"""
+    row = c.execute('SELECT sent_at, payload, received_at FROM heartbeat WHERE id=1').fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row[1])
+        stamps = [p.get('last_success_at') for p in payload['platforms']]
+        if not stamps or None in stamps:
+            return None
+        earliest = min(_epoch(t) for t in stamps)
+        return (_epoch(row[0]) - earliest) + max(0.0, now - _epoch(row[2]))
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def heartbeat_stale(c, now):
+    """客人页是否显示"部分货品状态可能未更新"：发布过快照，且心跳缺失或已发布货检查超过 2 小时未成功。"""
+    if current(c)[0] == 0:
+        return False
+    age = heartbeat_age(c, now)
+    return age is None or age > STALE_SECONDS
 
 
 # ---------- 图片 ----------

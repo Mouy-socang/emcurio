@@ -431,12 +431,91 @@ def check_existing(store,api,config,budget=None,etsy=None):
     with store.connect() as c:summary['remaining_active']=c.execute("SELECT count(*) FROM items WHERE status='active'").fetchone()[0]
     return summary
 
+PUBLISHED_PLATFORMS=('ebay','etsy')     # Kleinanzeigen 的货不会上线（FR-6），不查
+PUBLISHED_SECONDS=240
+
+def published_rows(store):
+    """当前可能在线的货（已送达 + 待送达快照里、未隐藏、仍在售），按平台分组；最久没查的在前。"""
+    from .publish import _has_table
+    out={p:[] for p in PUBLISHED_PLATFORMS}
+    _ensure_check_events(store)
+    with store.connect() as c:
+        if not _has_table(c,'published'):return out
+        for r in c.execute("""SELECT i.* FROM published p JOIN items i ON i.item_id=p.item_id
+            WHERE p.hidden=0 AND i.status='active' AND i.platform IN ('ebay','etsy')
+            ORDER BY COALESCE((SELECT max(e.checked_at) FROM status_check_events e WHERE e.item_id=i.item_id),'') ASC,
+            p.code"""):
+            out[r['platform']].append(dict(r))
+    return out
+
+def check_published(store,api,config,budget=None,etsy=None,rows=None,sched=None,monotonic=time.monotonic):
+    """已发布货下架检查（CAP-2、AD-10、AD-27）：只查当前可能在线的货，计入当天在售检查预算（purpose=check），
+    在普通在售检查之前占用、不受每轮份额限制。单件判定复用 _check_one / Etsy 批量判定（下架 mark_gone，
+    同一事务入发件箱隐藏）。某平台本轮全部判定完成（预算未耗尽、无请求失败、未超时）才记该平台最近成功时间；
+    没有已发布货的平台视为"无需检查"、同样记为成功。返回计数摘要（published_check）。"""
+    from .schedule import BudgetExhausted,Scheduler
+    sched=sched or Scheduler(store)
+    rows=published_rows(store) if rows is None else rows
+    summary=dict(items=sum(len(v) for v in rows.values()),attempted=0,active=0,gone=0,errors=0,unknown=0,paused=0,
+                 budget_skipped=0,platforms={})
+    started=monotonic()
+    _ensure_check_events(store)
+    def event(row,outcome,evidence):
+        summary['attempted']+=1
+        summary['errors' if outcome=='error' else outcome]+=1
+        _record_check(store,row['item_id'],row['platform'],outcome,evidence)
+    for platform in PUBLISHED_PLATFORMS:
+        todo=rows.get(platform,[]);ok=True;note='ok'
+        client=api if platform=='ebay' else etsy
+        if not todo:note='nothing_published'
+        elif client is None:ok=False;note='unavailable'
+        elif budget is not None and not budget.available(platform,'check'):
+            ok=False;note='budget_exhausted';summary['budget_skipped']+=len(todo)
+        elif platform=='etsy':
+            # 按 100 个编号一批，每批之前检查时限；失败、预算用完、未返回（unknown）都不算本轮成功。
+            from .etsy import judge_listings,BATCH
+            etsy.purpose='check'
+            for start in range(0,len(todo),BATCH):
+                batch=todo[start:start+BATCH]
+                if monotonic()-started>=PUBLISHED_SECONDS:
+                    ok=False;note='timeout';break
+                try:verdicts,error=judge_listings(etsy,[r['item_id'] for r in batch])
+                except Exception:
+                    log.exception('已发布货检查（Etsy）失败');verdicts,error={r['item_id']:('skipped','',None) for r in batch},'error'
+                if error is not None:
+                    ok=False;note='budget_exhausted' if isinstance(error,BudgetExhausted) else 'error'
+                for row in batch:
+                    outcome,evidence,listing=verdicts[row['item_id']]
+                    if outcome=='skipped':
+                        ok=False
+                        if isinstance(error,BudgetExhausted):summary['budget_skipped']+=1
+                        continue
+                    outcome,evidence=_apply_etsy(store,row,outcome,evidence,listing,config)
+                    if outcome=='error':ok=False;note='error'
+                    elif outcome=='unknown':ok=False;note='unknown' if note=='ok' else note
+                    event(row,outcome,evidence)
+                if isinstance(error,BudgetExhausted):
+                    summary['budget_skipped']+=len(todo)-start-len(batch);break
+        else:
+            api.purpose='check'
+            for n,row in enumerate(todo):
+                if monotonic()-started>=PUBLISHED_SECONDS:
+                    ok=False;note='timeout';break
+                try:outcome,evidence=_check_one(store,row,api,config,budget)
+                except BudgetExhausted:
+                    ok=False;note='budget_exhausted';summary['budget_skipped']+=len(todo)-n;break
+                if outcome in ('error','paused'):ok=False;note='error'
+                event(row,outcome,evidence)
+        if ok:sched.record_published_ok(platform)
+        summary['platforms'][platform]=dict(items=len(todo),ok=ok,status=note)
+    return summary
+
 FETCH_OK=('ok','disabled','not_due')
 
 def run(root,clock=time.time):
-    """launchd 每 5 分钟唤醒一次；调度器决定本轮是否抓新货、是否做在售检查（AD-27）。
+    """launchd 每 5 分钟唤醒一次；调度器决定本轮是否抓新货、是否做已发布货下架检查、是否做普通在售检查（AD-27）。
 
-    两者都不到期时直接结束，不写 collection_runs。"""
+    都不到期时只做一次同步（发件箱 + 心跳）就结束，不写 collection_runs。"""
     from .config import load,etsy_credentials
     from .store import Store,now
     from .schedule import Scheduler,Budget,BudgetExhausted
@@ -452,9 +531,19 @@ def run(root,clock=time.time):
     try:
         sched=Scheduler(store,clock);budget=Budget(store,config['api_budget'],clock)
         do_fetch=sched.fetch_due();do_check=sched.check_due()
-        if not do_fetch and not do_check:
-            return {'status':'idle',**sched.summary()}
-        result={'fetch_ran':do_fetch,'status_check_ran':do_check}
+        # 已发布货检查每次唤醒都判断是否到期（独立节拍）；没有可能在线的货时直接记为成功，不算本轮有工作。
+        do_pub=sched.published_check_due();pub_rows=None
+        if do_pub:
+            pub_rows=published_rows(store)
+            if not any(pub_rows.values()):
+                sched.mark_published_check_started()
+                for p in PUBLISHED_PLATFORMS:sched.record_published_ok(p)
+                do_pub=False
+        if not do_fetch and not do_check and not do_pub:
+            # 空闲轮也发心跳（AD-10）：同步模块每轮都把各平台最近成功时间发给服务器。
+            from . import sync
+            return {'status':'idle',**sched.summary(),**sync.run(store,root)}
+        result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub}
         with store.connect() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
               id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,status TEXT,result TEXT)''')
@@ -465,6 +554,21 @@ def run(root,clock=time.time):
         etsy=EtsyAPI(*etsy_keys,budget=budget,store=store) if etsy_keys else None
         # 鉴权失败后退避 1 小时：期间 Etsy 不发任何请求（含在售检查）。
         etsy_backoff=etsy is not None and auth_backoff_active(store)
+        if do_pub:
+            # 优先级：复查 > 已发布货下架检查 > 新货抓取 > 普通在售检查（AD-27）：先于抓取占用在售检查预算。
+            sched.mark_published_check_started()
+            pub_etsy=None if etsy is None or etsy_backoff else etsy
+            try:result['published_check']=check_published(store,api,config,budget,pub_etsy,pub_rows,sched)
+            except Exception:
+                log.exception('已发布货检查未完成');result['published_check_error']='已发布货检查未完成，将在后续轮次重试'
+            # 容量：已发布件数 × 每天轮数超过在售检查份额时在结果里写警告，日志每天记一次。
+            from .schedule import published_capacity,published_check_interval,launchd_interval,berlin_date
+            warn=published_capacity(budget,{p:len(v) for p,v in pub_rows.items()},published_check_interval(launchd_interval()))
+            if warn:
+                result['published_check_warning']=warn
+                today=berlin_date(clock())
+                if store.get('published_capacity_warned')!=today:
+                    store.set('published_capacity_warned',today);log.warning('已发布货检查容量不足：%s','；'.join(warn))
         if do_fetch:
             sched.mark_fetch_started();fetch_started=now()
             if api is None:
@@ -525,7 +629,9 @@ def run(root,clock=time.time):
         with store.connect() as c:
             ok=all(result.get(p+'_status') in FETCH_OK for p in ('ebay','kleinanzeigen','etsy'))
             summary=result.get('status_check_summary',{})
-            status='ok' if ok and 'status_checks' not in result and not summary.get('errors') and not summary.get('etsy_error') else 'partial'
+            pub=result.get('published_check',{})
+            pub_ok='published_check_error' not in result and not pub.get('errors')
+            status='ok' if ok and pub_ok and 'status_checks' not in result and not summary.get('errors') and not summary.get('etsy_error') else 'partial'
             c.execute('UPDATE collection_runs SET finished_at=?,status=?,result=? WHERE id=?',
                       (now(),status,json.dumps(result,ensure_ascii=False),run_id))
         return result

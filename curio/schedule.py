@@ -19,6 +19,9 @@ MAX_INTERVAL = 60.0
 DEFAULT_INTERVAL = 30.0     # 首次运行的基础间隔，沿用原先的 30 分钟节拍
 NIGHT_HOURS = range(1, 7)   # 柏林时间 01:00–06:59
 STATUS_CHECK_MINUTES = 30   # 在售检查每 30 分钟最多一轮
+PUBLISHED_CHECK_MINUTES = 15  # 已发布货下架检查每 15 分钟最多一轮（AD-27），独立于新货抓取与普通在售检查
+WAKE_SECONDS = 300          # launchd 设计唤醒间隔（scripts/install_hourly.py StartInterval）；读不到本机 plist 时按它算
+LAUNCHD_PLIST = '~/Library/LaunchAgents/com.curiobject.collect.plist'   # 测试里改成临时路径
 # launchd 的唤醒时刻会有几秒抖动；容差避免 5 分钟间隔因早到几秒而被拖成 10 分钟。
 JITTER_SECONDS = 30
 
@@ -27,6 +30,8 @@ FETCH_SHARE = 0.6           # 新货抓取最多用每日预算的 60%，在售�
 KV_BASE = 'schedule_fetch_interval_min'
 KV_LAST_FETCH = 'schedule_last_fetch_at'
 KV_LAST_CHECK = 'schedule_last_status_check_at'
+KV_LAST_PUBLISHED = 'schedule_last_published_check_at'
+KV_PUBLISHED_OK = 'published_check_ok_at:'   # + 平台：该平台已发布货下架检查最近一次全部判定完成的时间（UTC，带 Z）
 KV_USAGE = 'api_usage'
 
 
@@ -69,6 +74,48 @@ def check_rounds_left(ts):
     return max(1, math.ceil((midnight - now).total_seconds() / (STATUS_CHECK_MINUTES * 60)))
 
 
+def launchd_interval(path=None):
+    """本机已安装的 launchd 唤醒间隔（秒）；没装、读不出或内容不对时 None。"""
+    import os
+    import plistlib
+    try:
+        with open(os.path.expanduser(path or LAUNCHD_PLIST), 'rb') as f:
+            data = plistlib.load(f)
+        value = data.get('StartInterval') if isinstance(data, dict) else None
+    except Exception:
+        return None
+    return value if type(value) is int and value > 0 else None
+
+
+def published_check_interval(wake_seconds):
+    """已发布货检查的实际间隔（分钟）：每次唤醒才判断是否到期，所以是 15 分钟向上取整到唤醒间隔的倍数。
+    唤醒间隔未知时按设计值 WAKE_SECONDS 算。"""
+    wake_seconds = wake_seconds or WAKE_SECONDS
+    target = PUBLISHED_CHECK_MINUTES * 60 - JITTER_SECONDS
+    return math.ceil(target / wake_seconds) * wake_seconds / 60
+
+
+def published_capacity(budget, counts, interval_min):
+    """已发布货检查的每日预计调用数 =（每轮请求数）×（每天轮数）；超过该平台在售检查保底份额（预算 − 新货份额）时
+    返回中文警告列表。counts：{平台: 可能在线的件数}；Etsy 每 100 件一次请求。"""
+    from .etsy import BATCH
+    rounds = 1440 / max(interval_min, PUBLISHED_CHECK_MINUTES)
+    out = []
+    for platform, n in counts.items():
+        per_round = math.ceil(n / BATCH) if platform == 'etsy' else n
+        need = math.ceil(per_round * rounds)
+        share = budget.limit(platform) - budget.fetch_cap(platform)
+        if n and need > share:
+            out.append(f'{platform} 已发布 {n} 件，按每 {interval_min:g} 分钟一轮每天约需 {need} 次请求，'
+                       f'超过在售检查份额 {share} 次：部分轮次会因预算不足而不算成功（客人页可能提示状态未更新）')
+    return out
+
+
+def iso_z(ts):
+    """UTC，ISO 8601 带 Z，精确到毫秒（跨机时间约定）。"""
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
 def _due(last, minutes, ts):
     # 记录时间晚于现在（系统时钟被调回）时视为到期，避免抓取停摆。
     return last is None or last > ts or ts - last >= minutes * 60 - JITTER_SECONDS
@@ -103,6 +150,20 @@ class Scheduler:
         ts = self.clock() if ts is None else ts
         return _due(self._float(KV_LAST_CHECK), STATUS_CHECK_MINUTES, ts)
 
+    def published_check_due(self, ts=None):
+        ts = self.clock() if ts is None else ts
+        return _due(self._float(KV_LAST_PUBLISHED), PUBLISHED_CHECK_MINUTES, ts)
+
+    def mark_published_check_started(self, ts=None):
+        self.store.set(KV_LAST_PUBLISHED, self.clock() if ts is None else ts)
+
+    def record_published_ok(self, platform, ts=None):
+        """该平台本轮已发布货全部判定完成：记最近成功时间（心跳，AD-10）。"""
+        self.store.set(KV_PUBLISHED_OK + platform, iso_z(self.clock() if ts is None else ts))
+
+    def published_ok(self, platform):
+        return self.store.get(KV_PUBLISHED_OK + platform)
+
     def mark_fetch_started(self, ts=None):
         self.store.set(KV_LAST_FETCH, self.clock() if ts is None else ts)
 
@@ -122,6 +183,10 @@ class Scheduler:
         out = {'fetch_base_interval_min': round(self.base_interval(), 2),
                'fetch_interval_min': round(interval, 2),
                'night_mode': is_night(ts)}
+        wake = launchd_interval()
+        out['published_check_interval_min'] = published_check_interval(wake)
+        if wake:
+            out['launchd_interval_min'] = round(wake / 60, 2)
         if last is not None:
             out['next_fetch_at'] = datetime.fromtimestamp(last + interval * 60, timezone.utc).isoformat(timespec='seconds')
         return out

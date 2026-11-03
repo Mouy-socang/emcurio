@@ -119,6 +119,9 @@ img{display:block}
 .ti{width:100%;min-height:var(--tap);border:0;border-bottom:1px solid var(--ink);border-radius:0;background:transparent;font-family:var(--sans);font-size:14px;color:var(--ink);padding:10px 0;line-height:1.6;-webkit-appearance:none;appearance:none}
 .ti.multi{min-height:120px;font-family:var(--serif);font-size:15.5px;line-height:1.75;resize:vertical}
 .actbar{border-top:2px solid var(--ink);padding:14px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.soldrow{display:grid;grid-template-columns:1fr;margin-top:12px}
+.confirm{border-left:2px solid var(--ink);padding:8px 0 8px 12px;margin-top:10px}
+.confirm .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
 
 /* 03 费用档位（故事 12）：A–D 与请咨询单选，选中即保存；手动值优先，可恢复自动 */
 .feeauto{font-size:14px;color:var(--muted);margin-bottom:6px;overflow-wrap:anywhere}
@@ -267,6 +270,10 @@ img{display:block}
     <section class="ns"><h2><span class="ix" aria-hidden="true">05</span>图片替代文字</h2><div id="dAlts"></div></section>
     <div class="actbar"><button class="btn" id="dRecheck" type="button">复查</button><button class="btn primary" id="dPrimary" type="button">留下</button></div>
     <p class="reason" id="dPrimaryWhy" hidden></p>
+    <div class="soldrow" id="dSoldRow" hidden><button class="btn" id="dSold" type="button" aria-expanded="false">标记售出</button></div>
+    <div class="confirm" id="dSoldConfirm" hidden><p id="dSoldText">标记售出后，这件货立即从客人页消失，单件页显示"已售出"。可撤销。</p>
+      <div class="acts2"><button class="btn primary" id="dSoldYes" type="button" aria-describedby="dSoldText">确认标记售出</button><button class="btn" id="dSoldNo" type="button">取消</button></div></div>
+    <p class="im" id="dSoldMsg" role="status" hidden></p>
     <p class="im" id="dRecheckMsg" role="status" hidden></p>
     <p class="im" id="dPrimaryMsg" hidden></p>
   </div>

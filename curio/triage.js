@@ -418,6 +418,10 @@ async function openDetail(id, mode, opener) {
   }
   $('dRecheck').textContent = '复查'; $('dRecheck').removeAttribute('aria-disabled');
   $('dRecheckMsg').hidden = true; $('dPrimaryMsg').hidden = true;
+  // 标记售出（故事 13）：只对留下的货（商品池里）出现，需确认。
+  $('dSoldRow').hidden = d.state !== 'kept' || !!d.sold; $('dSoldConfirm').hidden = true;
+  $('dSoldMsg').textContent = d.sold ? '已标记售出（可在 02 商品池"已移出"里撤销）' : ''; $('dSoldMsg').hidden = !d.sold;
+  $('dSold').setAttribute('aria-expanded', 'false');
   $('detail').hidden = false; $('app').inert = true; $('detail').scrollTop = 0;
   document.title = d.name + ' · 后台';
   $('dName').focus();
@@ -563,6 +567,29 @@ async function recheck() {
   b.textContent = '复查'; b.removeAttribute('aria-disabled');
   if (detail && detail.item_id === id) { msg.textContent = text; msg.hidden = false; }
 }
+async function markSold() {
+  const b = $('dSoldYes'); if (b.getAttribute('aria-busy') === 'true') return;
+  const id = detail.item_id, msg = $('dSoldMsg');
+  const r = b.dataset.rid || rid(); b.dataset.rid = r;
+  b.setAttribute('aria-busy', 'true'); msg.hidden = true;
+  let res = null;
+  try { res = await post('/api/pool/action', {action: 'mark_sold', item_id: id, request_id: r}); }
+  catch (e) { setNet(true); }
+  b.removeAttribute('aria-busy');
+  if (!detail || detail.item_id !== id) return;
+  if (!res || !res.ok) {
+    if (res && res.status < 500) delete b.dataset.rid;
+    msg.textContent = res && res.status < 500 && res.data && res.data.error ? '未保存：' + res.data.error : '未保存，请重试';
+    msg.hidden = false; shout('未保存，请重试'); return;
+  }
+  delete b.dataset.rid; setNet(false);
+  detail.state = res.data.state; detail.sold = !!res.data.sold;
+  if (window.curioRank && window.curioRank.reload) window.curioRank.reload();
+  $('dSoldConfirm').hidden = true; $('dSoldRow').hidden = true;
+  msg.textContent = '已标记售出' + (res.data.left_rank ? '，并已移出榜' : '') + '（可在 02 商品池"已移出"里撤销）';
+  msg.hidden = false; say('已标记售出');
+  if (detailMode === 'pool' || detailMode === 'rank') { $('dPrimary').textContent = '加入榜'; setPrimaryReason('不在商品池，不能上榜'); }
+}
 function primaryMsg(text) { const m = $('dPrimaryMsg'); m.textContent = text; m.hidden = false; shout(text); }
 async function primary() {
   const id = detail.item_id;
@@ -682,6 +709,9 @@ $('arReload').onclick = () => loadAr(false);
 $('dClose').onclick = () => closeDetail();
 $('dComment').addEventListener('blur', () => { if ($('dComment').value !== savedComment) saveComment(); });
 $('dRecheck').onclick = recheck;
+$('dSold').onclick = () => { $('dSoldConfirm').hidden = false; $('dSold').setAttribute('aria-expanded', 'true'); $('dSoldYes').focus(); };
+$('dSoldNo').onclick = () => { $('dSoldConfirm').hidden = true; $('dSold').setAttribute('aria-expanded', 'false'); $('dSold').focus(); };
+$('dSoldYes').onclick = markSold;
 $('dFeeReset').onclick = () => saveFee(null);
 $('dPrimary').onclick = primary;
 $('gPrev').onclick = () => setGi(gi - 1);

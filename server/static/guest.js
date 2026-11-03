@@ -535,3 +535,12 @@
     input.addEventListener('focus', function () { input.select(); });
   }
 })();
+
+/* 状态未更新提示（AD-10，故事 13）：页面加载时在 polite 区读一次。 */
+(function () {
+  'use strict';
+  var note = document.querySelector('[data-stale-note]');
+  var polite = document.getElementById('polite');
+  if (!note || !polite) return;
+  setTimeout(function () { polite.textContent = note.textContent; }, 400);
+})();

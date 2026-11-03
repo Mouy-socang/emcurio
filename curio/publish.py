@@ -13,7 +13,8 @@
   `scripts/outbox.py drop` 丢掉快照时 discard_pending。表 published 是"可能在客人页上"的货
   （已送达快照 ∪ 待送达快照）及其隐藏状态。
 - 隐藏（AD-5）：`reconcile(c, item_id)` 由拣选状态机与采集在状态变更的同一事务里调用：
-  published 里的货离开在售（原平台下架、去掉、移出商品池、不再是欧元标价）入发件箱 hide，回到在售入 unhide。
+  published 里的货离开在售（原平台下架、去掉、移出商品池、标记售出、不再是欧元标价）入发件箱 hide，回到在售入 unhide。
+  隐藏原因：原平台下架或墨墨标记售出为 sold（客人侧"已售出"），其余为 removed（"已移出"）。
 """
 import hashlib
 import ipaddress
@@ -540,7 +541,10 @@ def _tombstones(c, pool_codes, now):
         hist = c.execute('SELECT left_at FROM publish_history WHERE code=?', (r['code'],)).fetchone()
         if hist is not None and hist[0] is not None:
             continue
-        status = 'sold' if r['item_status'] != 'active' else 'removed'
+        if r['hidden'] and r['reason'] in ('sold', 'removed'):
+            status = r['reason']
+        else:
+            status = 'sold' if r['item_status'] != 'active' or triage.is_sold(c, r['item_id']) else 'removed'
         at = r['changed_at'] if r['hidden'] and r['changed_at'] else _iso(now)
         out[r['code']] = {'code': r['code'], 'status': status, 'at': at}
     return [out[k] for k in sorted(out)]
@@ -786,6 +790,14 @@ def _has_table(c, name):
     return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
+def online_platforms(c):
+    """当前有可能在线的货（published 中未隐藏）的平台集合；心跳据此判断哪些平台需要已发布货检查（AD-10）。"""
+    if not _has_table(c, 'published'):
+        return set()
+    return {r[0] for r in c.execute('''SELECT DISTINCT i.platform FROM published p JOIN items i ON i.item_id=p.item_id
+        WHERE p.hidden=0 AND i.status='active' ''')}
+
+
 def reconcile(c, iid):
     """可能在客人页上的货（published）：在售状态变化时（同一事务）入发件箱 hide / unhide。
     返回入队的 action 或 None。不提交。"""
@@ -800,7 +812,8 @@ def reconcile(c, iid):
     if show != bool(row['hidden']):
         return None
     action = 'unhide' if show else 'hide'
-    reason = None if show else ('removed' if row['status'] == 'active' else 'sold')
+    sold = row['status'] != 'active' or triage.is_sold(c, row['item_id'])
+    reason = None if show else ('sold' if sold else 'removed')
     seq = sync.next_publish_seq(c)
     at = now_z()
     payload = {'schema_version': 1, 'code': row['code'], 'hide_seq': seq, 'action': action, 'at': at}

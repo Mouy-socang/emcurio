@@ -34,7 +34,7 @@
 
 {% block body %}
 <span hidden data-signed-in></span>
-{{ site_head(cur, here) }}
+{{ site_head(cur, here, None, stale) }}
 {% if state == 'show' %}
 <article class="obj">
   {{ gallery(it) }}

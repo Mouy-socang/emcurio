@@ -8,7 +8,8 @@
   CURIO_PUBLIC_URL（重设链接用的站点地址）、CURIO_COOKIE_SECURE（默认 1；本机 http 测试设 0）、
   CURIO_MAILER / CURIO_MAIL_DIR（见 mailer.py）、CURIO_SERVER_SECRET（HMAC 密钥；不设时在库所在目录生成 server_secret）。
 - 已处理的载荷：ping（只存下）、set_invite_code（AD-24 指令：设置通用邀请码，服务器只存其哈希）、
-  snapshot（AD-5、AD-22：整份原子替换，编号 ≤ 当前的不替换，缺图拒收）、hide（含 unhide，按 hide_seq 与水位合并）。
+  snapshot（AD-5、AD-22：整份原子替换，编号 ≤ 当前的不替换，缺图拒收）、hide（含 unhide，按 hide_seq 与水位合并）、
+  heartbeat（AD-10：已发布货下架检查最近成功时间；只留最新一份，不存入 events 表——每轮都发，不是事件）。
 - 图片（AD-13）：`POST /admin/images/check` 查哪些还没有，`PUT /admin/images/<name>` 上传（核对内容哈希），
   客人经会话鉴权的 `/img/<name>` 读取（guest.py）。
 """
@@ -212,6 +213,24 @@ def _store_event(db_path, envelope, clock=None):
     return 200, ack
 
 
+def _store_heartbeat(db_path, envelope, clock=None):
+    """心跳：只更新 heartbeat 表（晚到的旧心跳不覆盖），确认回显 event_id。收到时间与判断过期用同一时钟。"""
+    now = (clock or time.time)()
+    received_at = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+    c = connect(db_path)
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        applied = snapshot.apply_heartbeat(c, envelope['payload'], received_at, now)
+        c.execute('COMMIT')
+    except Exception:
+        if c.in_transaction:
+            c.execute('ROLLBACK')
+        raise
+    finally:
+        c.close()
+    return {'ok': True, 'event_id': envelope['event_id'], 'received_at': received_at, 'applied': applied}
+
+
 def _env_flag(name, default):
     value = os.environ.get(name)
     if value is None or value == '':
@@ -266,10 +285,14 @@ def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, ma
                 snapshot.check_snapshot(envelope['payload'])
             elif envelope['kind'] == 'hide':
                 snapshot.check_hide(envelope['payload'])
+            elif envelope['kind'] == 'heartbeat':
+                snapshot.check_heartbeat(envelope['payload'])
         except (BadPayload, accounts.BadCommand, snapshot.BadSnapshot) as e:
             return _error(400, str(e))
         except RecursionError:
             return _error(400, '载荷嵌套过深')
+        if envelope['kind'] == 'heartbeat':
+            return await run_in_threadpool(_store_heartbeat, db_path, envelope, clock)
         status, result = await run_in_threadpool(_store_event, db_path, envelope, clock)
         return JSONResponse(result, status_code=status)
 

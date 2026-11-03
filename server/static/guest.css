@@ -220,3 +220,4 @@ a.btn{text-decoration:none}
 body.zl-open{overflow:hidden}
 
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
+.im.stale{margin:12px 0 20px}

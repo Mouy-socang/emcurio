@@ -25,21 +25,37 @@ def db(tmp_path):
 
 
 @pytest.fixture
-def client(db):
-    return TestClient(server.create_app(db_path=db, admin_token=TOKEN, clock=Clock(), cookie_secure=False,
+def clock():
+    return Clock()
+
+
+@pytest.fixture
+def client(db, clock):
+    return TestClient(server.create_app(db_path=db, admin_token=TOKEN, clock=clock, cookie_secure=False,
                                         public_url='https://curio.test'),
                       follow_redirects=False, headers=SAME_ORIGIN)
 
 
 @pytest.fixture
-def published(client, db):
+def published(client, db, clock):
     items = [make_item(n, [(put_image(client, f'b{n}'), put_image(client, f't{n}'))]) for n in range(1, 31)]
     payload = build(7, items, rank=[it['code'] for it in items][5:15])
     assert send(client, 'snapshot', payload).status_code == 200
+    fresh_heartbeat(client, clock)
     sign_in(client)
     with sqlite3.connect(db) as c:
         received = c.execute('SELECT received_at FROM snapshots WHERE publish_no=7').fetchone()[0]
     return payload, received
+
+
+def fresh_heartbeat(client, clock):
+    """故事 13：已发布货检查刚成功（客人页不出"状态未更新"提示；预览从不出该提示）。"""
+    import datetime
+    at = datetime.datetime.fromtimestamp(clock.now, datetime.timezone.utc).isoformat(
+        timespec='milliseconds').replace('+00:00', 'Z')
+    payload = {'schema_version': 1, 'sent_at': at,
+               'platforms': [{'platform': 'ebay', 'last_success_at': at}, {'platform': 'etsy', 'last_success_at': at}]}
+    assert send(client, 'heartbeat', payload).status_code == 200
 
 
 def unprefix(html):
@@ -98,7 +114,7 @@ def test_cli_reads_stdin_and_writes_json(published):
     assert out['status'] == 200 and '今日榜' in out['body']
 
 
-def test_preview_with_fee_and_fx_matches_live_page_except_local_switch(client, db, monkeypatch):
+def test_preview_with_fee_and_fx_matches_live_page_except_local_switch(client, db, monkeypatch, clock):
     """故事 12：带费用档位与汇率的候选快照——预览按欧元显示、费用文字照常、币种切换只在页内（无表单、不提交）。"""
     from datetime import datetime, timedelta, timezone
     now = Clock()()
@@ -109,6 +125,7 @@ def test_preview_with_fee_and_fx_matches_live_page_except_local_switch(client, d
     payload = build(9, items)
     payload.update(fx_rate=7.8, fx_date=(datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=1)).isoformat())
     assert send(client, 'snapshot', payload).status_code == 200
+    fresh_heartbeat(client, clock)
     sign_in(client)
     with sqlite3.connect(db) as c:
         received = c.execute('SELECT received_at FROM snapshots WHERE publish_no=9').fetchone()[0]

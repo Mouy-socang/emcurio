@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hide.v1.schema.json",
   "title": "隐藏推送 v1（Mac → 服务器，AD-5、AD-22；含取消隐藏）",
-  "description": "已发布的货原平台下架、被墨墨去掉或移出商品池时 action=hide；这些动作被撤销时 action=unhide。hide_seq 与快照 publish_no 出自同一计数器；服务器对同一货号只接受 hide_seq 更大的，hide_seq ≤ 当前快照水位的忽略（确认里 applied 为 false，不算错误）。",
+  "description": "已发布的货原平台下架、被墨墨去掉、标记售出或移出商品池时 action=hide；这些动作被撤销时 action=unhide。hide_seq 与快照 publish_no 出自同一计数器；服务器对同一货号只接受 hide_seq 更大的，hide_seq ≤ 当前快照水位的忽略（确认里 applied 为 false，不算错误）。",
   "type": "object",
   "required": [
     "schema_version",
@@ -33,7 +33,7 @@
     },
     "reason": {
       "type": "string",
-      "description": "隐藏原因：sold = 原平台下架（客人侧统一标已售出），removed = 墨墨去掉或移出商品池。",
+      "description": "隐藏原因：sold = 原平台下架或墨墨标记售出（客人侧统一标已售出），removed = 墨墨去掉或移出商品池。",
       "enum": [
         "sold",
         "removed"

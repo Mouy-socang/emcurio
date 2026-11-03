@@ -303,8 +303,9 @@ def pool_state(view, params):
     return options, chosen, shown
 
 
-def home_page(env, view, params, cur=None):
-    """首页：今日榜 + 全部藏品（筛选、首批卡片）。cur：currency_ctx 结果（缺省欧元）。返回 (status, html)。"""
+def home_page(env, view, params, cur=None, stale=False):
+    """首页：今日榜 + 全部藏品（筛选、首批卡片）。cur：currency_ctx 结果（缺省欧元）。
+    stale：已发布货下架检查超过 2 小时未成功（AD-10），页头下方显示状态未更新提示。返回 (status, html)。"""
     cur = cur or EUR_ONLY
     options, chosen, shown = pool_state(view, params)
     n = _int(params.get('n'), PAGE_SIZE, PAGE_SIZE, MAX_SHOWN)
@@ -318,21 +319,24 @@ def home_page(env, view, params, cur=None):
                        query=filter_query(chosen),
                        more_href='/?' + more + '#pool', updated=updated_text(view.received_at),
                        chosen_labels={k: label_of(options, k, v) for k, v in chosen.items()},
-                       filter_labels=FILTER_LABELS, cur=cur, here='/?' + filter_query(chosen) if chosen else '/')
+                       filter_labels=FILTER_LABELS, cur=cur, here='/?' + filter_query(chosen) if chosen else '/',
+                       stale=stale)
 
 
-def item_view_page(env, view, code, cur=None, now=None):
-    """单件页。now：Unix 秒，用于 90 天保留期（None 时不判）。返回 (status, html)。"""
+def item_view_page(env, view, code, cur=None, now=None, stale=False):
+    """单件页。now：Unix 秒，用于 90 天保留期（None 时不判）。stale 同 home_page。返回 (status, html)。"""
     cur = cur or EUR_ONLY
     state = view.item_state(code, now)
     it = view.items.get(code)
     here = '/item/' + code
     if state == 'show':
-        return render_page(env, 'item.html', it['title'], state=state, it=it, code=code, cur=cur, here=here)
+        return render_page(env, 'item.html', it['title'], state=state, it=it, code=code, cur=cur, here=here,
+                           stale=stale)
     if state in ('sold', 'removed'):
         title = it['title'] if it else ('已售出' if state == 'sold' else '已移出')
-        return render_page(env, 'item.html', title, state=state, it=it, code=code, cur=cur, here=here)
-    return render_page(env, 'item.html', '此件已不在展出', 404, state=None, it=None, code=code, cur=cur, here=here)
+        return render_page(env, 'item.html', title, state=state, it=it, code=code, cur=cur, here=here, stale=stale)
+    return render_page(env, 'item.html', '此件已不在展出', 404, state=None, it=None, code=code, cur=cur, here=here,
+                       stale=stale)
 
 
 def pool_batch(env, view, params, cur=None):
@@ -700,14 +704,22 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         return JSONResponse(pool_batch(env, view, request.query_params, cur_for(account, view)),
                             headers={'Cache-Control': 'no-store'})
 
+    def stale_now():
+        """AD-10：页面加载时读一次心跳。"""
+        c = db()
+        try:
+            return snapshot.heartbeat_stale(c, clock())
+        finally:
+            c.close()
+
     def home(params, account):
         view = load_view()
-        status, body = home_page(env, view, params, cur_for(account, view))
+        status, body = home_page(env, view, params, cur_for(account, view), stale_now())
         return HTMLResponse(body, status_code=status)
 
     def item_page(code, account):
         view = load_view()
-        status, body = item_view_page(env, view, code, cur_for(account, view), clock())
+        status, body = item_view_page(env, view, code, cur_for(account, view), clock(), stale_now())
         return HTMLResponse(body, status_code=status)
 
     @app.post('/currency')

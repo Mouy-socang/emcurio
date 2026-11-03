@@ -62,6 +62,22 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
         with preview_lock:state['gen']+=1;preview.clear()
     # 发布请求（request_id）进行中时，同一 request_id 的重试等第一次的结果。
     inflight={};flight_out={};flight_lock=threading.Lock()
+    kick_lock=threading.Lock();kicking={'running':False,'again':False}
+    def kick():
+        """即时隐藏（AD-5、CAP-2）：在后台线程触发一次限时 sync.flush。已有一次在跑时记下"再来一次"，
+        当前这次结束后再 flush 一次（期间新入队的隐藏不会被漏掉）。"""
+        if flush is None:return
+        with kick_lock:
+            if kicking['running']:kicking['again']=True;return
+            kicking['running']=True
+        def work():
+            while True:
+                try:flush()
+                except Exception:log.exception('即时同步失败（下一轮采集会重试）')
+                with kick_lock:
+                    if not kicking['again']:kicking['running']=False;return
+                    kicking['again']=False
+        threading.Thread(target=work,daemon=True).start()
     from . import market
     market.init(store)
     from .archive_review import init as init_archive_review
@@ -276,6 +292,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
                 if self.path=='/api/pool/action':
                     result=ranking.pool_action(store,data['action'],data['item_id'],data['request_id'])
                     drop_preview()
+                    if result.get('hidden_queued') and not result.get('replayed'):kick()
                     return self.reply(200,result)
                 if self.path=='/api/rank/preview':return self.make_preview(data)
                 if self.path=='/api/rank/publish':return self.publish_from_preview(data)
@@ -293,7 +310,10 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
                 if self.path=='/api/triage/recheck':
                     from . import curio_monitor
                     if not isinstance(data['item_id'],str):raise ValueError('商品编号无效')
-                    return self.reply(200,curio_monitor.recheck_item(store,data['item_id'],load()))
+                    result=curio_monitor.recheck_item(store,data['item_id'],load())
+                    # 复查判下架：mark_gone 已在同一事务里入队隐藏（已发布的货），立即触发一次发送。
+                    if result.get('outcome')=='gone':drop_preview();kick()
+                    return self.reply(200,result)
                 if self.path=='/api/archive-classifications/review':
                     from .archive_review import review
                     return self.reply(200,{'review_id':review(store,data['id'],data['fields'],data.get('note',''))})

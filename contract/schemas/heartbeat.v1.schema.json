@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "heartbeat.v1.schema.json",
+  "title": "心跳 v1（Mac → 服务器，AD-10）",
+  "description": "同步模块每轮（含空闲轮）发送一次，不进发件箱、服务器不存入事件表，只保留 sent_at 最新的一份。platforms 列出会上线的平台（ebay、etsy）各自已发布货下架检查最近一次全部判定完成的时间；当前没有已发布货的平台报发送时间（无需检查）；有已发布货却从未成功过的平台不带 last_success_at；last_success_at 不得晚于 sent_at。服务器取其中最早者，超过 2 小时（或缺失）时客人首页与单件页显示状态未更新提示。",
+  "type": "object",
+  "required": ["schema_version", "sent_at", "platforms"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "sent_at": {
+      "type": "string",
+      "description": "Mac 发送时间，UTC，ISO 8601 带 Z，精确到毫秒。服务器用它与 last_success_at 之差计算检查已过去多久（不依赖两端时钟一致）。",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "恰好 ebay、etsy 各一项（服务器另查不重复）。",
+      "items": {
+        "type": "object",
+        "required": ["platform"],
+        "additionalProperties": false,
+        "properties": {
+          "platform": {"type": "string", "enum": ["ebay", "etsy"]},
+          "last_success_at": {
+            "type": "string",
+            "description": "UTC，ISO 8601 带 Z，精确到毫秒。",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+          }
+        }
+      }
+    }
+  }
+}

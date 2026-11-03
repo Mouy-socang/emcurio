@@ -16,8 +16,9 @@
 <form method="post" action="/logout"><button class="linkbtn" type="submit">{{ label }}</button></form>
 {%- endmacro %}
 
-{# 页头（首页与单件页共用）：品牌、更新时间、€/¥ 切换（汇率可用时才有）、菜单。 #}
-{% macro site_head(cur, here, updated=None) -%}
+{# 页头（首页与单件页共用）：品牌、更新时间、€/¥ 切换（汇率可用时才有）、菜单；
+   stale：已发布货下架检查超过 2 小时未成功（AD-10）时页头下方的状态未更新提示（页面加载时 polite 读一次，见 guest.js）。 #}
+{% macro site_head(cur, here, updated=None, stale=False) -%}
 <header class="site-head">
   <p class="brand-line"><span class="brand">Curiobject</span>{% if updated %} <span class="upd mono">{{ updated }} 更新</span>{% endif %}</p>
   {% if cur.available %}{{ currency_switch(cur, here) }}{% endif %}
@@ -29,6 +30,7 @@
 {% if cur.available %}<p class="fxnote" data-cny-note{% if cur.code != 'CNY' %} hidden{% endif %}>按当日汇率，以欧元为准</p>
 {% elif cur.fallback %}<p class="fxnote">汇率暂不可用，暂以欧元显示</p>
 {% endif %}
+{% if stale %}<p class="im stale" data-stale-note>部分货品状态可能未更新，下单前请先问墨墨。</p>{% endif %}
 {%- endmacro %}
 
 {# 币种切换（CAP-11）：单选组"欧元 / 人民币"；不跑脚本时两颗按钮就是表单提交，选择存进账号。 #}

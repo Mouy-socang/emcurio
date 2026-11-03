@@ -1,8 +1,8 @@
 """后台 02 商品池与 03 榜（故事 11，CAP-7；AD-5、AD-22、AD-26、AD-28）。
 
 - 02 商品池：拣选状态 kept 的货（分数高到低，无分在后），每件带货号、名称、欧元价、平台、是否在售、是否在榜、
-  不能上榜的原因；另列已移出商品池的货（可放回）。移出 / 放回经 triage.transition（同一事务里
-  publish.reconcile 入队隐藏 / 取消隐藏）；移出商品池的货同一事务从榜里拿掉。
+  不能上榜的原因；另列已移出商品池的货（可放回；标记售出的带 sold，可撤销售出）。移出 / 放回 / 标记售出 / 撤销售出
+  经拣选状态机（同一事务里 publish.reconcile 入队隐藏 / 取消隐藏）；移出商品池与标记售出的货同一事务从榜里拿掉。
 - 03 榜：存储与校验复用 publish.set_rank（已在榜上、之后下架或不再合格的货可原样留在榜里，便于先排序再补位；
   发布时仍被 publish.check_rank 拒绝）。行带"已下架 / 不能发布"标记。
 - 发布状态：最近一次入队的发布（publishes，非 dropped）的时间；当前的 publish.status_fingerprint（榜、入选货号、
@@ -54,6 +54,7 @@ def _pool_row(c, item, ranked, root):
     out['on_sale'] = item['status'] == 'active'
     out['rank_pos'] = ranked.index(code) + 1 if code in ranked else None
     out['rank_reason'] = rank_reason(c, item, code)
+    out['sold'] = triage.is_sold(c, item['item_id'])
     return out
 
 
@@ -110,8 +111,9 @@ def rank_state(store, root=ROOT):
 
 # ---------- 写：幂等（triage_requests） ----------
 
-def _once(store, request_id, payload, fn):
-    """BEGIN IMMEDIATE 里执行 fn(c)；同一 request_id 重放返回首次结果，内容不同报错。"""
+def _once(store, request_id, payload, fn, mark_replay=False):
+    """BEGIN IMMEDIATE 里执行 fn(c)；同一 request_id 重放返回首次结果，内容不同报错。
+    mark_replay：重放的结果带 replayed=True（调用方据此不重复触发发送）。"""
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 100:
         raise ValueError('请求编号无效')
     text = json.dumps(payload, ensure_ascii=False)
@@ -121,7 +123,8 @@ def _once(store, request_id, payload, fn):
         if prev:
             if prev['payload'] != text:
                 raise ValueError('重复请求内容不同')
-            return json.loads(prev['result'])
+            out = json.loads(prev['result'])
+            return dict(out, replayed=True) if mark_replay else out
         result = fn(c)
         c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',
                   (request_id, text, json.dumps(result, ensure_ascii=False), now()))
@@ -138,25 +141,36 @@ def save_rank(store, codes, request_id):
     return _once(store, request_id, ['rank', codes], work)
 
 
+POOL_ACTIONS = ('out_of_pool', 'back_to_pool', 'mark_sold', 'undo_sold')
+
+
 def pool_action(store, action, iid, request_id):
-    """02 商品池：移出商品池（out_of_pool）/ 放回商品池（back_to_pool）。移出的货同一事务从榜里拿掉。"""
-    if action not in ('out_of_pool', 'back_to_pool'):
+    """02 商品池：移出商品池（out_of_pool）/ 放回商品池（back_to_pool）/ 标记售出（mark_sold）/ 撤销售出（undo_sold，
+    撤销该货最近一次标记售出，回到留下）。移出与标记售出的货同一事务从榜里拿掉。
+    返回值里 hidden_queued：本次是否往发件箱写了隐藏 / 取消隐藏（调用方据此立即触发一次发送）。"""
+    if action not in POOL_ACTIONS:
         raise ValueError('未知的商品池动作')
     if not isinstance(iid, str) or not iid:
         raise ValueError('商品编号无效')
 
     def work(c):
-        r = triage.transition(c, iid, action, source='backoffice')
+        if action == 'undo_sold':
+            if not triage.is_sold(c, iid):
+                raise triage.TriageError('这件货没有标记售出，不能撤销')
+            r = triage.undo(c, iid, actions=('mark_sold',))
+        else:
+            r = triage.transition(c, iid, action, source='backoffice')
         dropped = False
-        if action == 'out_of_pool' and r['code']:
+        if action in ('out_of_pool', 'mark_sold') and r['code']:
             ranked = publish.rank(c)
             if r['code'] in ranked:
                 ranked.remove(r['code'])
                 c.execute('DELETE FROM publish_rank')
                 c.executemany('INSERT INTO publish_rank(pos,code) VALUES(?,?)', list(enumerate(ranked, 1)))
                 dropped = True
-        return dict(item_id=iid, state=r['state'], code=r['code'], left_rank=dropped, rank=publish.rank(c))
-    return _once(store, request_id, ['pool', action, iid], work)
+        return dict(item_id=iid, state=r['state'], code=r['code'], left_rank=dropped, rank=publish.rank(c),
+                    sold=triage.is_sold(c, iid), hidden_queued=bool(r.get('reconciled')))
+    return _once(store, request_id, ['pool', action, iid], work, mark_replay=True)
 
 
 # ---------- 预览渲染（server/preview.py 子进程） ----------

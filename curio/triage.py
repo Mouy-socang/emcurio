@@ -5,6 +5,8 @@
 - 人工动作：留下、去掉、捞回、移出商品池、放回商品池、撤销上一步。人工事件一经存在，系统不再改状态。
 - 每次状态变化追加一条 triage_events；货号在首次进入 kept 时分配，永不释放、永不复用。
 - 已发布的货因人工动作离开 / 回到商品池时，同一事务入发件箱隐藏 / 取消隐藏（AD-5，见 publish.reconcile）。
+- 标记售出（CAP-2、AD-26）：不新增状态，是带"售出"标记（triage.sold=1，事件 reason 记"售出"）的移出商品池；
+  客人侧隐藏原因与墓碑为"已售出"。撤销后回到留下、标记清除（已发布的货取消隐藏）。
 
 本模块的函数都接收一个 sqlite3 连接，在调用方的事务里工作；若连接尚未开启事务，
 写操作会先执行 BEGIN IMMEDIATE。调用方自己开事务时须用 BEGIN IMMEDIATE（或已在事务里写过，
@@ -25,8 +27,11 @@ HUMAN = {
     'rescue': (('auto_removed',), 'new'),
     'out_of_pool': (('kept',), 'out_of_pool'),
     'back_to_pool': (('out_of_pool',), 'kept'),
+    'mark_sold': (('kept',), 'out_of_pool'),
 }
-ACTION_LABELS = dict(keep='留下', remove='去掉', rescue='捞回', out_of_pool='移出商品池', back_to_pool='放回商品池')
+ACTION_LABELS = dict(keep='留下', remove='去掉', rescue='捞回', out_of_pool='移出商品池', back_to_pool='放回商品池',
+                     mark_sold='标记售出')
+SOLD_REASON = '售出'
 UNDOABLE = tuple(HUMAN)
 CODE_PREFIX = 'CO-'
 BACKLOG_DAYS = 7
@@ -62,6 +67,13 @@ def ensure(c):
     for col, typ in (('source', 'TEXT'), ('grp', 'INTEGER')):
         if col not in cols:
             c.execute('ALTER TABLE triage_events ADD COLUMN %s %s' % (col, typ))
+    # sold：标记售出（只在 out_of_pool 时可能为 1）。
+    if 'sold' not in {r[1] for r in c.execute('PRAGMA table_info(triage)')}:
+        try:
+            c.execute('ALTER TABLE triage ADD COLUMN sold INTEGER NOT NULL DEFAULT 0')
+        except sqlite3.OperationalError as e:
+            if 'duplicate column' not in str(e):
+                raise
 
 
 def _begin(c):
@@ -102,7 +114,7 @@ def _baseline_if_new(c, iid):
 def _reconcile(c, iid):
     """AD-5：已发布的货离开 / 回到在售时，同一事务入发件箱隐藏 / 取消隐藏（curio/publish）。"""
     from .publish import reconcile  # 延迟导入：publish 依赖本模块
-    reconcile(c, iid)
+    return reconcile(c, iid)
 
 
 def _snapshot(c, item):
@@ -131,6 +143,15 @@ def has_human(c, iid):
 def state(c, iid):
     r = c.execute('SELECT state FROM triage WHERE item_id=?', (iid,)).fetchone()
     return r[0] if r else None
+
+
+def is_sold(c, iid):
+    """墨墨是否把这件货标记为售出（当前仍在该标记下的移出商品池）。"""
+    try:
+        r = c.execute('SELECT sold FROM triage WHERE item_id=?', (iid,)).fetchone()
+    except sqlite3.OperationalError:
+        return False             # 旧表还没有 sold 列
+    return bool(r and r[0])
 
 
 def code(c, iid):
@@ -203,14 +224,16 @@ def transition(c, iid, action, reason=None, at=None, actor='human', source=None,
     ts = at or now()
     assigned = _assign_code(c, iid, ts) if target == 'kept' else code(c, iid)
     rescued = ts if action == 'rescue' else None
-    # 任何人工转换都清除 backlog。
-    c.execute('UPDATE triage SET state=?,updated_at=?,backlog=0,rescued_at=COALESCE(?,rescued_at) WHERE item_id=?',
-              (target, ts, rescued, iid))
+    if action == 'mark_sold' and not reason:
+        reason = SOLD_REASON
+    # 任何人工转换都清除 backlog；售出标记只由"标记售出"设置，其余转换清除。
+    c.execute('UPDATE triage SET state=?,updated_at=?,backlog=0,rescued_at=COALESCE(?,rescued_at),sold=? WHERE item_id=?',
+              (target, ts, rescued, 1 if action == 'mark_sold' else 0, iid))
     if target == 'new':
         _baseline_if_new(c, iid)
     eid = _event(c, iid, cur, target, action, actor, item, reason, at=ts, source=source, grp=grp)
-    _reconcile(c, iid)
-    return dict(state=target, code=assigned, event=eid)
+    # reconciled：同一事务入发件箱的 hide / unhide（没有为 None），调用方据此决定是否立即发送。
+    return dict(state=target, code=assigned, event=eid, reconciled=_reconcile(c, iid))
 
 
 def keep(c, iid, reason=None, source=None):
@@ -258,6 +281,20 @@ def back_to_pool(c, iid, reason=None):
     return transition(c, iid, 'back_to_pool', reason)
 
 
+def mark_sold(c, iid, reason=None, source=None):
+    """标记售出：留下的货 → 带售出标记的移出商品池（事件 reason 记"售出"）；已发布的货同一事务入队隐藏（reason sold）。"""
+    return transition(c, iid, 'mark_sold', reason, source=source)
+
+
+def _restored_sold(c, ev):
+    """撤销 ev 回到的状态是否带售出标记：回到移出商品池、且之前把货带进该状态的有效人工动作是"标记售出"。"""
+    if ev['old_state'] != 'out_of_pool':
+        return False
+    prev = c.execute('''SELECT action FROM triage_events WHERE item_id=? AND id<? AND actor='human' AND undone_by IS NULL
+        AND action NOT IN ('undo','probe','fee') ORDER BY id DESC LIMIT 1''', (ev['item_id'], ev['id'])).fetchone()
+    return bool(prev and prev[0] == 'mark_sold')
+
+
 def _later_human(c, ev):
     return c.execute('''SELECT 1 FROM triage_events WHERE item_id=? AND id>? AND actor='human' AND undone_by IS NULL
         AND action NOT IN ('undo','probe','fee') AND (grp IS NULL OR grp IS NOT ?) LIMIT 1''', (ev['item_id'], ev['id'], ev['grp'])).fetchone()
@@ -282,10 +319,11 @@ def undo_event(c, ev):
             _baseline_if_new(c, e['item_id'])
         uid = _event(c, e['item_id'], cur, e['old_state'], 'undo', 'human', item, at=ts, undoes=e['id'])
         c.execute('UPDATE triage_events SET undone_by=? WHERE id=?', (uid, e['id']))
-    for iid in dict.fromkeys(e['item_id'] for e in group):
-        _reconcile(c, iid)
+        c.execute('UPDATE triage SET sold=? WHERE item_id=?', (1 if _restored_sold(c, e) else 0, e['item_id']))
+    reconciled = [a for a in (_reconcile(c, iid) for iid in dict.fromkeys(e['item_id'] for e in group)) if a]
     last = group[-1]
-    return dict(item_id=last['item_id'], state=last['old_state'], code=code(c, last['item_id']), undid=ev['action'])
+    return dict(item_id=last['item_id'], state=last['old_state'], code=code(c, last['item_id']), undid=ev['action'],
+                reconciled=reconciled[0] if reconciled else None)
 
 
 def undo(c, iid=None, actions=UNDOABLE):
