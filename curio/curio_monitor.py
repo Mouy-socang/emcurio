@@ -1,10 +1,11 @@
 """Collectors adapted from the local Curio monitor; no browser automation."""
-import base64, html, os, re, subprocess, time, urllib.parse, json
+import base64, html, logging, os, re, subprocess, time, urllib.parse, json
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import requests
 from .errors import CollectionError
 KA_UA = "Curio/1.0"
+log = logging.getLogger(__name__)
 def parse(it, search_name):
     price = it.get("currentBidPrice") or it.get("price") or {}
     return {
@@ -261,13 +262,112 @@ def collect_ka(store,config,budget=None):
         c.execute("DELETE FROM kv WHERE k IN ('ka_incremental_known','ka_error')")
     return added
 
+def _ensure_check_events(store):
+    with store.connect() as c:
+        c.executescript("""CREATE TABLE IF NOT EXISTS status_check_events(
+          id INTEGER PRIMARY KEY,item_id TEXT,platform TEXT,checked_at TEXT,outcome TEXT,evidence TEXT);
+          CREATE INDEX IF NOT EXISTS status_check_item ON status_check_events(item_id,id);""")
+
+def _record_check(store,iid,platform,outcome,evidence):
+    from .store import now
+    with store.connect() as c:c.execute('INSERT INTO status_check_events(item_id,platform,checked_at,outcome,evidence) VALUES(?,?,?,?,?)',(iid,platform,now(),outcome,evidence))
+
+def _apply_etsy(store,row,outcome,evidence,listing,config):
+    """把一件 Etsy 货的批量判定落库：下架标 gone，在售刷新价格。落库失败时改记 error、保持原状态。"""
+    from .etsy import parse as etsy_parse
+    try:
+        if outcome=='gone':store.mark_gone(row['item_id'])
+        elif outcome=='active':store.ingest(etsy_parse(listing,''),config)
+    except Exception:outcome,evidence='error','status update failed; state retained'
+    return outcome,evidence
+
+def _check_one(store,row,api,config,budget=None):
+    """单平台（eBay / Kleinanzeigen）判定一件货当前是否在售，并落库（下架 mark_gone、在售刷新价格）。
+    返回 (outcome, evidence)：active / gone / paused / error。预算用完时抛 BudgetExhausted（未发出请求、不应写记录）。
+    批量检查与单件复查共用。"""
+    from .store import now
+    from .schedule import BudgetExhausted
+    platform=row['platform']
+    outcome='error';evidence='status_unverified'
+    try:
+        if platform=='ebay':
+            detail=api.detail(row['item_id'])
+            if detail is None:outcome='gone';evidence='API HTTP 404/410'
+            elif any(a.get('estimatedAvailabilityStatus')=='OUT_OF_STOCK' for a in detail.get('estimatedAvailabilities',[])):outcome='gone';evidence='API OUT_OF_STOCK; sale unknown'
+            else:
+                row.update(parse(detail,''));row['description']=detail.get('shortDescription',row.get('description',''))
+                store.ingest(row,config);outcome='active';evidence='API detail available; no out-of-stock marker'
+        else:
+            if budget is not None:budget.spend('kleinanzeigen','check')
+            status,raw,url,error=ka_curl(row['url'])
+            if status in (403,429) or blocked(raw):
+                store.set('ka_pause_until',time.time()+7200);outcome='paused';evidence='HTTP challenge/rate limit'
+            elif error or status not in (200,404,410):evidence='network/HTTP failure; state retained'
+            elif status in (404,410):outcome='gone';evidence='HTTP '+str(status)
+            elif re.search(r'Anzeige ist nicht mehr verfügbar|Anzeige wurde gelöscht',raw,re.I):outcome='gone';evidence='explicit unavailable/deleted text; sale unknown'
+            elif '/s-anzeige/' not in url or row['item_id'].removeprefix('ka:') not in url:evidence='redirect; original listing not verified'
+            else:
+                match=re.search(r'id="viewad-price"[^>]*>([\s\S]*?)</',raw)
+                if match:
+                    row['price_text']=_clean(re.sub('<[^>]+>',' ',match.group(1)));row['price']=_ka_price(row['price_text']);store.ingest(row,config)
+                else:
+                    with store.connect() as c:c.execute('UPDATE items SET checked_at=? WHERE item_id=?',(now(),row['item_id']))
+                outcome='active';evidence='original listing HTTP 200; no unavailable marker'
+        if outcome=='gone':store.mark_gone(row['item_id'])
+    except BudgetExhausted:raise
+    except Exception:
+        log.exception('在售判定失败：%s',row.get('item_id'))
+        outcome='error';evidence='detail request failed; state retained'
+    return outcome,evidence
+
+def recheck_item(store,item_id,config,root=None,api=None,etsy=None,budget=None):
+    """复查（CAP-2）：按平台即时确认这一件当前是否在售，计入当日在售检查预算（purpose=check）。
+    与批量检查同一判定与落库：下架 mark_gone，并写一条 status_check_events。
+    返回 dict(outcome, evidence)，outcome 为 active / gone，其余（unknown / error / paused / budget）表示暂时无法确认。
+    预算用完、平台暂停或未启用时不发请求、不写记录。"""
+    from .config import ROOT,etsy_credentials
+    from .schedule import Budget,BudgetExhausted
+    root=root or ROOT
+    with store.connect() as c:row=c.execute('SELECT * FROM items WHERE item_id=?',(item_id,)).fetchone()
+    if not row:raise ValueError('商品不存在')
+    row=dict(row);platform=row['platform']
+    if platform not in ('ebay','kleinanzeigen','etsy'):return dict(outcome='unknown',evidence='unsupported platform')
+    if budget is None:budget=Budget(store,config['api_budget'])
+    _ensure_check_events(store)
+    if not budget.available(platform,'check'):return dict(outcome='budget',evidence='check budget exhausted')
+    try:
+        if platform=='etsy':
+            from .etsy import EtsyAPI,judge_listings,auth_backoff_active
+            if etsy is None:
+                keys=etsy_credentials(root)
+                if not keys or auth_backoff_active(store):return dict(outcome='unknown',evidence='Etsy unavailable')
+                etsy=EtsyAPI(*keys,budget=budget,store=store)
+            etsy.purpose='check'
+            verdicts,error=judge_listings(etsy,[item_id])
+            if isinstance(error,BudgetExhausted):return dict(outcome='budget',evidence='check budget exhausted')
+            outcome,evidence,listing=verdicts[item_id]
+            if outcome=='skipped':return dict(outcome='error',evidence='Etsy request failed')
+            outcome,evidence=_apply_etsy(store,row,outcome,evidence,listing,config)
+        else:
+            if platform=='kleinanzeigen' and (not config['kleinanzeigen_enabled'] or time.time()<float(store.get('ka_pause_until','0'))):
+                return dict(outcome='paused',evidence='Kleinanzeigen paused or disabled')
+            if platform=='ebay':
+                if api is None:api=EbayAPI(root,budget,store)
+                api.purpose='check'
+            outcome,evidence=_check_one(store,row,api,config,budget)
+    except BudgetExhausted:return dict(outcome='budget',evidence='check budget exhausted')
+    except Exception:
+        log.exception('复查失败：%s',item_id)
+        return dict(outcome='error',evidence='recheck failed; state retained')
+    _record_check(store,item_id,platform,outcome,evidence)
+    return dict(outcome=outcome,evidence=evidence)
+
 def check_existing(store,api,config,budget=None,etsy=None):
     """Rotate independently of search ingestion; retain failures as unknown.
 
     每轮上限 status_check_limit 在还有检查预算的平台间平分；有预算时每平台本轮份额再不超过
     "剩余检查预算 ÷ 到柏林午夜还剩的检查轮数"（至少 1），让检查份额撑满一整天。Etsy 按 100 个编号一批查询。
-    预算用完而没发出的检查不写检查记录、不算错误，计入 budget_skipped。"""
-    from .store import now
+    预算用完而没发出的检查不写检查记录、不算错误，计入 budget_skipped。单件判定见 _check_one（复查共用）。"""
     from .schedule import BudgetExhausted,check_rounds_left
     from .etsy import BATCH
     summary=dict(attempted=0,active=0,gone=0,errors=0,paused=0,unknown=0,budget_skipped=0)
@@ -276,11 +376,9 @@ def check_existing(store,api,config,budget=None,etsy=None):
         if client is not None:client.purpose='check'
     def event(iid,platform,outcome,evidence):
         summary['errors' if outcome=='error' else outcome]+=1
-        with store.connect() as c:c.execute('INSERT INTO status_check_events(item_id,platform,checked_at,outcome,evidence) VALUES(?,?,?,?,?)',(iid,platform,now(),outcome,evidence))
+        _record_check(store,iid,platform,outcome,evidence)
+    _ensure_check_events(store)
     with store.connect() as c:
-        c.executescript("""CREATE TABLE IF NOT EXISTS status_check_events(
-          id INTEGER PRIMARY KEY,item_id TEXT,platform TEXT,checked_at TEXT,outcome TEXT,evidence TEXT);
-          CREATE INDEX IF NOT EXISTS status_check_item ON status_check_events(item_id,id);""")
         # Search result ingestion updates checked_at even when it never read the detail.
         # A separate attempt clock prevents those fresh search hits from starving.
         rows=[dict(r) for r in c.execute("""SELECT i.* FROM items i WHERE i.status='active'
@@ -301,7 +399,7 @@ def check_existing(store,api,config,budget=None,etsy=None):
     used={};started=time.monotonic()
     if 'etsy' in share and limit>0:
         try:
-            from .etsy import judge_listings,parse as etsy_parse
+            from .etsy import judge_listings
             picks=[r for r in rows if r['platform']=='etsy'][:min(share['etsy'],limit)]
             verdicts,error=judge_listings(etsy,[r['item_id'] for r in picks]) if picks else ({},None)
             if isinstance(error,BudgetExhausted):exhausted.add('etsy')
@@ -313,10 +411,7 @@ def check_existing(store,api,config,budget=None,etsy=None):
                     if isinstance(error,BudgetExhausted):summary['budget_skipped']+=1
                     continue
                 summary['attempted']+=1;used['etsy']=used.get('etsy',0)+1
-                try:
-                    if outcome=='gone':store.mark_gone(row['item_id'])
-                    elif outcome=='active':store.ingest(etsy_parse(listing,''),config)
-                except Exception:outcome,evidence='error','status update failed; state retained'
+                outcome,evidence=_apply_etsy(store,row,outcome,evidence,listing,config)
                 event(row['item_id'],'etsy',outcome,evidence)
         except Exception:summary['etsy_error']='Etsy 在售检查未完成，将在后续轮次重试'
     for row in rows:
@@ -326,37 +421,11 @@ def check_existing(store,api,config,budget=None,etsy=None):
         if used.get(platform,0)>=share[platform]:continue
         if platform=='kleinanzeigen' and time.time()<float(store.get('ka_pause_until','0')):continue
         summary['attempted']+=1;used[platform]=used.get(platform,0)+1
-        outcome='error';evidence='status_unverified'
-        try:
-            if platform=='ebay':
-                detail=api.detail(row['item_id'])
-                if detail is None:outcome='gone';evidence='API HTTP 404/410'
-                elif any(a.get('estimatedAvailabilityStatus')=='OUT_OF_STOCK' for a in detail.get('estimatedAvailabilities',[])):outcome='gone';evidence='API OUT_OF_STOCK; sale unknown'
-                else:
-                    row.update(parse(detail,''));row['description']=detail.get('shortDescription',row.get('description',''))
-                    store.ingest(row,config);outcome='active';evidence='API detail available; no out-of-stock marker'
-            else:
-                if budget is not None:budget.spend('kleinanzeigen','check')
-                status,raw,url,error=ka_curl(row['url'])
-                if status in (403,429) or blocked(raw):
-                    store.set('ka_pause_until',time.time()+7200);outcome='paused';evidence='HTTP challenge/rate limit'
-                elif error or status not in (200,404,410):evidence='network/HTTP failure; state retained'
-                elif status in (404,410):outcome='gone';evidence='HTTP '+str(status)
-                elif re.search(r'Anzeige ist nicht mehr verfügbar|Anzeige wurde gelöscht',raw,re.I):outcome='gone';evidence='explicit unavailable/deleted text; sale unknown'
-                elif '/s-anzeige/' not in url or row['item_id'].removeprefix('ka:') not in url:evidence='redirect; original listing not verified'
-                else:
-                    match=re.search(r'id="viewad-price"[^>]*>([\s\S]*?)</',raw)
-                    if match:
-                        row['price_text']=_clean(re.sub('<[^>]+>',' ',match.group(1)));row['price']=_ka_price(row['price_text']);store.ingest(row,config)
-                    else:
-                        with store.connect() as c:c.execute('UPDATE items SET checked_at=? WHERE item_id=?',(now(),row['item_id']))
-                    outcome='active';evidence='original listing HTTP 200; no unavailable marker'
-            if outcome=='gone':store.mark_gone(row['item_id'])
+        try:outcome,evidence=_check_one(store,row,api,config,budget)
         except BudgetExhausted:
             # 预算中途用完：这件没查，不写记录、不算错误，本平台本轮其余货也不再查。
             exhausted.add(platform);summary['attempted']-=1;used[platform]-=1;summary['budget_skipped']+=1
             continue
-        except Exception:outcome='error';evidence='detail request failed; state retained'
         event(row['item_id'],platform,outcome,evidence)
     if exhausted:summary['budget_exhausted']=sorted(exhausted)
     with store.connect() as c:summary['remaining_active']=c.execute("SELECT count(*) FROM items WHERE status='active'").fetchone()[0]

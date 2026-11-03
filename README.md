@@ -25,11 +25,35 @@ cp .env.example .env    # 首次部署才需要
 ```sh
 # 单次采集、规则判断、价格和下架检查
 uv run python -m curio.curio_monitor
-# 启动审核页（保持运行）
+# 启动后台（保持运行；只监听本机 127.0.0.1）
 uv run python -m curio.review
 ```
 
-电脑打开 http://127.0.0.1:8788 。手机使用同一局域网时，以 `--host 0.0.0.0` 启动，然后访问 `http://电脑局域网IP:8788`。此页面没有用户登录，仅用于可信局域网，不要映射到公网。
+电脑打开 http://127.0.0.1:8788 ：`/` 是后台一页拣选（01 新货，手机优先），旧审核页在 http://127.0.0.1:8788/old 。服务只绑定本机地址，`--host` 只接受 `127.0.0.1` / `localhost`，不提供局域网或公网监听（AD-4）。
+
+### 手机访问：tailscale serve（由墨墨自行安装与操作）
+
+手机经 Tailscale 访问 Mac 上的后台，不上公网。Tailscale 本仓库不安装、不配置，launchd 任务也不改，以下步骤由墨墨操作：
+
+1. 在 Mac 与手机上安装 Tailscale，用同一账号登录（同一个 tailnet）。
+2. 在 Mac 上保持后台运行（`uv run python -m curio.review`），然后执行：
+   ```sh
+   tailscale serve --bg 8788
+   ```
+   它把本机 `127.0.0.1:8788` 以 HTTPS 只在 tailnet 内提供；`tailscale serve status` 显示访问地址（形如 `https://<mac 名>.<tailnet>.ts.net/`）。
+3. 手机浏览器打开该地址。停止共享：`tailscale serve --https=443 off`（或 `tailscale serve reset`）。
+
+不要用 `tailscale funnel`（那会公开到互联网）。写接口仍校验页面令牌（`X-Curio-Token`，每次启动重新生成，重启服务后刷新页面）与 Origin；经 tailscale serve 反代时，Origin 与 `Host` 或 `X-Forwarded-Host` 一致即认可。
+
+### 后台 01 新货（CAP-6，故事 7）
+
+- 顶部分区 01–06：01 新货显示待处理件数；02–06 暂不可用。
+- 拣选卡一次一件（分数高到低，捞回的在最前）：右滑留下、左滑去掉（拖过卡宽 35% 或快速甩动才生效，否则回弹），或按「去掉」「留下」，电脑上焦点不在输入框时 ← 去掉、→ 留下。界面先切到下一件再保存；保存失败时显示「N 件未保存 · 重试」、该件回到队首；断网显示「网络已断开，操作未保存 · 重试」。每个动作带 `request_id`（表 `triage_requests`），重放返回同一结果、不产生第二个事件。
+- 「撤销上一步」无时限、可连续多步（`triage.undo`，撤最近一次人工事件；货号保留不复用）。
+- 「已自动移出 N 件 · 查看」：列表附理由与移出时间，「捞回」后该件回到新货队首。
+- 点图进入货详情：货号（已留下才有）、名称与标签（外画、仅后台 · Kleinanzeigen）、图库与放大层（图片取 `product_snapshots` 已下载的图，否则 `items.image`）、卖家原文（照录、标 `lang`）、来源与判断、墨墨点评（表 `comments`）、图片替代文字（表 `alt_texts`，默认「标准名称 · 第 N 张 / 共 M 张」），点评与替代文字失焦自动保存。
+- 「复查」按平台即时确认这一件是否在售（`curio_monitor.recheck_item`，与批量在售检查共用单件判定，计入当日在售检查预算，写 `status_check_events`，下架即 `items.status='gone'`）；预算用完、平台暂停或查询失败时显示「暂时无法确认，请稍后再试」。
+- 接口：`GET /api/triage`、`/api/triage/auto-removed`、`/api/triage/item?id=`；`POST /api/triage/action`（keep / remove / rescue / undo）、`/api/triage/comment`、`/api/triage/alt`、`/api/triage/recheck`。
 
 打开网页不会触发采集或模型调用。所有操作数据都在 `data/curio.db`（WAL 模式，连接等待 30 秒；备份请用 `VACUUM INTO`，不要直接复制正在写入的库）：items、price_history、price_drops、cases、screening_jobs、kv。可用 `uv run python scripts/import_desktop.py /旧版路径/curio.db` 只读导入 eBay/Kleinanzeigen 商品与审核记录（不含 Lottissimo）。重复导入不会重复创建记录。旧审核缺失的当时价格快照留空，不拿当前价冒充；原价格历史保留在旧库，不迁移。导入商品需后续重新核验在售状态。采集状态和错误摘要保存在 kv。
 

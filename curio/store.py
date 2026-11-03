@@ -1,12 +1,14 @@
 """One SQLite for items, rules, screening, collection state and owner reviews."""
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from .price import prices, money
 from .rules import evaluate, standard_name, kb_fingerprint, kb_status, baseline_score
+from .config import ROOT
 from . import triage
 from screening.pipeline import process
 
@@ -152,7 +154,16 @@ class Store:
                 rule_version INTEGER, scored_at TEXT NOT NULL);
             -- AI 已答复过的货（时间与当时 rule_version）：漏回、越界、截断的货 24 小时内不重发。
             CREATE TABLE IF NOT EXISTS ai_attempts(item_id TEXT PRIMARY KEY, attempted_at TEXT NOT NULL, rule_version INTEGER);
+            -- CAP-6 后台拣选：动作请求幂等（同一 request_id 重放返回同一结果）、墨墨点评、图片替代文字。
+            CREATE TABLE IF NOT EXISTS triage_requests(request_id TEXT PRIMARY KEY, payload TEXT NOT NULL, result TEXT NOT NULL, at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS comments(item_id TEXT PRIMARY KEY, text TEXT NOT NULL, updated_at TEXT NOT NULL);
             ''')
+            # 替代文字按图片身份（本机图文件名或图片地址）保存，图片增减时不串位；image_index 只作显示参考。
+            cols={r[1] for r in c.execute('PRAGMA table_info(alt_texts)')}
+            if cols and 'image_key' not in cols:
+                c.execute('ALTER TABLE alt_texts RENAME TO alt_texts_by_index')   # 早期按序号保存的版本，保留不删
+            c.execute('''CREATE TABLE IF NOT EXISTS alt_texts(item_id TEXT NOT NULL, image_key TEXT NOT NULL, image_index INTEGER,
+                text TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(item_id,image_key))''')
             # 故事 5：外画标记列（已有库补列，旧行默认 0，重判脚本刷新）。
             if 'overpaint' not in {r[1] for r in c.execute('PRAGMA table_info(std_names)')}:
                 try:
@@ -347,3 +358,151 @@ class Store:
             rows=c.execute('''SELECT i.*,(SELECT decision FROM cases c WHERE c.item_id=i.item_id ORDER BY id DESC LIMIT 1) owner_decision
                 FROM items i WHERE '''+clauses[tab]+" ORDER BY COALESCE(NULLIF(created,''),first_seen) DESC,item_id LIMIT ? OFFSET ?",(size,(page-1)*size)).fetchall()
         return dict(items=[dict(r) for r in rows],total=count,page=page,size=size)
+
+    # ---- CAP-6 后台一页拣选（故事 7）----
+    def triage_state(self,limit=50,offset=0,root=ROOT):
+        """01 新货：待处理件数、已自动移出件数与队列卡片（分数高到低，捞回的在最前）。"""
+        if type(limit) is not int or not 1<=limit<=200 or type(offset) is not int or offset<0:raise ValueError('分页参数无效')
+        with self.connect() as c:
+            return dict(counts=backoffice_counts(c),queue=[card(c,r,root) for r in triage.queue(c,limit,offset)])
+    def auto_removed_list(self,limit=50,offset=0,root=ROOT):
+        if type(limit) is not int or not 1<=limit<=200 or type(offset) is not int or offset<0:raise ValueError('分页参数无效')
+        with self.connect() as c:
+            rows=triage.auto_removed(c,limit,offset)
+            out=[]
+            for r in rows:
+                item=c.execute('SELECT * FROM items WHERE item_id=?',(r['item_id'],)).fetchone()
+                if item is None:continue
+                out.append(dict(card(c,item,root),reason=r['reason'],reason_lang=guess_lang(r['reason']),removed_at=r['removed_at']))
+            return dict(items=out,total=backoffice_counts(c)['auto_removed'])
+    def item_detail(self,iid,root=ROOT):
+        with self.connect() as c:return item_detail(c,iid,root)
+    def triage_act(self,action,iid,request_id,root=ROOT):
+        """后台拣选动作（留下 / 去掉 / 捞回 / 撤销上一步）。同一 request_id 重放返回首次结果、不产生第二个事件；
+        内容不同的重放报错。返回 dict(item_id, state, code, remaining, auto_removed, card)。"""
+        if action not in ('keep','remove','rescue','undo'):raise ValueError('未知的拣选动作')
+        if not isinstance(request_id,str) or not 1<=len(request_id)<=100:raise ValueError('请求编号无效')
+        if action!='undo' and (not isinstance(iid,str) or not iid):raise ValueError('商品编号无效')
+        payload=json.dumps([action,iid if action!='undo' else None],ensure_ascii=False)
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            prev=c.execute('SELECT * FROM triage_requests WHERE request_id=?',(request_id,)).fetchone()
+            if prev:
+                if prev['payload']!=payload:raise ValueError('重复请求内容不同')
+                return json.loads(prev['result'])
+            if action=='undo':r=triage.undo(c)
+            else:r=dict(getattr(triage,action)(c,iid,source='backoffice'),item_id=iid)
+            item=c.execute('SELECT * FROM items WHERE item_id=?',(r['item_id'],)).fetchone()
+            counts=backoffice_counts(c)
+            result=dict(item_id=r['item_id'],state=r['state'],code=r['code'],remaining=counts['new'],
+                        auto_removed=counts['auto_removed'],card=card(c,item,root) if item else None)
+            c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False),now()))
+            return result
+    def save_comment(self,iid,text):
+        """墨墨点评（不用 AI）：覆盖保存；空文字删除点评。"""
+        if not isinstance(iid,str) or not iid:raise ValueError('商品编号无效')
+        if not isinstance(text,str) or len(text)>5000:raise ValueError('点评须为 5000 字以内的文字')
+        with self.connect() as c:
+            if not c.execute('SELECT 1 FROM items WHERE item_id=?',(iid,)).fetchone():raise ValueError('商品不存在')
+            if text.strip():c.execute('INSERT OR REPLACE INTO comments VALUES(?,?,?)',(iid,text,now()))
+            else:c.execute('DELETE FROM comments WHERE item_id=?',(iid,))
+        return dict(item_id=iid,text=text if text.strip() else '')
+    def save_alt(self,iid,index,text,root=ROOT):
+        """图片替代文字：index 为当前图片列表里的序号，按该图的身份（文件名或地址）覆盖保存；空文字恢复默认。"""
+        if not isinstance(iid,str) or not iid:raise ValueError('商品编号无效')
+        if type(index) is not int or index<0:raise ValueError('图片序号无效')
+        if not isinstance(text,str) or len(text)>500:raise ValueError('替代文字须为 500 字以内的文字')
+        with self.connect() as c:
+            item=c.execute('SELECT image FROM items WHERE item_id=?',(iid,)).fetchone()
+            if not item:raise ValueError('商品不存在')
+            images=item_images(c,iid,item['image'],root)
+            if index>=len(images):raise ValueError('图片序号无效')
+            key=images[index]['key']
+            if text.strip():c.execute('INSERT OR REPLACE INTO alt_texts(item_id,image_key,image_index,text,updated_at) VALUES(?,?,?,?,?)',(iid,key,index,text.strip(),now()))
+            else:c.execute('DELETE FROM alt_texts WHERE item_id=? AND image_key=?',(iid,key))
+        return dict(item_id=iid,index=index,text=text.strip())
+
+MAX_IMAGES=16
+PLATFORM_LABELS=dict(ebay='eBay',etsy='Etsy',kleinanzeigen='Kleinanzeigen')
+_DE=re.compile(r'[äöüßÄÖÜ]|\b(und|der|die|das|mit|nicht|keine?|sehr|guter?|zustand|tasse|teller|unterglasur)\b',re.I)
+_EN=re.compile(r'\b(the|and|with|no|not|very|good|condition|cup|saucer|plate|porcelain|chips?|cracks?|please|see|photos?|pattern|marked?)\b',re.I)
+_CJK=re.compile(r'[一-鿿]')
+
+def guess_lang(text):
+    """卖家原文的语言（只用于 lang 属性）：德语 de、英语 en、中文 None（随页面），无法判断 None。"""
+    text=text or ''
+    if not text.strip() or _CJK.search(text):return None
+    if _DE.search(text):return 'de'
+    return 'en' if _EN.search(text) else None
+
+def backoffice_counts(c):
+    """01 计数与队列口径一致（不含 backlog 与已下架）；自动移出计全部当前处于该状态的货。"""
+    new=c.execute("""SELECT count(*) FROM triage t JOIN items i ON i.item_id=t.item_id
+        WHERE t.state='new' AND t.backlog=0 AND i.status='active'""").fetchone()[0]
+    auto=c.execute("SELECT count(*) FROM triage WHERE state='auto_removed'").fetchone()[0]
+    return dict(new=new,auto_removed=auto)
+
+def price_label(amount,currency):
+    """欧元显示 €185；非欧元显示原币 185 USD；无价格显示「价格待询」。"""
+    if amount is None:return '价格待询'
+    text=('%d'%amount) if float(amount).is_integer() else '%.2f'%amount
+    return '€'+text if (currency or 'EUR').upper()=='EUR' else text+' '+currency.upper()
+
+def item_images(c,iid,item_image='',root=ROOT):
+    """图片列表 [{src, key}]：最近一次 product_snapshots 里已下载到本机的图（/archive/images/…），没有则 items.image。
+    key 为图片身份（本机图文件名或图片地址），替代文字按它保存。损坏或空的快照记录跳过。"""
+    try:
+        rows=c.execute('SELECT data FROM product_snapshots WHERE item_id=? ORDER BY id DESC',(iid,)).fetchall()
+    except sqlite3.OperationalError:
+        rows=[]   # 快照表由 vision 模块建立，尚未建立时只用 items.image
+    for row in rows:
+        try:images=json.loads(row[0] or 'null')
+        except (ValueError,TypeError):continue
+        images=images.get('images') if isinstance(images,dict) else None
+        if not isinstance(images,list):continue
+        out=[]
+        for img in images:
+            if not isinstance(img,dict) or not isinstance(img.get('file'),str):continue
+            name=img['file'].rsplit('/',1)[-1]
+            if re.fullmatch(r'[a-f0-9]{64}\.(jpg|png|webp)',name) and (Path(root)/'data/porcelain/images'/name).is_file():
+                out.append(dict(src='/archive/images/'+name,key=name))
+        if out:return out[:MAX_IMAGES]
+    return [dict(src=item_image,key=item_image)] if isinstance(item_image,str) and re.match(r'https?://',item_image) else []
+
+def _std(c,iid):
+    return c.execute('SELECT * FROM std_names WHERE item_id=?',(iid,)).fetchone()
+
+def card(c,item,root=ROOT):
+    """刷货卡与列表行共用的展示字段：标准名称（无则卖家标题并标 lang）、价格、平台、分数与理由、首图、货号、标签。"""
+    item=dict(item);iid=item['item_id']
+    std=_std(c,iid)
+    named=std is not None and std['status']=='named' and bool(std['std_name'])
+    score=c.execute('SELECT score,reason FROM scores WHERE item_id=?',(iid,)).fetchone()
+    images=item_images(c,iid,item.get('image'),root)
+    tags=[]
+    if std is not None and 'overpaint' in std.keys() and std['overpaint']:tags.append('外画')
+    if item.get('platform')=='kleinanzeigen':tags.append('仅后台 · Kleinanzeigen')
+    return dict(item_id=iid,name=std['std_name'] if named else item.get('title') or '',
+                name_lang=None if named else guess_lang(item.get('title')),
+                price=price_label(item.get('listed_price'),item.get('currency')),
+                platform=PLATFORM_LABELS.get(item.get('platform'),item.get('platform') or ''),
+                score=score['score'] if score else None,score_reason=score['reason'] if score else None,
+                image=images[0]['src'] if images else None,code=triage.code(c,iid),tags=tags,status=item.get('status'))
+
+def item_detail(c,iid,root=ROOT):
+    """货详情：货号（已留下才有）、名称与标签、图片与替代文字、卖家原文、来源与判断、分数、点评、拣选状态。"""
+    item=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
+    if not item:raise ValueError('商品不存在')
+    out=card(c,item,root)
+    images=item_images(c,iid,item['image'],root)
+    saved=dict(c.execute('SELECT image_key,text FROM alt_texts WHERE item_id=?',(iid,)).fetchall())
+    total=len(images)
+    out['images']=[dict(src=im['src'],alt=saved.get(im['key']) or '%s · 第 %d 张 / 共 %d 张'%(out['name'],n+1,total),
+                        default_alt='%s · 第 %d 张 / 共 %d 张'%(out['name'],n+1,total)) for n,im in enumerate(images)]
+    comment=c.execute('SELECT text FROM comments WHERE item_id=?',(iid,)).fetchone()
+    url=item['url'] or ''
+    out.update(description=item['description'] or '',description_lang=guess_lang(item['description']),
+               title=item['title'],url=url if re.match(r'https?://',url) else '',
+               agent_reason=item['agent_reason'] or '',comment=comment[0] if comment else '',
+               state=triage.state(c,iid))
+    return out

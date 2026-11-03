@@ -1,0 +1,207 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>新货 · 后台</title><style>
+/* 后台 01 新货（故事 7，CAP-6）。视觉见 DESIGN.md：只用规范颜色与间距，直角，无阴影，触控目标 ≥44px。 */
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --surface:#F6F4EF;--inset:#ECE9E2;--ink:#1F1D1A;--muted:#625E56;--hair:#D9D5CC;
+  --inv:#1F1D1A;--inv-ink:#F6F4EF;--inv-muted:#B9B4AA;
+  --serif:"Noto Serif SC","Songti SC",STSong,serif;
+  --sans:"PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  --tap:44px;--m:18px;
+}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{background:var(--surface);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.6;overflow-x:hidden}
+button{font:inherit;color:inherit}
+img{display:block}
+[hidden]{display:none!important}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+
+/* section-tabs */
+.tabs{display:flex;border-top:2px solid var(--ink);border-bottom:1px solid var(--hair);overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tc{flex:0 0 92px;min-height:var(--tap);padding:8px 10px 9px;border-right:1px solid var(--hair);display:flex;flex-direction:column;color:var(--ink);text-decoration:none}
+.tc:focus-visible{outline-offset:-4px}
+.tc[aria-current="page"]:focus-visible{outline-color:var(--inv-ink)}
+.tc .ix{font-family:var(--mono);font-size:12px;letter-spacing:.14em;color:var(--muted);line-height:1.4}
+.tc b{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35}
+.tc .ct{font-family:var(--mono);font-size:14px;line-height:1.4}
+.tc .na{font-size:12px;color:var(--muted);line-height:1.4}
+.tc[aria-current="page"]{background:var(--inv);color:var(--inv-ink)}
+.tc[aria-current="page"] .ix{color:var(--inv-muted)}
+.tc.off{color:var(--muted);cursor:default}
+@media (min-width:768px){.tc{flex:1 1 0}}
+
+.scr{padding:0 var(--m) 32px;max-width:456px;margin:0 auto}
+.im{border-left:2px solid var(--ink);padding:2px 0 2px 12px;font-size:14px;margin-top:12px}
+.net{margin:12px var(--m) 0}
+.lnk{color:var(--ink);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
+.lnk-pad{display:inline-flex;align-items:center;min-height:var(--tap);padding:0 2px}
+.autoline{display:flex;align-items:center;gap:4px;min-height:var(--tap);border-bottom:1px solid var(--hair);flex-wrap:wrap}
+
+/* triage-card */
+.stage{position:relative;margin-top:16px}
+.under{position:absolute;left:0;right:0;top:0;aspect-ratio:4/5;background:var(--inset)}
+.tcard{position:relative;background:var(--surface);touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.tcard.fly{transition:transform .18s ease-in}
+.tcard.back{transition:transform .2s ease-out}
+.ph{display:block;position:relative;width:100%;aspect-ratio:4/5;overflow:hidden;background:var(--inset);border:0;padding:0;cursor:pointer;-webkit-touch-callout:none}
+.ph:focus-visible{outline-offset:-4px}
+.ph img{width:100%;height:100%;object-fit:cover;pointer-events:none;-webkit-user-drag:none}
+.meta{padding:12px 0 0}
+.meta h2{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35;overflow-wrap:anywhere}
+.tag{display:inline-block;font-family:var(--sans);font-weight:400;font-size:12px;line-height:18px;border:1px solid var(--ink);padding:0 5px;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.pr{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-top:4px}
+.pr .mono{font-size:20px;font-weight:500;line-height:1.2}
+.pr .src{font-size:14px;color:var(--muted)}
+.score{font-size:14px;color:var(--muted);margin-top:4px}
+.acts{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
+.btn{display:flex;align-items:center;justify-content:center;min-height:var(--tap);padding:0 12px;font-family:var(--sans);font-size:14px;border:1px solid var(--ink);background:var(--surface);color:var(--ink);cursor:pointer;text-decoration:none}
+.btn:active{background:var(--inset)}
+.btn.primary{background:var(--inv);color:var(--inv-ink)}
+.btn.primary:active{background:var(--inv);padding-top:1px}
+.btn[aria-disabled="true"]{background:var(--inset);color:var(--muted);border:1px dashed var(--muted);cursor:default;padding-top:0}
+.undo{display:flex;align-items:center;min-height:var(--tap);margin-top:4px}
+.keys{font-size:14px;color:var(--muted)}
+.empty{padding:32px 0 24px}
+.empty .big{font-family:var(--mono);font-size:32px;font-weight:500;line-height:1}
+.empty h2{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35;margin-top:12px}
+
+/* auto-removed-list */
+.arhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.arhead h1{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35}
+.arlist{list-style:none;border-top:1px solid var(--hair);margin-top:8px}
+.arlist li{display:grid;grid-template-columns:64px 1fr;gap:12px;padding:12px 0;border-bottom:1px solid var(--hair)}
+.arlist .th{width:64px;height:64px;background:var(--inset);border:0;padding:0;overflow:hidden;cursor:pointer}
+.arlist .th img{width:100%;height:100%;object-fit:cover}
+.arlist .t{font-family:var(--serif);font-weight:600;font-size:14px;line-height:1.35;text-align:left;background:none;border:0;padding:0;cursor:pointer;min-height:var(--tap);display:flex;align-items:center;overflow-wrap:anywhere}
+.arlist .p{font-size:14px}
+.arlist .r{color:var(--muted);overflow-wrap:anywhere}
+.arlist .when{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.arlist .btn{margin-top:8px;width:100%}
+
+/* item-detail overlay */
+.ov{position:fixed;inset:0;background:var(--surface);overflow-y:auto;overflow-x:hidden;z-index:10;border-top:2px solid var(--ink)}
+.oh{display:flex;justify-content:space-between;align-items:center;padding:0 var(--m);border-bottom:2px solid var(--ink);position:sticky;top:0;background:var(--surface);z-index:1}
+.oh .code{font-family:var(--mono);font-size:14px}
+.close{min-width:var(--tap);min-height:var(--tap);display:flex;align-items:center;justify-content:flex-end;font-size:14px;background:none;border:0;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px;cursor:pointer}
+.ov .scr{padding-bottom:32px}
+.name{padding:16px 0 12px}
+.name h1{font-family:var(--serif);font-weight:600;font-size:30px;line-height:1.2;overflow-wrap:anywhere}
+.tags{margin-top:8px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.tags .tag{margin-left:0}
+.tags .mono{font-size:20px;font-weight:500}
+.gal{position:relative;aspect-ratio:1/1;background:var(--inset);overflow:hidden}
+.gal .main{position:absolute;inset:0;width:100%;height:100%;border:0;padding:0;background:var(--inset);cursor:zoom-in}
+.gal .main:focus-visible{outline-offset:-4px}
+.gal img{width:100%;height:100%;object-fit:cover}
+.gbtn{position:absolute;top:50%;transform:translateY(-50%);min-width:var(--tap);min-height:var(--tap);padding:0 8px;background:var(--surface);border:1px solid var(--ink);font-size:14px;cursor:pointer}
+.gbtn.prev{left:0}.gbtn.next{right:0}
+.zm{position:absolute;left:0;bottom:0;min-height:var(--tap);padding:0 10px;background:var(--surface);border:0;font-size:14px;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px;cursor:pointer}
+.pg{position:absolute;right:0;bottom:0;min-height:var(--tap);display:flex;align-items:center;padding:0 10px;background:var(--surface);font-family:var(--mono);font-size:14px}
+.noimg{display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted)}
+.thumbs{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:10px 0 20px;list-style:none;padding:2px}
+.thumbs button{display:block;width:100%;aspect-ratio:1/1;min-height:var(--tap);padding:0;border:0;background:var(--inset);overflow:hidden;cursor:pointer}
+.thumbs img{width:100%;height:100%;object-fit:cover}
+.thumbs [aria-current="true"]{outline:2px solid var(--ink);outline-offset:2px}
+.ns{border-top:1px solid var(--hair);padding:14px 0 18px}
+.ns h2{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35;margin-bottom:10px}
+.ns h2 .ix{font-family:var(--mono);font-weight:400;font-size:12px;letter-spacing:.14em;color:var(--muted);margin-right:10px}
+.kv{display:grid;grid-template-columns:72px 1fr;gap:4px 12px;font-size:14px}
+.kv dt{color:var(--muted)}
+.kv dd{overflow-wrap:anywhere;min-width:0}
+.src{font-size:14px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere}
+.field{margin-top:4px}
+.field+.field{margin-top:14px}
+.flabel{display:block;font-size:14px;color:var(--muted)}
+.ti{width:100%;min-height:var(--tap);border:0;border-bottom:1px solid var(--ink);border-radius:0;background:transparent;font-family:var(--sans);font-size:14px;color:var(--ink);padding:10px 0;line-height:1.6;-webkit-appearance:none;appearance:none}
+.ti.multi{min-height:120px;font-family:var(--serif);font-size:15.5px;line-height:1.75;resize:vertical}
+.actbar{border-top:2px solid var(--ink);padding:14px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+/* zoom-layer */
+.zl{position:fixed;inset:0;background:var(--surface);border-top:2px solid var(--ink);display:flex;flex-direction:column;z-index:20}
+.zl .top{display:flex;justify-content:space-between;align-items:center;padding:0 var(--m)}
+.zl .stagez{flex:1;position:relative;overflow:hidden;background:var(--inset);touch-action:none}
+.zl .stagez img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform-origin:50% 50%;-webkit-user-drag:none;user-select:none}
+.zl .ctl{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:12px var(--m) 16px}
+.zl .ctl .btn{padding:0 4px}
+
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
+</style></head><body>
+<div id="app">
+<nav class="tabs" aria-label="后台分区">
+  <a class="tc" aria-current="page" href="/"><span class="ix" aria-hidden="true">01</span><b>新货</b><span class="ct mono" id="cNew">—</span><span class="vh">件待处理</span></a>
+  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">02</span><b>商品池</b><span class="na">暂不可用</span></span>
+  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="na">暂不可用</span></span>
+  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="na">暂不可用</span></span>
+  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="na">暂不可用</span></span>
+  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="na">暂不可用</span></span>
+</nav>
+<p class="im net" id="net" role="alert" hidden>网络已断开，操作未保存 · <button class="lnk lnk-pad" id="netRetry">重试</button></p>
+<main class="scr">
+<section id="triageView" aria-labelledby="h01">
+  <h1 class="vh" id="h01">新货</h1>
+  <p class="autoline">已自动移出 <span class="mono" id="arN">—</span> 件 · <button class="lnk lnk-pad" id="openAr">查看</button></p>
+  <p class="im" id="fail" role="alert" hidden><span class="mono" id="failN">0</span> 件未保存 · <button class="lnk lnk-pad" id="retry">重试</button></p>
+  <p class="im" id="loadErr" role="alert" hidden>未能读取新货 · <button class="lnk lnk-pad" id="reload">重试</button></p>
+  <div class="stage" id="stage">
+    <div class="under" id="under" aria-hidden="true"></div>
+    <article class="tcard" id="card" hidden>
+      <button class="ph" id="ph" type="button"><img id="img" alt=""></button>
+      <div class="meta"><h2 id="name"></h2>
+      <p class="pr"><span class="mono" id="price"></span><span class="src" id="src"></span></p>
+      <p class="score" id="score"></p></div>
+    </article>
+    <div class="empty" id="empty" hidden><p class="big" aria-hidden="true">0</p><h2>今天的新货已处理完</h2></div>
+  </div>
+  <div class="acts"><button class="btn" id="btnRemove" type="button">去掉</button><button class="btn primary" id="btnKeep" type="button">留下</button></div>
+  <p class="undo"><button class="lnk lnk-pad" id="undo" type="button">撤销上一步</button></p>
+  <p class="im" id="msg" hidden></p>
+  <p class="keys"><span class="mono">←</span> 去掉 · <span class="mono">→</span> 留下</p>
+</section>
+<section id="arView" hidden aria-labelledby="arTitle">
+  <div class="arhead"><button class="lnk lnk-pad" id="back" type="button">返回</button><h1 id="arTitle" tabindex="-1">已自动移出 <span class="mono" id="arN2"></span></h1></div>
+  <p class="im" id="arMsg" role="alert" hidden></p>
+  <ul class="arlist" id="arList"></ul>
+  <div class="empty" id="arEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>今天没有自动移出的货</h2></div>
+  <p class="im" id="arErr" role="alert" hidden>未能读取列表 · <button class="lnk lnk-pad" id="arReload">重试</button></p>
+  <p><button class="btn" id="arMore" type="button" hidden>加载更多</button></p>
+</section>
+</main>
+<p class="vh" id="live" role="status" aria-live="polite"></p>
+<p class="vh" id="alert" role="alert" aria-live="assertive"></p>
+</div>
+
+<div class="ov" id="detail" role="dialog" aria-modal="true" aria-labelledby="dName" hidden>
+  <div class="oh"><span class="code" id="dCode"></span><button class="close" id="dClose" type="button">关闭</button></div>
+  <div class="scr">
+    <div class="name"><h1 id="dName" tabindex="-1"></h1><div class="tags" id="dTags"></div></div>
+    <div class="gal" id="gal">
+      <button class="main" id="gMain" type="button"><img id="gImg" alt=""></button>
+      <button class="gbtn prev" id="gPrev" type="button">上一张</button><button class="gbtn next" id="gNext" type="button">下一张</button>
+      <button class="zm" id="gZoom" type="button">放大</button><span class="pg" id="gPg"></span>
+    </div>
+    <ul class="thumbs" id="thumbs" aria-label="选择图片"></ul>
+    <section class="ns"><h2><span class="ix" aria-hidden="true">01</span>卖家原文</h2><div class="src" id="dDesc"></div></section>
+    <section class="ns"><h2><span class="ix" aria-hidden="true">02</span>来源与判断</h2>
+      <dl class="kv"><dt>原平台</dt><dd id="dPlat"></dd><dt>链接</dt><dd id="dUrl"></dd><dt>理由</dt><dd id="dReason"></dd><dt>分数</dt><dd id="dScore"></dd></dl></section>
+    <section class="ns"><h2><span class="ix" aria-hidden="true">04</span>墨墨点评</h2>
+      <div class="field"><label class="flabel" for="dComment">点评</label><textarea id="dComment" class="ti multi" maxlength="5000"></textarea></div>
+      <p class="im" id="dCommentMsg" hidden></p></section>
+    <section class="ns"><h2><span class="ix" aria-hidden="true">05</span>图片替代文字</h2><div id="dAlts"></div></section>
+    <div class="actbar"><button class="btn" id="dRecheck" type="button">复查</button><button class="btn primary" id="dPrimary" type="button">留下</button></div>
+    <p class="im" id="dRecheckMsg" role="status" hidden></p>
+    <p class="im" id="dPrimaryMsg" hidden></p>
+  </div>
+</div>
+
+<div class="zl" id="zoom" role="dialog" aria-modal="true" aria-label="放大查看" hidden>
+  <div class="top"><span class="mono" id="zPg"></span><button class="close" id="zClose" type="button">关闭</button></div>
+  <div class="stagez" id="zStage"><img id="zImg" alt=""></div>
+  <div class="ctl"><button class="btn" id="zOut" type="button" aria-label="缩小">−</button><button class="btn" id="zIn" type="button" aria-label="放大">+</button><button class="btn" id="zReset" type="button">复位</button><button class="btn" id="zPrev" type="button">上一张</button><button class="btn" id="zNext" type="button">下一张</button></div>
+</div>
+<script>const token='__TOKEN__';</script>
+<script src="/triage.js"></script>
+</body></html>

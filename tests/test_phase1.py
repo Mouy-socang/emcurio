@@ -108,7 +108,7 @@ def test_http_review(db,cfg):
     db.ingest(item(),cfg);httpd=server(db,port=0);thread=threading.Thread(target=httpd.serve_forever,daemon=True);thread.start()
     base='http://127.0.0.1:'+str(httpd.server_port)
     try:
-        html=urllib.request.urlopen(base).read().decode();token=re.search("const token='([^']+)'",html)[1]
+        html=urllib.request.urlopen(base+'/old').read().decode();token=re.search("const token='([^']+)'",html)[1]
         data=json.dumps(dict(item_id='one',decision='skip',reason='太贵',fair_price=20,request_id='http',rule_version=1)).encode()
         req=urllib.request.Request(base+'/api/review',data,headers={'Content-Type':'application/json','X-Curio-Token':token})
         assert json.load(urllib.request.urlopen(req))['case_id']==1
@@ -238,7 +238,7 @@ def test_http_block(db,cfg):
     threading.Thread(target=httpd.serve_forever,daemon=True).start()
     base='http://127.0.0.1:'+str(httpd.server_port)
     try:
-        html=urllib.request.urlopen(base).read().decode()
+        html=urllib.request.urlopen(base+'/old').read().decode()
         token=re.search("const token='([^']+)'",html)[1]
         payload=dict(item_id='one',word='Wohnung',request_id='http-block',rule_version=1)
         req=urllib.request.Request(base+'/api/block',json.dumps(payload).encode(),headers={'X-Curio-Token':token})
