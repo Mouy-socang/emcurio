@@ -183,6 +183,11 @@ class Store:
                 account_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('disable_account','reset_password')),
                 target_seq INTEGER NOT NULL, created_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS guest_commands_account ON guest_commands(account_id,created_at);
+            -- CAP-5 04 匹配（故事 16）：墨墨对"这件货配这位客人"的处理——confirmed（确认，可复制单件页链接）/
+            -- rejected（不合适，此后不再对该客人提出）。customer_id 为 GC 编号，只在本机。
+            CREATE TABLE IF NOT EXISTS match_decisions(customer_id TEXT NOT NULL, item_id TEXT NOT NULL,
+                decision TEXT NOT NULL CHECK(decision IN ('confirmed','rejected')), at TEXT NOT NULL,
+                PRIMARY KEY(customer_id,item_id));
             ''')
             # 替代文字按图片身份（本机图文件名或图片地址）保存，图片增减时不串位；image_index 只作显示参考。
             cols={r[1] for r in c.execute('PRAGMA table_info(alt_texts)')}

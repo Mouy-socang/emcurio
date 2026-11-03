@@ -73,7 +73,7 @@ def test_new_page_at_root_and_old_page_at_old(http):
     assert '<nav class="tabs"' in html and '/triage.js' in html and '__TOKEN__' not in html
     for name in ('新货', '商品池', '榜', '匹配', '待审核', '客人'):
         assert '<b>' + name + '</b>' in html
-    assert html.count('暂不可用') == 2 and 'href="/#guests"' in html and 'aria-current="page"' in html
+    assert html.count('暂不可用') == 1 and 'href="/#guests"' in html and 'aria-current="page"' in html
     assert 'maximum-scale' not in html and 'user-scalable' not in html
     old = urllib.request.urlopen(http['base'] + '/old').read().decode()
     assert 'Curio · 找货审核' in old and "const token='" in old

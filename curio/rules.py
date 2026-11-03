@@ -209,3 +209,12 @@ def fee_tier(item,std=None,fees=None):
     item/std 可为 dict 或 sqlite3.Row。返回 dict(tier, amount, label, reason, size_cm)。"""
     item=dict(item) if item is not None else {}
     return judge.fee_tier(item.get('title',''),item.get('description',''),std,fees)
+
+# ---- CAP-5 客人匹配（AD-15，故事 16）：对照与分级在 judge.match_customer，词表与权重在 config/matching.yaml。
+def match_facts(std,title,rules):
+    """一件货用于匹配的要素（std 为 std_names 行或 dict，可空）。"""
+    return judge.match_facts(std,title,rules)
+
+def match_customer(facts,needs,prefs,rules):
+    """一位客人与一件货：None（不匹配）或 dict(grade, label, weight, reasons)。"""
+    return judge.match_customer(facts,needs,prefs,rules)

@@ -1,0 +1,87 @@
+# 04 匹配（故事 16，CAP-5、FR-9）：客人 × 商品池的对照词表与分级权重。
+# 本文件只是数据；匹配规则只在 curio/judge.py（AD-15），对外入口 curio/rules.match_customer。
+# 只读 GoodCustomer 的 needs.jsonl / preferences.jsonl，不调用 AI。
+#
+# 比较一律小写、去变音（è→e、ß→ss）、全角转半角；中文词按包含比较，外文词按整词比较
+# （货的卖家标题一侧允许德语复合词词尾，如 Kaffeetasse 命中 Tasse）。
+
+# 分级（大者在前）：need = needs.jsonl 里 open 的需求；explicit = preferences.jsonl 里 explicit 来源的喜好；
+# inferred = 其它来源（purchase / behavioral / inferred …）推算的喜好。
+grades:
+  need: {label: 明说想要, weight: 3}
+  explicit: {label: 明说喜欢, weight: 2}
+  inferred: {label: 推算口味, weight: 1}
+
+# 推算口味理由里附注的来源（未列出的来源照原文写）。
+sources:
+  purchase: 购买
+  behavioral: 浏览
+  inferred: 推断
+
+# preferences.jsonl 的 dimension → 对照货的哪一段（未列出的维度不参与匹配，如 motif_subject、price_behavior）。
+dimensions:
+  brand: [maker]
+  pattern: [pattern]
+  form: [form, object_type, object_subtype]
+
+# 货的品牌（EM 西洋瓷器知识库"品牌与窑厂"文件夹名，即标准名称的品牌段）→ 客人资料里的别名。
+# 品牌名本身总算一个别名，不用重复写。品牌必须对上才算匹配。
+brands:
+  Meissen: [梅森, 迈森, 麦森, Meißen, Meissner]
+  KPM Berlin: [KPM, 柏林皇家, 柏林王室, 柏图]
+  Sèvres: [塞弗尔, 塞夫勒, 赛弗尔, 塞弗勒, 赛佛尔, Sevres]
+  Royal Copenhagen: [皇家哥本哈根, 哥本哈根]
+  Herend: [赫伦, 海兰德]
+  Nymphenburg: [宁芬堡]
+  Rosenthal: [罗森塔尔]
+  Augarten: [奥加滕, 奥格腾, 维也纳奥加滕]
+  Dresden Porcelain: [Dresden, 德累斯顿]
+  Wedgwood: [韦奇伍德, 威基伍德, 玮致活]
+  Lladró: [Lladro]
+  Fürstenberg: [菲斯滕贝格]
+  Ludwigsburg: [路德维希堡]
+  Royal Worcester: [皇家伍斯特]
+  Royal Crown Derby: [皇家皇冠德比]
+  Limoges: [利摩日]
+  Richard-Ginori: [基诺里, Ginori]
+  Zsolnay: [乔纳伊]
+  Volkstedt: [福克施泰特]
+
+# 排除词：别名所在的整句（含"、"连起来的并列，到 ，。；!? 为止）里，后面有 negations、或前面有 exclusions_before，
+# 这个品牌就不算被提到——喜欢、需求、不喜欢都一样（"梅森、老德以外的小牌子""除了梅森、KPM"）。
+negations: [以外, 之外, 除外]
+exclusions_before: [除]
+# 普通否定：别名前面紧挨着这些词（只看别名自己那一小段，到"、"为止）时，喜欢与需求不算提到；
+# 不喜欢的喜好不做这项检查（"不要梅森"就是不喜欢梅森）。
+negations_before: [不一定, 不要, 不是, 并非]
+
+# 图案词组。货属于某一组：图案 ID 在 ids 里，或货的图案名 / 卖家标题命中 terms 之一；
+# 客人文字（需求的 pattern_names_raw、喜好的 value）命中同一组的 terms 之一即对上图案。
+# brands：只对这些品牌的货生效（不写 = 不限品牌）。货的图案名本身出现在客人文字里也算对上，不用写进这里。
+patterns:
+  - {ids: [MP-001], terms: [蓝洋葱, Zwiebelmuster, blue onion, 洋葱纹]}
+  - {ids: [MP-014], terms: [红玫瑰, rote Rose, red rose]}
+  - {ids: [MP-018], terms: [御龙, 宫廷龙, Hofdrache]}
+  - {terms: [黄玫瑰, gelbe Rose, yellow rose], brands: [Meissen]}
+  - {terms: [印度之花, indisch, indian flower], brands: [Meissen]}
+  - {terms: [Kurland, 库尔兰, 库尔南, 73号], brands: [KPM Berlin]}
+  - {terms: [Blue Fluted, Musselmalet, 唐草], brands: [Royal Copenhagen]}
+  - {terms: [Flora Danica, 丹麦之花, 丹花], brands: [Royal Copenhagen]}
+  - {terms: [蓝色, 天蓝, 宝蓝, bleu, bleu celeste, bleu de roi, bleu nouveau], brands: [Sèvres]}
+
+# 器型词组：货的器型 / 功能中文名或卖家标题命中、客人文字（需求描述与 object_filters、form / object_type 喜好）
+# 命中同一组即对上器型。只对上器型、品牌没对上的不算匹配。
+forms:
+  cup: [杯, Tasse, Tassen, Becher, Gedeck, cup, cups]
+  saucer: [碟, Untertasse, saucer]
+  plate: [盘, Teller, Platte, plate, plates]
+  pot: [壶, Kanne, Teekanne, Kaffeekanne, pot, teapot]
+  vase: [瓶, Vase, vase]
+  bowl: [碗, 钵, Schale, Schüssel, bowl]
+  figurine: [瓷偶, 塑像, 人偶, Figur, Figurine, Gruppe, Putto]
+  box: [罐, 盒, Dose, caddy]
+  candlestick: [烛台, Leuchter, Kerzenleuchter, candlestick]
+  tureen: [汤盆, 汤盅, Terrine, tureen]
+  spoon: [勺, Löffel, spoon]
+  plaque: [瓷板, Porzellanbild, Bildplatte, plaque]
+  creamer: [奶罐, 奶盅, Milchkännchen, Sahnegießer, creamer]

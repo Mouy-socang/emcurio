@@ -736,3 +736,254 @@ def fee_tier(title, description='', std=None, fees=None):
         name = _TIER_NAME.get(up, up)
         return out(up, f'人物瓷偶，{said} → {tier}，难包装上跳一档 → {name}', cm)
     return out(tier, f'{said} → {tier}', cm)
+
+
+# ================================================================ 客人匹配（CAP-5，FR-9，AD-15；故事 16）
+# 词表与权重是数据（config/matching.yaml，经 curio/config.match_rules 读取校验）；对照与分级只在这里。
+# 只看货的标准名称（品牌、图案、器型/功能）与卖家标题，对照 GoodCustomer 的需求与喜好（只读，不调用 AI）：
+#   明说想要：needs.jsonl 里 status=open 的需求——品牌对上（maker，或没写 maker 时需求文字里提到品牌），
+#             写了图案（pattern_names_raw）的须对上图案，写了器型的、货的器型已知时须对上器型；
+#   明说喜欢 / 推算口味：preferences.jsonl 里 polarity=like、status=active 的维度对上（maker → 品牌、pattern → 图案、
+#             form/object_type → 器型；比较喜好的 value，value 为空才用 value_raw）；对上的喜好里须有一条提到
+#             这件货的品牌、或对上只属于该品牌的图案词组（只对上器型或通用图案不算）；
+#             明说（explicit）的品牌或只属于该品牌的图案对上即"明说喜欢"，否则"推算口味"（只对上器型的明说不升级）；
+#   任一 status=active、polarity=dislike 的喜好对上同一维度 → 这位客人不匹配这件货（需求也不算）。
+# 结果只给后台 04 看，不进快照。
+
+_LATIN = re.compile(r'[a-z0-9]')
+# 普通否定只看别名自己那一小段（到"、"为止）；排除词（以外 / 除…）看整句（"、"并列也算在内）。
+_CLAUSE_END = re.compile(r'[,，、。;；!！?？()（）\n]')
+_SENTENCE_END = re.compile(r'[,，。;；!！?？()（）\n]')
+MATCH_REASON_MAX = 40
+MATCH_REASON_VALUES = 3
+
+
+def _term_rx(term, compound=False):
+    """外文词的整词正则（compound=True 时左侧可接德语复合词前缀，右侧仍须是词边界）。"""
+    left = '' if compound else r'(?<![a-z0-9])'
+    return re.compile(left + re.escape(term) + r'(?![a-z0-9])')
+
+
+def _term_spans(text, term, compound=False):
+    """term（已规范化）在 text（已规范化）里出现的位置：外文词按整词 / 复合词词尾，中文按包含。"""
+    if not term or term not in text:
+        return []
+    if not _LATIN.search(term):
+        out, i = [], text.find(term)
+        while i >= 0:
+            out.append((i, i + len(term)))
+            i = text.find(term, i + 1)
+        return out
+    return [m.span() for m in _term_rx(term, compound).finditer(text)]
+
+
+def _term_in(text, term, compound=False):
+    """term（已规范化）是否出现在 text（已规范化）里（规则同 _term_spans）。"""
+    return bool(_term_spans(text, term, compound))
+
+
+def _brand_aliases(rules, brand):
+    b = _norm(brand)
+    return [b] + rules['brands'].get(b, [])
+
+
+def _brand_hit(text, brand, rules, negate=True):
+    """客人文字（已规范化）里是否提到这个品牌（词见 matching.yaml）。
+    排除（"梅森、老德以外的小牌子""除了梅森、KPM"）：整句里有排除词时始终不算提到——喜欢、需求、不喜欢都一样。
+    普通否定（"不一定梅森"）：只在 negate=True 时检查，只看别名自己那一小段；不喜欢的喜好传 negate=False
+    （"不要梅森"就是不喜欢梅森）。"""
+    if not brand or not text:
+        return False
+    for alias in _brand_aliases(rules, brand):
+        start = 0
+        while alias and (i := text.find(alias, start)) >= 0:
+            start = i + 1
+            # 外文别名按整词（只看字母边界：「kpm73号」算 KPM）
+            if _LATIN.search(alias) and (re.match(r'[a-z]', text[i + len(alias):i + len(alias) + 1])
+                                         or (i and re.match(r'[a-z]', text[i - 1]))):
+                continue
+            tail = _SENTENCE_END.split(text[i + len(alias):], 1)[0]
+            head = _SENTENCE_END.split(text[:i])[-1]
+            if any(n in tail for n in rules['negations']) or any(n in head for n in rules['exclusions_before']):
+                continue
+            if negate:
+                near = _CLAUSE_END.split(text[max(0, i - 8):i])[-1].rstrip()
+                if any(near.endswith(n) for n in rules['negations_before']):
+                    continue
+            return True
+    return False
+
+
+def _groups_in(texts, groups, compound=False):
+    """在各段文字里找词组命中；同一处被几个词覆盖时只算最长的那个（Untertasse 是碟不是杯，Bildplatte 是瓷板不是盘）。
+    groups：{组名: [词…]}。返回命中的组名集合。"""
+    found = set()
+    for text in texts:
+        if not text:
+            continue
+        hits = [(a, b, name) for name, terms in groups.items() for term in terms
+                for a, b in _term_spans(text, term, compound)]
+        for a, b, name in hits:
+            if not any(a2 <= a and b <= b2 and (b2 - a2) > (b - a) and n2 != name for a2, b2, n2 in hits):
+                found.add(name)
+    return found
+
+
+def match_facts(std, title, rules):
+    """一件货用于匹配的要素：品牌、图案（ID、中文名、所属词组）、器型词组。std 为 std_names 行或 dict（可空）。"""
+    seg = _std_get(std, 'segments')
+    if isinstance(seg, str):
+        try:
+            seg = json.loads(seg)
+        except ValueError:
+            seg = None
+    seg = seg if isinstance(seg, dict) else {}
+    brand = _std_get(std, 'brand')
+    pattern_id = _std_get(std, 'pattern_id')
+    pattern = _norm(seg.get('pattern') or '')
+    t = _norm(title)
+    b = _norm(brand) if brand else ''
+    scoped = {n: g for n, g in enumerate(rules['patterns']) if not g['brands'] or b in g['brands']}
+    by_terms = _groups_in((pattern, t), {n: g['terms'] for n, g in scoped.items()}, compound=True)
+    groups = sorted(n for n, g in scoped.items() if (pattern_id and pattern_id in g['ids']) or n in by_terms)
+    form_text = _norm(' '.join(x for x in (seg.get('form'), seg.get('function'), _std_get(std, 'std_name'))
+                               if isinstance(x, str) and x))
+    forms = _groups_in((form_text, t), rules['forms'], compound=True)
+    return dict(brand=brand, pattern_id=pattern_id, pattern=pattern, pattern_groups=groups, forms=forms)
+
+
+def _pattern_how(text, facts, rules):
+    """客人文字（已规范化）是否对上这件货的图案：None / 'name'（货的图案名出现在文字里）/ 'group'（命中不限品牌的
+    词组）/ 'scoped'（命中只属于这件货品牌的词组——这也说明了品牌）。"""
+    how = None
+    for n in facts['pattern_groups']:
+        g = rules['patterns'][n]
+        if any(_term_in(text, term) for term in g['terms']):
+            if g['brands']:
+                return 'scoped'
+            how = 'group'
+    p = facts['pattern']
+    if not how and p and (len(p) >= 4 or (len(p) >= 2 and not _LATIN.search(p))) and _term_in(text, p):
+        how = 'name'
+    return how
+
+
+def _pattern_hit(text, facts, rules):
+    return _pattern_how(text, facts, rules) is not None
+
+
+def _form_groups(text, rules):
+    return _groups_in((text,), rules['forms'])
+
+
+def _strs(value):
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str) and v.strip()]
+    return []
+
+
+def _cut(text):
+    text = ' '.join(text.split())
+    return text if len(text) <= MATCH_REASON_MAX else text[:MATCH_REASON_MAX] + '…'
+
+
+def _need_hit(need, facts, rules):
+    """一条需求是否对上这件货；对上时返回理由文字（不含分级前缀）。"""
+    if not isinstance(need, dict) or need.get('status') != 'open':
+        return None
+    makers = _strs(need.get('maker'))
+    pats = _strs(need.get('pattern_names_raw'))
+    desc = _strs(need.get('additional_description'))
+    filters = _strs(need.get('object_filters'))
+    texts = pats + desc + filters
+    words = _norm(' '.join(texts))
+    if makers:
+        if not any(_brand_hit(_norm(m), facts['brand'], rules) for m in makers):
+            return None
+    elif not _brand_hit(words, facts['brand'], rules):
+        return None
+    if pats and not any(_pattern_hit(_norm(p), facts, rules) for p in pats):
+        return None
+    want = _form_groups(words, rules)
+    if want and facts['forms'] and not (want & facts['forms']):
+        return None
+    return _cut(desc[0] if desc else '、'.join(pats + makers) or '、'.join(filters) or '需求')
+
+
+def _pref_dim(pref, rules):
+    if not isinstance(pref, dict):
+        return None
+    dim = pref.get('dimension')
+    return rules['dim_of'].get(dim) if isinstance(dim, str) else None
+
+
+def _pref_text(pref):
+    """喜好的文字：value，value 为空才用 value_raw（比较与理由同一口径）。"""
+    return (_strs(pref.get('value')) or _strs(pref.get('value_raw')) or [''])[0]
+
+
+def _source(pref):
+    src = pref.get('source_type')
+    return src if isinstance(src, str) else None
+
+
+def match_customer(facts, needs, prefs, rules):
+    """一位客人与一件货：不匹配返回 None；匹配返回 dict(grade, label, weight, reasons)。
+    facts：match_facts 的结果；needs / prefs：该客人 needs.jsonl / preferences.jsonl 的行（dict；坏行忽略）。"""
+    if not facts.get('brand'):
+        return None
+    prefs = [p for p in prefs if isinstance(p, dict) and p.get('status') == 'active']
+    for p in prefs:
+        dim = _pref_dim(p, rules)
+        if not dim or p.get('polarity') != 'dislike':
+            continue
+        text = _norm(_pref_text(p))
+        hit = (_brand_hit(text, facts['brand'], rules, negate=False) if dim == 'brand'
+               else _pattern_hit(text, facts, rules) if dim == 'pattern'
+               else bool(_form_groups(text, rules) & facts['forms']))
+        if hit:
+            return None
+    grades = rules['grades']
+    wanted = [r for r in (_need_hit(n, facts, rules) for n in needs) if r]
+    if wanted:
+        g = grades['need']
+        return dict(grade='need', label=g['label'], weight=g['weight'],
+                    reasons=[g['label'] + '：' + r for r in dict.fromkeys(wanted)][:3])
+    hits, brand_seen, explicit_brand = [], False, False
+    for p in prefs:
+        dim = _pref_dim(p, rules)
+        if not dim or p.get('polarity') != 'like':
+            continue
+        text = _norm(_pref_text(p))
+        names_brand = _brand_hit(text, facts['brand'], rules)
+        if dim == 'brand':
+            ok = names_brand
+        elif dim == 'pattern':
+            how = _pattern_how(text, facts, rules)
+            ok = how is not None
+            names_brand = names_brand or how == 'scoped'
+        else:
+            ok = bool(_form_groups(text, rules) & facts['forms'])
+        if not ok:
+            continue
+        hits.append(p)
+        # 品牌须由喜好说出；"明说喜欢"只看明说的品牌 / 只属于这个品牌的图案，只对上器型的明说不算。
+        brand_seen = brand_seen or names_brand
+        if names_brand and dim in ('brand', 'pattern') and _source(p) == 'explicit':
+            explicit_brand = True
+    if not hits or not brand_seen:
+        return None
+    grade = 'explicit' if explicit_brand else 'inferred'
+    g = grades[grade]
+    shown = []
+    for p in hits:
+        value = _pref_text(p) or '?'
+        src = _source(p)
+        if src != 'explicit':
+            value += '（' + rules['sources'].get(src, src or '未注明来源') + '）'
+        shown.append(_cut(value))
+    shown = list(dict.fromkeys(shown))
+    text = '、'.join(shown[:MATCH_REASON_VALUES]) + ('等' if len(shown) > MATCH_REASON_VALUES else '')
+    return dict(grade=grade, label=g['label'], weight=g['weight'], reasons=[g['label'] + '：' + text])

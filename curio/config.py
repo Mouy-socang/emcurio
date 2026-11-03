@@ -139,6 +139,82 @@ def fee_tiers(root=ROOT):
     _FEE_CACHE[key]=out
     return out
 
+_MATCH_CACHE={}
+MATCH_GRADES=('need','explicit','inferred')
+MATCH_DIMS=('brand','pattern','form')
+
+def match_rules_for(root=ROOT):
+    """按调用方的 root 读匹配词表：root 下有 config/matching.yaml 就用它，否则用仓库里的那份。"""
+    return match_rules(root if (Path(root)/'config/matching.yaml').is_file() else ROOT)
+
+def _words(value,where):
+    if not isinstance(value,list) or any(not isinstance(x,str) or not x.strip() for x in value):
+        raise ValueError(where+' 必须为文字列表')
+    return [x.strip() for x in value]
+
+def match_rules(root=ROOT):
+    """读取并校验 config/matching.yaml（故事 16，按文件修改时间缓存）。返回已规范化（小写、去变音）的词表：
+    grades{need,explicit,inferred: {label, weight}}、sources、dim_of{GC 维度: brand/pattern/form}、
+    brands{规范化品牌: [别名…]}、negations、negations_before、patterns[{ids, terms, brands}]、forms{组名: [词…]}。格式不对时报错（中文）。"""
+    path=Path(root)/'config/matching.yaml'
+    st=path.stat()
+    key=(str(path),st.st_mtime_ns,st.st_size)
+    if key in _MATCH_CACHE:return _MATCH_CACHE[key]
+    from .judge import _norm
+    raw=yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw,dict):raise ValueError('matching.yaml 必须为映射')
+    grades=raw.get('grades')
+    if not isinstance(grades,dict) or set(grades)!=set(MATCH_GRADES):raise ValueError('matching.grades 必须恰好有 need、explicit、inferred')
+    out={'grades':{}}
+    for k in MATCH_GRADES:
+        g=grades[k]
+        if not isinstance(g,dict) or not isinstance(g.get('label'),str) or not g['label'].strip():raise ValueError('matching.grades.'+k+'.label 不能为空')
+        if type(g.get('weight')) is not int:raise ValueError('matching.grades.'+k+'.weight 必须为整数')
+        out['grades'][k]={'label':g['label'].strip(),'weight':g['weight']}
+    w=[out['grades'][k]['weight'] for k in MATCH_GRADES]
+    if not w[0]>w[1]>w[2]:raise ValueError('matching.grades：明说想要 > 明说喜欢 > 推算口味（weight 递减）')
+    sources=raw.get('sources') or {}
+    if not isinstance(sources,dict) or any(not isinstance(v,str) for v in sources.values()):raise ValueError('matching.sources 必须为 来源: 中文 的映射')
+    out['sources']={str(k):v for k,v in sources.items()}
+    dims=raw.get('dimensions')
+    if dims is None:raise ValueError('matching.yaml 缺少 dimensions（brand、pattern、form 各对照哪些 GoodCustomer 维度）')
+    if not isinstance(dims,dict) or not set(dims)<=set(MATCH_DIMS):raise ValueError('matching.dimensions 只能有 brand、pattern、form')
+    out['dim_of']={}
+    for d,names in dims.items():
+        for n in _words(names,'matching.dimensions.'+d):
+            if n in out['dim_of']:raise ValueError('matching.dimensions：'+n+' 重复')
+            out['dim_of'][n]=d
+    brands=raw.get('brands') or {}
+    if not isinstance(brands,dict):raise ValueError('matching.brands 必须为 品牌: [别名…] 的映射')
+    out['brands']={}
+    for b,v in brands.items():
+        if not isinstance(b,str) or not b.strip():raise ValueError('matching.brands 的品牌名不能为空')
+        if _norm(b) in out['brands']:raise ValueError('matching.brands：'+b+' 与另一个品牌名规范化后相同')
+        out['brands'][_norm(b)]=[_norm(a) for a in _words(v or [],'matching.brands.'+b)]
+    out['negations']=[_norm(x) for x in _words(raw.get('negations') or [],'matching.negations')]
+    out['negations_before']=[_norm(x) for x in _words(raw.get('negations_before') or [],'matching.negations_before')]
+    out['exclusions_before']=[_norm(x) for x in _words(raw.get('exclusions_before') or [],'matching.exclusions_before')]
+    pats=raw.get('patterns') or []
+    if not isinstance(pats,list):raise ValueError('matching.patterns 必须为列表')
+    out['patterns']=[]
+    for n,p in enumerate(pats):
+        where='matching.patterns 第 %d 项'%(n+1)
+        if not isinstance(p,dict) or not set(p)<={'ids','terms','brands'}:raise ValueError(where+'格式不对')
+        terms=[_norm(t) for t in _words(p.get('terms'),where+' terms')]
+        if not terms:raise ValueError(where+'缺少 terms')
+        scope=_words(p.get('brands') or [],where+' brands')
+        unknown=[b for b in scope if _norm(b) not in out['brands']]
+        if unknown:raise ValueError(where+' brands 不在 matching.brands 里：'+'、'.join(unknown))
+        out['patterns'].append({'ids':frozenset(_words(p.get('ids') or [],where+' ids')),'terms':terms,
+                                'brands':frozenset(_norm(b) for b in scope)})
+    forms=raw.get('forms') or {}
+    if not isinstance(forms,dict):raise ValueError('matching.forms 必须为 组名: [词…] 的映射')
+    out['forms']={str(k):[_norm(t) for t in _words(v,'matching.forms.'+str(k))] for k,v in forms.items()}
+    out['root']=str(Path(root))
+    if len(_MATCH_CACHE)>4:_MATCH_CACHE.clear()
+    _MATCH_CACHE[key]=out
+    return out
+
 def _env(root,keys):
     """只读项目根目录 .env 中指定的键；不读进程环境变量，避免被系统环境悄悄覆盖。"""
     values={}

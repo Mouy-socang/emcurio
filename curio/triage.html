@@ -210,6 +210,21 @@ img{display:block}
 .dlg .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
 @media (min-width:768px){.dlgwrap{align-items:center}}
 
+/* 04 匹配（故事 16，match-row）：按客人一行，点开展开逐件列表；确认后出现"复制单件页链接" */
+.mlist{list-style:none;border-top:1px solid var(--hair);margin-top:8px}
+.mrow{border-bottom:1px solid var(--hair)}
+.mhead{display:flex;width:100%;min-height:var(--tap);align-items:center;justify-content:space-between;gap:8px;padding:10px 0;background:none;border:0;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.mhead .mn{font-family:var(--serif);font-weight:600;font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+.mhead .mc{font-size:14px;color:var(--muted);white-space:nowrap}
+.mhead .tag{margin-left:6px}
+.mrow .arlist{margin-top:0;border-top:1px solid var(--hair)}
+.mi .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+.mi .acts2 .btn{margin-top:0}
+.mi .why{font-size:14px;color:var(--muted);overflow-wrap:anywhere}
+.mi .why .tag{margin-left:0;margin-right:6px}
+.mi .im input{width:100%;margin-top:4px}
+.mi .gx{display:flex;flex-wrap:wrap;gap:0 16px}
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 </style></head><body>
 <div id="app">
@@ -217,7 +232,7 @@ img{display:block}
   <a class="tc" id="tab01" aria-current="page" href="/#new"><span class="ix" aria-hidden="true">01</span><b>新货</b><span class="ct mono" id="cNew">—</span><span class="vh">件待处理</span></a>
   <a class="tc" id="tab02" href="/#pool"><span class="ix" aria-hidden="true">02</span><b>商品池</b><span class="ct mono" id="cPool">—</span><span class="vh">件已留下</span></a>
   <a class="tc" id="tab03" href="/#rank"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="ct mono" id="cRank">— / 10</span><span class="vh">件已排</span></a>
-  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="na">暂不可用</span></span>
+  <a class="tc" id="tab04" href="/#match"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="ct mono" id="cMatch">—</span><span class="vh">位客人有待处理的匹配</span></a>
   <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="na">暂不可用</span></span>
   <a class="tc" id="tab06" href="/#guests"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="ct mono" id="cGuests">—</span><span class="vh">个待关联</span></a>
 </nav>
@@ -269,6 +284,15 @@ img{display:block}
   <div class="empty" id="rankEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>榜还是空的</h2><p class="muted">从 02 商品池"加入榜"，排满 10 件后预览、发布。</p><p><a class="btn" href="/#pool">去 02 商品池</a></p></div>
   <div class="foot"><button class="btn primary" id="btnPreview" type="button">预览</button><p class="reason" id="whyPreview" hidden></p></div>
   <p class="im" id="previewMsg" role="alert" hidden></p>
+</section>
+<section id="matchView" hidden aria-labelledby="h04">
+  <h1 class="vh" id="h04" tabindex="-1">匹配</h1>
+  <p class="im" id="mErr" role="alert" hidden><span id="mErrText">未能读取匹配</span> · <button class="lnk lnk-pad" id="mReload" type="button">重试</button></p>
+  <p class="im" id="mNoGc" hidden>找不到 GoodCustomer 资料库（请检查 config/settings.yaml 的 goodcustomer 路径）。</p>
+  <p class="im" id="mNoSite" hidden>站点地址未配置（.env 的 CURIO_SERVER_URL），暂不能复制单件页链接。</p>
+  <p class="gnone" id="mNote"></p>
+  <ul class="mlist" id="mList" aria-label="按客人"></ul>
+  <div class="empty" id="mEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>暂无配上货的客人</h2></div>
 </section>
 <section id="guestsView" hidden aria-labelledby="h06">
   <h1 class="vh" id="h06" tabindex="-1">客人</h1>

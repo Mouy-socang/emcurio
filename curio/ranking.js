@@ -56,7 +56,8 @@
 
   /* ---------- 分区切换 ---------- */
   function fromHash() {
-    return location.hash === '#pool' ? 'pool' : location.hash === '#rank' ? 'rank' : location.hash === '#guests' ? 'guests' : 'new';
+    return location.hash === '#pool' ? 'pool' : location.hash === '#rank' ? 'rank' : location.hash === '#match' ? 'match' :
+      location.hash === '#guests' ? 'guests' : 'new';
   }
   function show(v, user) {
     view = v;
@@ -65,17 +66,19 @@
     $('triageView').hidden = v !== 'new';
     $('poolView').hidden = v !== 'pool';
     $('rankView').hidden = v !== 'rank';
+    $('matchView').hidden = v !== 'match';
     $('guestsView').hidden = v !== 'guests';
-    [['new', 'tab01'], ['pool', 'tab02'], ['rank', 'tab03'], ['guests', 'tab06']].forEach(([k, id]) => {
+    [['new', 'tab01'], ['pool', 'tab02'], ['rank', 'tab03'], ['match', 'tab04'], ['guests', 'tab06']].forEach(([k, id]) => {
       if (k === v) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
     });
     document.querySelector('main.scr').classList.toggle('wide', v === 'pool');
     document.title = viewTitle();
     if (v === 'pool') loadPool();
     if (v === 'rank') { loadRank(); if (!pool) loadPool(); }
+    if (window.curioMatches) { if (v === 'match') window.curioMatches.open(); else window.curioMatches.leave(); }
     if (window.curioGuests) { if (v === 'guests') window.curioGuests.open(); else window.curioGuests.leave(); }
     if (user) {
-      const h = v === 'pool' ? $('h02') : v === 'rank' ? $('h03') : v === 'guests' ? $('h06') : $('h01');
+      const h = v === 'pool' ? $('h02') : v === 'rank' ? $('h03') : v === 'match' ? $('h04') : v === 'guests' ? $('h06') : $('h01');
       h.setAttribute('tabindex', '-1'); h.focus();
     }
   }

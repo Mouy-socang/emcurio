@@ -433,12 +433,14 @@ function setPrimaryReason(reason) {
 }
 // 当前分区的页面标题与回落焦点（01 新货 / 已自动移出 / 02 商品池 / 03 榜）。
 function viewTitle() {
+  if (!$('matchView').hidden) return '匹配 · 后台';
   if (!$('guestsView').hidden) return '客人 · 后台';
   if (!$('poolView').hidden) return '商品池 · 后台';
   if (!$('rankView').hidden) return '榜 · 后台';
   return $('arView').hidden ? '新货 · 后台' : '已自动移出 · 后台';
 }
 function viewFocus() {
+  if (!$('matchView').hidden) return $('h04');
   if (!$('guestsView').hidden) return $('h06');
   if (!$('poolView').hidden) return $('h02');
   if (!$('rankView').hidden) return $('h03');
@@ -1121,5 +1123,213 @@ window.curioGuests = (function () {
       if (!$('cdlg').hidden) closeDlg(false);
       if (data) { lastJson = ''; render(); }
     }
+  };
+})();
+
+/* ---------- 04 匹配（故事 16，CAP-5） ----------
+   按客人一行（称呼 + 配上件数；有"明说想要"的在前，再按待处理件数），点开展开逐件列表：缩略图、货号、标准名称、价格、
+   分级与理由；每件"确认"或"不合适"（带 request_id；网络或服务端失败行内"未保存 · 重试"，重试沿用同一个 request_id；
+   400 类拒绝只显示原因并重新读取）。不合适之后该行变成"已标不合适 · 撤销"，直到下一次读取。确认后出现
+   "复制单件页链接"：链接 = 站点地址 + /item/CO-NNNN（不按人区分）；该件不在已送达的客人页上（未发布或已隐藏）时
+   aria-disabled，原因"请先发布这件货"。剪贴板失败时显示已全选的只读输入框。 */
+window.curioMatches = (function () {
+  let data = null, active = false, inflight = null, again = false, lastJson = '';
+  const expanded = new Set();  // 展开的客人 customer_id
+  const msgs = new Map();      // 客人|货 -> {text, retry, input}
+  const busy = new Set();      // 客人|货：写入中
+  const rids = new Map();      // 客人|货|决定 -> request_id（失败重试沿用）
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const btn = (cls, text, k) => { const b = el('button', cls, text); b.type = 'button'; if (k) b.dataset.k = k; return b; };
+  const keyOf = () => { const a = document.activeElement; return a && a.dataset ? a.dataset.k : null; };
+  const pairKey = (c, it) => c.customer_id + '|' + it.item_id;
+  function find(k) { return k ? document.querySelector('[data-k="' + CSS.escape(k) + '"]') : null; }
+  function refocus(k, fallback) {
+    const t = find(k);
+    if (t && t.offsetParent !== null) t.focus(); else if (fallback) fallback.focus();
+  }
+
+  // 读取进行中又要读：共用同一个 promise，结束后再读一次；调用方 await 到最新的那次读完。
+  function load() {
+    if (inflight) { again = true; return inflight; }
+    inflight = (async () => {
+      try {
+        const d = await get('/api/match');
+        $('mErr').hidden = true;
+        absorb(d);
+      } catch (e) {
+        $('cMatch').textContent = '—';
+        if (active) { $('mErrText').textContent = e && e.message && !(e instanceof TypeError) && !(e instanceof SyntaxError) ? '未能读取匹配（' + e.message + '）' : '未能读取匹配'; $('mErr').hidden = false; shout('未能读取匹配'); }
+      }
+    })().then(() => {
+      inflight = null;
+      if (again) { again = false; return load(); }
+    });
+    return inflight;
+  }
+  function recount() {
+    data.count = data.customers.filter(c => c.items.some(it => it.decision === null && !it._rejected)).length;
+    $('cMatch').textContent = data.available ? data.count : '—';
+  }
+  function absorb(d) {
+    data = d;
+    $('cMatch').textContent = d.available ? d.count : '—';
+    const json = JSON.stringify(d);
+    if (json !== lastJson) { lastJson = json; render(); }
+  }
+
+  /* ---------- 绘制 ---------- */
+  function render() {
+    if (!data) return;
+    const k = keyOf();
+    $('mNoGc').hidden = data.available;
+    $('mNoSite').hidden = !data.available || data.site;
+    if (data.site_problem) $('mNoSite').textContent = data.site_problem.replace('暂不能复制链接', '暂不能复制单件页链接。');
+    const notes = [];
+    if (data.warnings) notes.push('GoodCustomer 资料里有 ' + data.warnings + ' 行无法读取，已跳过');
+    if (data.unreadable) notes.push(data.unreadable + ' 个资料文件读不了，已跳过');
+    $('mNote').textContent = notes.join('；');
+    $('mList').replaceChildren(...data.customers.map(row));
+    $('mEmpty').hidden = !data.available || data.customers.length > 0;
+    refocus(k);
+  }
+  function row(c) {
+    const li = el('li', 'mrow'); li.dataset.id = c.customer_id;
+    const open = expanded.has(c.customer_id);
+    const h = btn('mhead', null, c.customer_id + ':head');
+    h.setAttribute('aria-expanded', String(open));
+    const n = el('span', 'mn', c.name); if (c.has_need) n.append(tagEl('明说想要'));
+    const cnt = el('span', 'mc'); cnt.append('配上 ', el('span', 'mono', c.total), ' 件');
+    if (!c.pending) cnt.append(' · 已处理');
+    else if (c.pending !== c.total) cnt.append(' · 待处理 ', el('span', 'mono', c.pending));
+    h.append(n, cnt);
+    h.onclick = () => { if (expanded.has(c.customer_id)) expanded.delete(c.customer_id); else expanded.add(c.customer_id); render(); };
+    li.append(h);
+    if (open) {
+      const ul = el('ul', 'arlist'); ul.id = 'mItems-' + c.customer_id; ul.setAttribute('aria-label', c.name + ' 配上的货');
+      h.setAttribute('aria-controls', ul.id);
+      c.items.forEach(it => ul.append(it._rejected ? rejectedRow(c, it) : itemRow(c, it)));
+      li.append(ul);
+    }
+    return li;
+  }
+  function rejectedRow(c, it) {
+    const k = pairKey(c, it);
+    const li = el('li', 'mi'); li.dataset.pair = k;
+    const body = el('div'); body.style.gridColumn = '1 / -1';
+    const p = el('p', 'why'); p.append(it.name + ' · 已标不合适 · ');
+    const u = btn('lnk lnk-pad', busy.has(k) ? '正在撤销…' : '撤销', k + ':undo'); u.onclick = () => decide(c, it, 'undo');
+    p.append(u); body.append(p);
+    const m = msgs.get(k);
+    if (m) body.append(msgBox(k, m));
+    li.append(body);
+    return li;
+  }
+  function msgBox(k, m) {
+    const box = el('p', 'im'); box.append(m.text);
+    if (m.retry) { const r = btn('lnk lnk-pad', '重试', k + ':retry'); r.onclick = m.retry; box.append(' · ', r); }
+    if (m.input) {
+      const inp = el('input', 'ti mono'); inp.readOnly = true; inp.value = m.input; inp.dataset.k = k + ':linkbox';
+      inp.setAttribute('aria-label', '单件页链接'); box.append(inp);
+    }
+    return box;
+  }
+  function itemRow(c, it) {
+    const k = pairKey(c, it), isBusy = busy.has(k);
+    const li = el('li', 'mi'); li.dataset.pair = k;
+    const th = btn('th', null, k + ':th'); th.setAttribute('aria-label', it.name + '，打开货详情');
+    if (it.image) { const im = el('img'); im.src = it.image; im.alt = ''; th.append(im); }
+    th.onclick = () => openDetail(it.item_id, 'pool', th);
+    const body = el('div');
+    const t = btn('t', null, k + ':name'); t.textContent = it.name; setLang(t, it.name_lang);
+    (it.tags || []).forEach(x => t.append(tagEl(x)));
+    t.onclick = () => openDetail(it.item_id, 'pool', t);
+    const p = el('p', 'p'); p.append(el('span', 'mono', it.code || ''), ' · ', el('span', 'mono', it.price));
+    if (!it.on_sale) p.append(' · 原平台已下架');
+    const why = el('p', 'why');
+    if (it.decision === 'confirmed') why.append(tagEl('已确认'));
+    why.append(it.reasons.join('；'));
+    body.append(t, p, why);
+    const acts = el('div', 'acts2');
+    const no = btn('btn', '不合适', k + ':reject'); no.onclick = () => decide(c, it, 'rejected');
+    let w = null;
+    if (it.decision === 'confirmed') {
+      const cp = btn('btn', '复制单件页链接', k + ':copy');
+      if (it.link) cp.onclick = () => copy(c, it);
+      else {
+        w = el('p', 'why', it.link_reason); w.id = 'mWhy-' + k.replace(/[^A-Za-z0-9_-]/g, '_');
+        cp.setAttribute('aria-disabled', 'true'); cp.setAttribute('aria-describedby', w.id);
+        cp.onclick = () => shout(it.link_reason);
+      }
+      acts.append(cp, no);
+    } else {
+      const ok = btn('btn', isBusy ? '正在保存…' : '确认', k + ':confirm'); ok.onclick = () => decide(c, it, 'confirmed');
+      acts.append(ok, no);
+    }
+    body.append(acts);
+    if (w) body.append(w);
+    if (isBusy) acts.querySelectorAll('button').forEach(b => b.setAttribute('aria-disabled', 'true'));
+    const m = msgs.get(k);
+    if (m) body.append(msgBox(k, m));
+    li.append(th, body);
+    return li;
+  }
+
+  /* ---------- 确认 / 不合适 / 撤销 ---------- */
+  // 新的一次操作：之前的成功 / 复制提示收起（失败待重试的保留）。
+  function settle() { [...msgs].forEach(([k, m]) => { if (!m.retry) msgs.delete(k); }); }
+  async function decide(c, it, decision) {
+    const k = pairKey(c, it);
+    if (busy.has(k)) return;
+    const rk = k + '|' + decision;
+    const request_id = rids.get(rk) || rid(); rids.set(rk, request_id);
+    busy.add(k); msgs.delete(k); settle(); render();
+    let res;
+    try { res = await post('/api/match/decide', {customer_id: c.customer_id, item_id: it.item_id, decision, request_id}); }
+    catch (e) { res = null; }
+    busy.delete(k);
+    if (res && res.status === 400) {
+      // 拒绝（已不匹配、已不在商品池…）：重试不会成功——显示原因并重新读取。
+      rids.delete(rk);
+      const text = '未保存（' + (res.data.error || '请刷新本页') + '）';
+      msgs.set(k, {text}); shout(text);
+      await load(); render(); refocus(k + ':confirm', $('h04'));
+      return;
+    }
+    if (!res || !res.ok) {
+      msgs.set(k, {text: '未保存', retry: () => decide(c, it, decision)});
+      shout('未保存，请重试'); render(); refocus(k + ':retry');
+      return;
+    }
+    rids.delete(rk);
+    if (decision === 'rejected') {
+      // 先留在原位显示"已标不合适 · 撤销"，下一次读取后才离开列表。
+      it._rejected = true; recount(); say('已标为不合适'); lastJson = ''; render(); refocus(k + ':undo', $('h04'));
+      return;
+    }
+    say(decision === 'confirmed' ? '已确认' : '已撤销不合适');
+    await load();
+    refocus(k + (decision === 'confirmed' ? ':copy' : ':confirm'), $('h04'));
+  }
+  async function copy(c, it) {
+    const k = pairKey(c, it);
+    settle();
+    try {
+      await navigator.clipboard.writeText(it.link);
+      msgs.set(k, {text: '已复制单件页链接 · 去微信发给' + c.name});
+      say('已复制单件页链接'); render(); refocus(k + ':copy');
+    } catch (e) {
+      msgs.set(k, {text: '未能自动复制，请长按选择链接', input: it.link});
+      shout('未能自动复制链接，请手动复制'); render();
+      const inp = find(k + ':linkbox'); if (inp) { inp.focus(); inp.select(); }
+    }
+  }
+
+  $('mReload').onclick = () => load();
+  window.addEventListener('curio:detail-closed', () => { if (active) load(); });
+  load();                      // 计数：打开后台时读一次
+  return {
+    open() { active = true; load(); },
+    // 切到其它分区：收起提示，并刷新 04 计数（01/02 的改动会影响匹配）。
+    leave() { active = false; if (msgs.size) { msgs.clear(); if (data) { lastJson = ''; render(); } } load(); }
   };
 })();
