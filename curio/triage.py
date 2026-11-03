@@ -134,10 +134,19 @@ def _agent_reason(item):
     return item['agent_reason'] if 'agent_reason' in item.keys() else None
 
 
+# 有效人工决定：actor=human、未被撤销；改费用档位（fee）只是记录，撤销事件（undo）本身也不算。
+HUMAN_DECISION = "actor='human' AND undone_by IS NULL AND action NOT IN ('fee','undo')"
+
+
 def has_human(c, iid):
-    # 改费用档位（action 'fee'）只是记录，不算拣选上的人工决定。
-    return c.execute("SELECT 1 FROM triage_events WHERE item_id=? AND actor='human' AND action!='fee' LIMIT 1",
+    """该货是否有有效的人工决定（只做过、又全部撤销的货视为未经人工决定）。"""
+    return c.execute('SELECT 1 FROM triage_events WHERE item_id=? AND ' + HUMAN_DECISION + ' LIMIT 1',
                      (iid,)).fetchone() is not None
+
+
+def decided_items(c):
+    """有有效人工决定的全部货（口径同 has_human）。"""
+    return {r[0] for r in c.execute('SELECT DISTINCT item_id FROM triage_events WHERE ' + HUMAN_DECISION)}
 
 
 def state(c, iid):

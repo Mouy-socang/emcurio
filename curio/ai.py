@@ -124,8 +124,9 @@ def examples(c):
     return out
 
 
-def item_payload(item, std):
-    """一件货送给模型的字段：item_id、标题、描述（截断 600 字）、欧元价（非欧元为空）、原价与币种、标准名称、外画标签、基线分。"""
+def item_payload(item, std, learned=None):
+    """一件货送给模型的字段：item_id、标题、描述（截断 600 字）、欧元价（非欧元为空）、原价与币种、标准名称、外画标签、基线分。
+    learned：store.baseline_learned 的结果（已确认规律加分），与规则基线分同口径。"""
     item = dict(item)
     std = dict(std) if std is not None else {}
     eur = item.get('listed_price') if item.get('currency') == 'EUR' else None
@@ -133,7 +134,7 @@ def item_payload(item, std):
             'description': (item.get('description') or '')[:DESCRIPTION_CHARS],
             'price_eur': eur, 'price': item.get('listed_price'), 'currency': item.get('currency') or None,
             'std_name': std.get('std_name'), 'overpaint': bool(std.get('overpaint')),
-            'baseline_score': baseline_score(item, std)[0]}
+            'baseline_score': baseline_score(item, std, learned)[0]}
 
 
 def build_request(items, prefs):
@@ -245,7 +246,7 @@ def score_round(store, key, limit, clock=time.time, post=None, max_requests=MAX_
     """采集轮末尾的 AI 打分：对新货（非 backlog、在售、分数缺失/过期/来源为 rule，且 24 小时内没请求过）按 first_seen 新到旧，
     在当日预算、本轮请求次数（含重试）与时限内打分。
     返回 dict(ai_status=disabled/ok/budget_exhausted/error, ai_scored=件数, ai_usage[, ai_error, ai_warnings, ai_stopped])。"""
-    from .store import write_score, now
+    from .store import write_score, now, baseline_learned
     if not key or limit <= 0:
         return {'ai_status': 'disabled', 'ai_scored': 0, 'ai_usage': _usage(store, limit, clock)}
     budget = AIBudget(store, limit, clock)
@@ -260,8 +261,10 @@ def score_round(store, key, limit, clock=time.time, post=None, max_requests=MAX_
             if not rows:
                 break
             stds = {r['item_id']: c.execute('SELECT * FROM std_names WHERE item_id=?', (r['item_id'],)).fetchone() for r in rows}
+            # CAP-8：基线分与 store.refresh_baseline 同口径（含已确认留下类规律的加分）。
+            learned = {r['item_id']: baseline_learned(c, r['item_id']) for r in rows}
             prefs = examples(c)
-        items = [item_payload(r, stds[r['item_id']]) for r in rows]
+        items = [item_payload(r, stds[r['item_id']], learned[r['item_id']]) for r in rows]
         versions = {r['item_id']: r['rule_version'] for r in rows}
         done.update(versions)
         text, answered = None, False

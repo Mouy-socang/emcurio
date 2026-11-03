@@ -139,6 +139,43 @@ def fee_tiers(root=ROOT):
     _FEE_CACHE[key]=out
     return out
 
+_LEARN_CACHE={}
+
+def learning_for(root=ROOT):
+    """按调用方的 root 读规律归纳参数：root 下有 config/learning.yaml 就用它，否则用仓库里的那份。"""
+    return learning(root if (Path(root)/'config/learning.yaml').is_file() else ROOT)
+
+def learning(root=ROOT):
+    """读取并校验 config/learning.yaml（故事 17，按文件修改时间缓存）。
+    返回 dict(min_count, min_ratio, keep_bonus, price_bands={currency, edges})。格式不对时报错（中文）。"""
+    path=Path(root)/'config/learning.yaml'
+    st=path.stat()
+    key=(str(path),st.st_mtime_ns,st.st_size)
+    if key in _LEARN_CACHE:return _LEARN_CACHE[key]
+    raw=yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw,dict):raise ValueError('learning.yaml 必须为映射')
+    unknown=set(raw)-{'min_count','min_ratio','keep_bonus','price_bands'}
+    if unknown:raise ValueError('learning.yaml 含未知键：'+','.join(sorted(map(str,unknown))))
+    count=raw.get('min_count',5)
+    if type(count) is not int or not 1<=count<=1000:raise ValueError('learning.min_count 必须为 1–1000 的整数')
+    ratio=raw.get('min_ratio',0.8)
+    if isinstance(ratio,bool) or not isinstance(ratio,(int,float)) or not 0<ratio<=1:raise ValueError('learning.min_ratio 必须在 0–1 之间')
+    bonus=raw.get('keep_bonus',10)
+    if type(bonus) is not int or not 0<=bonus<=50:raise ValueError('learning.keep_bonus 必须为 0–50 的整数')
+    bands=raw.get('price_bands',{})
+    if not isinstance(bands,dict):raise ValueError('learning.price_bands 必须为映射（currency、edges）')
+    if not set(bands)<={'currency','edges'}:raise ValueError('learning.price_bands 只能有 currency、edges')
+    currency=bands.get('currency','EUR')
+    if not isinstance(currency,str) or not re.fullmatch(r'[A-Z]{3}',currency):raise ValueError('learning.price_bands.currency 必须为三位大写币种')
+    edges=bands.get('edges',[])
+    if not isinstance(edges,list) or any(isinstance(x,bool) or not isinstance(x,(int,float)) or not math.isfinite(x) or x<=0 for x in edges):
+        raise ValueError('learning.price_bands.edges 必须为正数列表')
+    if any(b<=a for a,b in zip(edges,edges[1:])):raise ValueError('learning.price_bands.edges 必须从小到大')
+    out={'min_count':count,'min_ratio':float(ratio),'keep_bonus':bonus,'price_bands':{'currency':currency,'edges':[float(x) for x in edges]}}
+    if len(_LEARN_CACHE)>4:_LEARN_CACHE.clear()
+    _LEARN_CACHE[key]=out
+    return out
+
 _MATCH_CACHE={}
 MATCH_GRADES=('need','explicit','inferred')
 MATCH_DIMS=('brand','pattern','form')

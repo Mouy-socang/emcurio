@@ -541,8 +541,9 @@ def run(root,clock=time.time):
                 do_pub=False
         if not do_fetch and not do_check and not do_pub:
             # 空闲轮也发心跳（AD-10）：同步模块每轮都把各平台最近成功时间发给服务器。
-            from . import sync
-            return {'status':'idle',**sched.summary(),**sync.run(store,root)}
+            from . import sync,learning
+            # CAP-8：每轮归纳一次待审规律（只改 05 计数，不打断）。
+            return {'status':'idle',**sched.summary(),**learning.run(store,root),**sync.run(store,root)}
         result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub}
         with store.connect() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
@@ -620,6 +621,9 @@ def run(root,clock=time.time):
         # AD-14：每天最多成功取一次 ECB 人民币参考汇率（失败沿用上次的值与日期），发布时随快照上线。
         from . import fx
         result.update(fx.run(store,clock))
+        # CAP-8（故事 17）：从墨墨的人工拣选归纳待审规律；失败只记 learning_status，不影响其它结果。
+        from . import learning
+        result.update(learning.run(store,root))
         # AD-23：限时 30 秒把发件箱按序推到服务器；未配置服务器时 sync_status: disabled，失败下轮从同一条重试。
         from . import sync
         result.update(sync.run(store,root))

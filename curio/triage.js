@@ -434,6 +434,7 @@ function setPrimaryReason(reason) {
 // 当前分区的页面标题与回落焦点（01 新货 / 已自动移出 / 02 商品池 / 03 榜）。
 function viewTitle() {
   if (!$('matchView').hidden) return '匹配 · 后台';
+  if (!$('rulesView').hidden) return '待审核 · 后台';
   if (!$('guestsView').hidden) return '客人 · 后台';
   if (!$('poolView').hidden) return '商品池 · 后台';
   if (!$('rankView').hidden) return '榜 · 后台';
@@ -441,6 +442,7 @@ function viewTitle() {
 }
 function viewFocus() {
   if (!$('matchView').hidden) return $('h04');
+  if (!$('rulesView').hidden) return $('h05');
   if (!$('guestsView').hidden) return $('h06');
   if (!$('poolView').hidden) return $('h02');
   if (!$('rankView').hidden) return $('h03');
@@ -1115,6 +1117,7 @@ window.curioGuests = (function () {
   // 计数：打开后台时读一次（不拉服务器）。
   load(false);
   return {
+    confirmDialog: confirmDlg, // 05 停用规律也用这个确认框
     open() { active = true; load(true); },
     leave() {
       active = false;
@@ -1331,5 +1334,146 @@ window.curioMatches = (function () {
     open() { active = true; load(); },
     // 切到其它分区：收起提示，并刷新 04 计数（01/02 的改动会影响匹配）。
     leave() { active = false; if (msgs.size) { msgs.clear(); if (data) { lastJson = ''; render(); } } load(); }
+  };
+})();
+
+/* ---------- 05 待审核（故事 17，CAP-8、FR-19） ----------
+   每条 rule-card：规律一句、依据件数、最近一次时间；"确认"/"否决"均为最终操作、无撤销（带 request_id；
+   网络或服务端（5xx）失败行内"未保存 · 重试"，重试沿用同一个 request_id；4xx 拒绝不可重试，只显示原因并重新读取）。
+   成功后条目移出、焦点移到下一条，polite 播报"已确认规律"/"已否决规律"。下方"已生效的规律"可"停用"（需确认）。
+   打开 05 时先让 Mac 归纳一次；计数（新规律）只改分区上的数字，不弹窗、不播报。 */
+window.curioRules = (function () {
+  let data = null, active = false, inflight = null, again = false, wantRefresh = false;
+  const msgs = new Map();      // 'p'+id / 'a'+id -> {text, retry}
+  const busy = new Set();      // 写入中的规律 id
+  const rids = new Map();      // 规律 id|决定 -> request_id（失败重试沿用）
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const btn = (cls, text, k) => { const b = el('button', cls, text); b.type = 'button'; if (k) b.dataset.k = k; return b; };
+  const keyOf = () => { const a = document.activeElement; return a && a.dataset ? a.dataset.k : null; };
+  function find(k) { return k ? document.querySelector('#rulesView [data-k="' + CSS.escape(k) + '"]') : null; }
+  function refocus(k, fallback) {
+    const t = find(k);
+    if (t && t.offsetParent !== null) t.focus(); else if (fallback) fallback.focus();
+  }
+  function load(refresh) {
+    if (refresh) wantRefresh = true;
+    if (inflight) { again = true; return inflight; }
+    inflight = (async () => {
+      const r = wantRefresh; wantRefresh = false;
+      try {
+        const d = await get('/api/rules' + (r ? '?refresh=1' : ''));
+        $('rErr').hidden = true;
+        absorb(d);
+      } catch (e) {
+        if (!data) $('cRules').textContent = '—';
+        if (active) { $('rErr').hidden = false; shout('未能读取待审核'); }
+      }
+    })().then(() => {
+      inflight = null;
+      if (again) { again = false; return load(); }
+    });
+    return inflight;
+  }
+  function absorb(d) {
+    data = d;
+    $('cRules').textContent = d.count;    // 只改数字，不播报
+    $('rNote').textContent = d.refresh_error ? '这次未能重新归纳（' + d.refresh_error + '），显示的是上次的待审核' : '';
+    if (d.config) {
+      $('rMin').textContent = d.config.min_count;
+      $('rRatio').textContent = Math.round(d.config.min_ratio * 100) + '%';
+    }
+    render();
+  }
+  function render() {
+    if (!data) return;
+    const k = keyOf();
+    $('rList').replaceChildren(...data.items.map(card));
+    $('rEmpty').hidden = data.items.length > 0;
+    const live = data.active || [];
+    $('rActH').hidden = $('rActive').hidden = !live.length;
+    $('rActN').textContent = live.length;
+    $('rActive').replaceChildren(...live.map(activeRow));
+    refocus(k);
+  }
+  function msgBox(mk) {
+    const m = msgs.get(mk);
+    if (!m) return null;
+    const box = el('p', 'im'); box.append(m.text);
+    if (m.retry) { const rb = btn('lnk lnk-pad', '重试', mk + ':retry'); rb.onclick = m.retry; box.append(' · ', rb); }
+    return box;
+  }
+  function card(r) {
+    const li = el('li', 'rcard'); li.dataset.id = r.id;
+    const s = el('p', 'rs', r.sentence); s.id = 'rS-' + r.id;
+    const why = el('p', 'why'); why.append('依据 ', el('span', 'mono', r.count), ' 件');
+    const t = r.last_at ? fmtTime(r.last_at) : '';
+    if (t) why.append(' · 最近一次 ', el('span', 'mono', t));
+    const acts = el('div', 'acts2');
+    const isBusy = busy.has(r.id);
+    const ok = btn('btn primary', isBusy ? '正在保存…' : '确认', 'p' + r.id + ':confirm'); ok.onclick = () => decide(r, 'confirm');
+    const no = btn('btn', '否决', 'p' + r.id + ':reject'); no.onclick = () => decide(r, 'reject');
+    [ok, no].forEach(b => { b.setAttribute('aria-describedby', s.id); if (isBusy) b.setAttribute('aria-disabled', 'true'); });
+    acts.append(ok, no);
+    li.append(s, why, acts);
+    const m = msgBox('p' + r.id); if (m) li.append(m);
+    return li;
+  }
+  function activeRow(r) {
+    const li = el('li', 'rcard'); li.dataset.id = r.id;
+    const s = el('p', 'rs', r.text); s.id = 'rA-' + r.id;
+    const why = el('p', 'why');
+    const t = r.decided_at ? fmtTime(r.decided_at) : '';
+    if (t) why.append('确认于 ', el('span', 'mono', t));
+    const stop = btn('btn', busy.has(r.id) ? '正在保存…' : '停用', 'a' + r.id + ':retire');
+    stop.setAttribute('aria-describedby', s.id);
+    stop.onclick = () => window.curioGuests.confirmDialog('停用这条规律？', r.text + '。停用后不再执行，也不会再提出；已被它移出的货仍可在"已自动移出"里捞回。', '停用', stop, () => decide(r, 'retire'));
+    li.append(s, why, stop);
+    const m = msgBox('a' + r.id); if (m) li.append(m);
+    return li;
+  }
+  async function decide(r, decision) {
+    if (busy.has(r.id)) return;
+    const mk = (decision === 'retire' ? 'a' : 'p') + r.id;
+    const rk = r.id + '|' + decision;
+    const request_id = rids.get(rk) || rid(); rids.set(rk, request_id);
+    busy.add(r.id); msgs.delete(mk); render();
+    let res;
+    try { res = await post('/api/rules/decide', {rule_id: r.id, decision, request_id}); }
+    catch (e) { res = null; }
+    busy.delete(r.id);
+    if (res && res.status >= 400 && res.status < 500) {
+      // 拒绝（已处理、已撤下、方向冲突、令牌失效…）：重试不会成功——显示原因并重新读取。
+      rids.delete(rk);
+      const text = '未保存（' + (res.data.error || '请刷新本页') + '）';
+      shout(text); await load();
+      msgs.set(mk, {text}); render();
+      refocus(mk + ':' + decision, $('h05'));
+      return;
+    }
+    if (!res || !res.ok) {
+      msgs.set(mk, {text: '未保存', retry: () => decide(r, decision)});
+      shout('未保存，请重试'); render(); refocus(mk + ':retry');
+      return;
+    }
+    rids.delete(rk);
+    if (decision === 'retire') {
+      say('已停用规律'); await load(); refocus('a' + ((data.active || [])[0] || {}).id + ':retire', $('h05'));
+      return;
+    }
+    const i = data.items.findIndex(x => x.id === r.id);
+    if (i >= 0) data.items.splice(i, 1);
+    data.count = typeof res.data.count === 'number' ? res.data.count : data.items.length;
+    $('cRules').textContent = data.count;
+    render();
+    say(decision === 'confirm' ? '已确认规律' : '已否决规律');
+    const next = data.items[Math.max(0, i)] || data.items[data.items.length - 1];
+    if (next) refocus('p' + next.id + ':confirm'); else $('rEmptyH').focus();
+    if (decision === 'confirm') load();     // 已生效的规律列表
+  }
+  $('rReload').onclick = () => load(active);
+  load();                      // 计数：打开后台时读一次（不归纳）
+  return {
+    open() { active = true; load(true); },
+    leave() { active = false; if (msgs.size) { [...msgs].forEach(([k, m]) => { if (!m.retry) msgs.delete(k); }); render(); } load(); }
   };
 })();

@@ -14,6 +14,8 @@ from . import triage
 from . import sync
 from . import publish
 from . import behavior
+from . import learning
+from .config import learning_for
 from screening.pipeline import process
 
 
@@ -68,16 +70,61 @@ EVAL_FIELDS=('title','description','condition','listed_price','price_text','curr
 def _eval_sig(r):
     return tuple(r[f] for f in EVAL_FIELDS)
 
+def humans(c):
+    """已有有效人工拣选决定的货（口径同 triage.has_human）。"""
+    return triage.decided_items(c)
+
+_LEARN_WARNED=[]
+
+def baseline_learned(c,item_id,learn=None):
+    """基础分用的已确认规律：dict(rules, bonus)；没有已确认规律、该货已有人工决定（AD-26）时 None。
+    learn：调用方已读好的 config.learning（按它的 root）；缺省读仓库里的。参数文件出错时只记一次日志、不加分，不中断打分。"""
+    found=learning.confirmed(c)
+    if not any(r['direction']=='keep' for r in found) or triage.has_human(c,item_id):return None
+    if learn is None:
+        try:learn=learning_for()
+        except Exception:
+            if not _LEARN_WARNED:
+                _LEARN_WARNED.append(1);log.warning('config/learning.yaml 读取失败，基础分暂不计规律加分',exc_info=True)
+            return None
+    return dict(rules=found,bonus=learn['keep_bonus'])
+
+def apply_removal_rule(c,rule,learn=None):
+    """确认去掉类规律后当场生效：未经人工决定、处于新货的同组合货改判为不要（理由同规则归口），
+    再经 triage.system_place 落位、重算基础分——与重判同一路径。调用方须已开写事务。返回移出件数。"""
+    moved=0
+    for (iid,) in c.execute("SELECT item_id FROM triage WHERE state='new'").fetchall():
+        if triage.has_human(c,iid):continue
+        item=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
+        std=c.execute('SELECT * FROM std_names WHERE item_id=?',(iid,)).fetchone()
+        if item is None or item['agent_decision']=='skip' or not rules.rule_applies(rule['dims'],std,item):continue
+        c.execute("UPDATE items SET agent_decision='skip',agent_reason=?,fair_price='',rule_version=rule_version+1 WHERE item_id=?",
+                  (rules.learned_reason(rule),iid))
+        moved+=triage.system_place(c,iid)=='auto_removed'
+        refresh_baseline(c,iid,learn)
+    return moved
+
+def judge_config(c,config):
+    """判断用配置：加上库里的屏蔽词与已确认规律（CAP-8；只由 rules.evaluate 执行）。"""
+    return dict(config,blocked_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')],
+                learned_rules=learning.confirmed(c))
+
+def _eval_item(r,human):
+    """rules.evaluate 的输入：货的字段加 human_decided（已有人工决定的货不受已确认规律影响，AD-26）。"""
+    return dict(r,human_decided=human)
+
 def rejudge(c,config,precomputed=None):
     """全量重判（屏蔽词与重判脚本共用）：理由或结论变化的货更新判断、rule_version+1，
     再经 triage.system_place 落位——只移动未经人工决定的货（AD-26）。调用方须已开写事务。
-    precomputed：{item_id: (_eval_sig, evaluate 结果)}，签名与当前行一致时沿用，否则当场重算。
+    precomputed：{item_id: ((_eval_sig, 是否有人工决定), evaluate 结果)}，签名一致时沿用，否则当场重算。
     返回 dict(checked, changed, blocked, moved, transitions={旧类别→新类别: 件数})。"""
     rows=c.execute('SELECT * FROM items').fetchall()
+    human=humans(c)
     changed=matched=moved=0;transitions={}
     for r in rows:
         pre=(precomputed or {}).get(r['item_id'])
-        result=pre[1] if pre and pre[0]==_eval_sig(r) else evaluate(dict(r),config)
+        sig=(_eval_sig(r),r['item_id'] in human)
+        result=pre[1] if pre and pre[0]==sig else evaluate(_eval_item(dict(r),sig[1]),config)
         matched+=result['reason'].startswith('屏蔽词：')
         if (r['agent_decision'],r['agent_reason'],r['fair_price'] or '')!=(result['decision'],result['reason'],result.get('fair','')):
             c.execute('UPDATE items SET agent_decision=?,agent_reason=?,fair_price=?,rule_version=rule_version+1 WHERE item_id=?',
@@ -97,16 +144,17 @@ def write_score(c,item_id,score,source,reason,rule_version,model=None,ts=None):
     c.execute('INSERT OR REPLACE INTO scores(item_id,score,source,model,reason,rule_version,scored_at) VALUES(?,?,?,?,?,?,?)',
               (item_id,int(score),source,model,reason,rule_version,ts or now()))
 
-def refresh_baseline(c,item_id):
+def refresh_baseline(c,item_id,learn=None):
     """只对拣选状态为 new 的货：没有分数、分数过期（rule_version 不同）或现有规则分与当前基线不同时写入基线分。
-    未过期的 AI 分保留。返回是否写入。"""
+    未过期的 AI 分保留。learn：已读好的 config.learning（见 baseline_learned）。返回是否写入。"""
     if triage.state(c,item_id)!='new':return False
     item=c.execute('SELECT * FROM items WHERE item_id=?',(item_id,)).fetchone()
     if not item:return False
     old=c.execute('SELECT * FROM scores WHERE item_id=?',(item_id,)).fetchone()
     if old and old['source']=='ai' and old['rule_version']==item['rule_version']:return False
     std=c.execute('SELECT * FROM std_names WHERE item_id=?',(item_id,)).fetchone()
-    score,reason=baseline_score(item,std)
+    # CAP-8：已确认的留下类规律加分；已有人工决定的货（如捞回的）不受规律影响（AD-26）。
+    score,reason=baseline_score(item,std,baseline_learned(c,item_id,learn))
     if old and (old['source'],old['score'],old['reason'],old['rule_version'])==('rule',score,reason,item['rule_version']):return False
     write_score(c,item_id,score,'rule',reason,item['rule_version'])
     return True
@@ -209,6 +257,8 @@ class Store:
             publish.ensure(c)
             # 故事 15（AD-9、AD-12、AD-25）：行为账本、未识别事件、交接文件待重算标记。
             behavior.ensure(c)
+            # 故事 17（CAP-8）：待审 / 已确认 / 已否决的规律。
+            learning.ensure(c)
     @contextmanager
     def connect(self):
         c=sqlite3.connect(self.path,timeout=30);c.row_factory=sqlite3.Row
@@ -237,10 +287,10 @@ class Store:
             c.execute('BEGIN IMMEDIATE')
             old=c.execute('SELECT * FROM items WHERE item_id=?',(p['item_id'],)).fetchone()
             if old and 'description' not in item:p['description']=old['description'] or ''
-            config=dict(config,blocked_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')])
+            config=judge_config(c,config)
             changed=old is None or old['listed_price']!=listed or old['currency']!=p['currency'] or old['title']!=p['title'] or (old['description'] or '')!=p['description']
             if changed:
-                result=evaluate(p,config)
+                result=evaluate(_eval_item(p,triage.has_human(c,p['item_id'])),config)   # 口径同 humans()
                 p.update(agent_decision=result['decision'],agent_reason=result['reason'],fair_price=result.get('fair',''))
                 p['rule_version']=old['rule_version']+1 if old else 1
                 process(c,p,result,config['daily_budget'])
@@ -345,32 +395,34 @@ class Store:
             c.execute('INSERT INTO cases(item_id,decision,reason,currency,agent_decision,agent_reason,listed_price,total_price,rule_version,decided_at,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                 (iid,'irrelevant','屏蔽词：'+word,row['currency'],row['agent_decision'],row['agent_reason'],row['listed_price'],row['total_price'],version,now(),request_id))
             triage.remove(c,iid,'屏蔽词：'+word,source='block')
-            cfg=dict(config,blocked_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')])
-            r=rejudge(c,cfg)
+            r=rejudge(c,judge_config(c,config))
             result=dict(checked=r['checked'],changed=r['changed'],blocked=r['blocked'],word=word)
             c.execute('INSERT INTO block_requests VALUES(?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False)))
             return result
 
     def rejudge_all(self,config):
-        """用当前规则（含库里的屏蔽词）重判全部货并刷新标准名称；只对未经人工决定的货移动拣选状态（AD-26）。
+        """用当前规则（含库里的屏蔽词与已确认规律）重判全部货并刷新标准名称；只对未经人工决定的货移动拣选状态（AD-26）。
         判断与命名先在写锁外算好，再在一个短写事务里落库；期间有变化的货（签名不同）在事务里当场重算。
         知识库状态不是 ok 时不刷新标准名称（避免用残缺词表覆盖），报告 std_skipped。
         单件命名出错只计入 std_failed，不中断。幂等：再次运行改判数为 0。"""
         with self.connect() as c:
             rows=c.execute('SELECT * FROM items').fetchall()
-            words=[r[0] for r in c.execute('SELECT word FROM blocked_words')]
-        cfg=dict(config,blocked_words=words)
+            cfg=judge_config(c,config);human=humans(c)
+        words,learned=cfg['blocked_words'],cfg['learned_rules']
         status=kb_status(cfg)
         refresh=status=='ok'
         failures=[]
-        pre={r['item_id']:(_eval_sig(r),evaluate(dict(r),cfg)) for r in rows}
+        pre={}
+        for r in rows:
+            sig=(_eval_sig(r),r['item_id'] in human)
+            pre[r['item_id']]=(sig,evaluate(_eval_item(dict(r),sig[1]),cfg))
         names={r['item_id']:((r['title'],r['description']),_safe_name(dict(r),cfg,failures)) for r in rows} if refresh else {}
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            now_words=[r[0] for r in c.execute('SELECT word FROM blocked_words')]
-            if now_words!=words:
-                # 屏蔽词在此期间变了：预算结果作废，全部当场重算。
-                cfg=dict(config,blocked_words=now_words);pre={}
+            now_cfg=judge_config(c,config)
+            if (now_cfg['blocked_words'],now_cfg['learned_rules'])!=(words,learned):
+                # 屏蔽词或已确认规律在此期间变了：预算结果作废，全部当场重算。
+                cfg=now_cfg;pre={}
             result=rejudge(c,cfg,pre)
             written=unchanged=0
             if refresh:

@@ -225,6 +225,15 @@ img{display:block}
 .mi .im input{width:100%;margin-top:4px}
 .mi .gx{display:flex;flex-wrap:wrap;gap:0 16px}
 
+/* 05 待审核（故事 17，rule-card）：规律一句、依据次数与最近一次时间；确认 / 否决均为最终操作 */
+.rlist{list-style:none;border-top:1px solid var(--hair);margin-top:8px}
+.rcard{border-bottom:1px solid var(--hair);padding:12px 0}
+.rcard .rs{font-family:var(--serif);font-weight:600;font-size:15px;line-height:1.5;overflow-wrap:anywhere}
+.rcard .why{font-size:14px;color:var(--muted);margin-top:4px}
+.rcard .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px}
+.rcard .im{margin-top:8px}
+.rcard>.btn{margin-top:10px;width:100%}
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 </style></head><body>
 <div id="app">
@@ -233,7 +242,7 @@ img{display:block}
   <a class="tc" id="tab02" href="/#pool"><span class="ix" aria-hidden="true">02</span><b>商品池</b><span class="ct mono" id="cPool">—</span><span class="vh">件已留下</span></a>
   <a class="tc" id="tab03" href="/#rank"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="ct mono" id="cRank">— / 10</span><span class="vh">件已排</span></a>
   <a class="tc" id="tab04" href="/#match"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="ct mono" id="cMatch">—</span><span class="vh">位客人有待处理的匹配</span></a>
-  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="na">暂不可用</span></span>
+  <a class="tc" id="tab05" href="/#rules"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="ct mono" id="cRules">—</span><span class="vh">条待确认规律</span></a>
   <a class="tc" id="tab06" href="/#guests"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="ct mono" id="cGuests">—</span><span class="vh">个待关联</span></a>
 </nav>
 <p class="im net" id="net" role="alert" hidden>网络已断开，操作未保存 · <button class="lnk lnk-pad" id="netRetry">重试</button></p>
@@ -293,6 +302,16 @@ img{display:block}
   <p class="gnone" id="mNote"></p>
   <ul class="mlist" id="mList" aria-label="按客人"></ul>
   <div class="empty" id="mEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>暂无配上货的客人</h2></div>
+</section>
+<section id="rulesView" hidden aria-labelledby="h05">
+  <h1 class="vh" id="h05" tabindex="-1">待审核</h1>
+  <p class="im" id="rErr" role="alert" hidden>未能读取待审核 · <button class="lnk lnk-pad" id="rReload" type="button">重试</button></p>
+  <p class="gnone" id="rNote"></p>
+  <ul class="rlist" id="rList" aria-label="待确认的规律"></ul>
+  <div class="empty" id="rEmpty" hidden><p class="big" aria-hidden="true">0</p><h2 id="rEmptyH" tabindex="-1">暂无待审核的规律</h2>
+    <p class="muted">在 01 新货里同一类货留下或去掉够 <span class="mono" id="rMin">5</span> 件、且占这类货人工决定的 <span class="mono" id="rRatio">80%</span> 以上，这里会出现一条规律。</p><p><a class="btn" href="/#new">去 01 新货</a></p></div>
+  <h2 class="sub" id="rActH" hidden>已生效的规律 <span class="mono" id="rActN"></span></h2>
+  <ul class="rlist" id="rActive" aria-labelledby="rActH" hidden></ul>
 </section>
 <section id="guestsView" hidden aria-labelledby="h06">
   <h1 class="vh" id="h06" tabindex="-1">客人</h1>

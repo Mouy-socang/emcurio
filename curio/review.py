@@ -2,6 +2,7 @@
 
 `/` 为后台一页拣选（CAP-6，curio/triage.html + triage.js）：01 新货、02 商品池与 03 榜（故事 11，ranking.js）、
 04 匹配（故事 16，curio/matching.py：按客人汇总、确认 / 不合适、复制单件页链接）、
+05 待审核（故事 17，curio/learning.py：从人工拣选归纳的规律，确认 / 否决）、
 06 客人（故事 14，curio/guests.py：账号关联、停用、重置密码、邀请码）；
 旧审核页在 `/old`。`/preview/…` 为发布前预览（AD-28）：Mac 用客人页同一份模板渲染候选快照，只在后台可见，
 页内只引用本机地址（CSP 同客人页），不上传、不入发件箱、不记录行为；发布只从预览横条发起。"""
@@ -56,7 +57,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
     gc：GoodCustomer 资料库与 gcdb.py 路径（默认读 config/settings.yaml 的 goodcustomer；测试传临时库）；
     pull：打开 06 客人时拉取账号名单（默认 sync.pull_accounts(store, root)）；gcdb_run：调用 gcdb 的函数（测试注入）。"""
     if host not in LOCAL_HOSTS:raise ValueError('后台只监听本机地址（AD-4）；手机请经 tailscale serve 访问')
-    from . import ranking,publish,sync,guests,matching
+    from . import ranking,publish,sync,guests,matching,learning
     if flush is None:flush=lambda:sync.flush(store,root)
     if pull is None:pull=lambda:sync.pull_accounts(store,root,seconds=5)
     def gc_settings():
@@ -260,6 +261,9 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 try:return self.reply(200,matching.view(store,gc_settings(),root))
                 except FileNotFoundError:return self.reply(400,{'error':'找不到 config/matching.yaml（匹配词表）'})
                 except ValueError as e:return self.reply(400,{'error':'匹配词表有误：'+str(e)})
+            if url.path=='/api/rules':
+                # 05 待审核（故事 17）：refresh=1（打开 05 时）先归纳一次；只返回待审条目与计数。
+                return self.reply(200,learning.view(store,root,parse_qs(url.query).get('refresh',[''])[0]=='1'))
             if url.path=='/api/guests/search':
                 try:return self.reply(200,{'results':guests.search(gc_settings(),parse_qs(url.query).get('q',[''])[0])})
                 except guests.GuestError as e:return self.reply(400,{'error':str(e)})
@@ -308,7 +312,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
             hosts={h.lower() for h in (self.headers.get('Host'),self._forwarded_host()) if h}
             if self.headers.get('X-Curio-Token')!=token or (origin and urlparse(origin).netloc.lower() not in hosts):
                 return self.reply(403,{'error':'请刷新本机审核页后重试'})
-            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/guests/link','/api/guests/command','/api/guests/invite','/api/match/decide','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
+            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/guests/link','/api/guests/command','/api/guests/invite','/api/match/decide','/api/rules/decide','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<=150000:raise ValueError('请求过大或为空')
@@ -344,6 +348,9 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                     return self.reply(200,result)
                 if self.path=='/api/match/decide':
                     return self.reply(200,matching.decide(store,gc_settings(),data['customer_id'],data['item_id'],data['decision'],data['request_id'],root))
+                if self.path=='/api/rules/decide':
+                    # 05 待审核：确认 / 否决（最终操作）；request_id 幂等。确认的规律在之后的判断里生效。
+                    return self.reply(200,learning.decide_request(store,data['rule_id'],data['decision'],data['request_id'],root))
                 # 06 客人（故事 14）：关联只在 curio.db；停用、重置、换邀请码入发件箱后立即触发一次发送。
                 if self.path=='/api/guests/link':
                     action=data['action']

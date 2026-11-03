@@ -155,6 +155,8 @@ def evaluate(item,config):
             p=item.get(rule['basis'])
             if p is not None and p>rule['max_price']:
                 return dict(result,decision='skip',reason=rule['reason'],fair=str(rule['max_price']))
+    learned=learned_removal(item,config) if result['decision']!='skip' else None
+    if learned:return dict(result,decision='skip',reason=learned,fair='')
     return result
 
 def standard_name(item,config):
@@ -184,7 +186,7 @@ def seller_grade_level(grade):
     if m.group(2):return _ROMAN[m.group(2).upper()]
     return _GRADE_WORDS[m.group(3).casefold()]
 
-def baseline_score(item,std=None):
+def baseline_score(item,std=None,learned=None):
     """规则基线分（0–100 整数）与简短中文理由。
     依据：判断结论（want 高于 probe）、标准名称完整度（有图案/器型/功能各加分）、卖家等级（1. Wahl 加、2. Wahl 及以下减）；
     外画只标明、不减分。item/std 可为 dict 或 sqlite3.Row，std 为 std_names 行或 standard_name 结果。"""
@@ -201,6 +203,9 @@ def baseline_score(item,std=None):
     elif level==2:score-=10;parts.append('2. Wahl')
     elif level:score-=15;parts.append('%d. Wahl'%level)
     if std.get('overpaint'):parts.append('外画（不减分）')
+    # CAP-8：已确认的留下类规律（learned=dict(rules, bonus)，由调用方从 curio.db 与 config/learning.yaml 读来）加一次分。
+    hit=learned_keep(item,std,learned)
+    if hit:score+=hit[1];parts.append(hit[0])
     return max(0,min(100,int(score))),'；'.join(parts)
 
 # ---- CAP-10 预估费用档位（AD-15）：推断逻辑在 judge.fee_tier，档位与词表在 config/fee_tiers.yaml。
@@ -218,3 +223,85 @@ def match_facts(std,title,rules):
 def match_customer(facts,needs,prefs,rules):
     """一位客人与一件货：None（不匹配）或 dict(grade, label, weight, reasons)。"""
     return judge.match_customer(facts,needs,prefs,rules)
+
+# ---- CAP-8 判断沉淀（AD-15、AD-26，故事 17）：已确认规律的执行只在这里。
+# 规律是 curio.db 里的数据（curio/learning.py 归纳、墨墨确认）：dims 为特征组合，direction 为 keep / remove。
+# 特征只取自标准名称：brand（品牌）、function_id（器型）、pattern_id（图案）、overpaint（外画标记），
+# 另加可选的 price（{currency, lo, hi}：卖家标价所在区间，lo ≤ 价 < hi，缺端为不限）。
+LEARN_DIMS=('brand','function_id','pattern_id','overpaint','price')
+
+def price_band(item,bands):
+    """标价所在区间：dict(currency, lo, hi)；币种不同、无价或未配置区间时 None。bands 为 config.learning 的 price_bands。"""
+    item=dict(item) if item is not None else {}
+    amount=item.get('listed_price')
+    if not bands or amount is None or item.get('currency')!=bands['currency']:return None
+    edges=list(bands['edges'])
+    if not edges:return None
+    lo=None
+    for edge in edges:
+        if amount<edge:return dict(currency=bands['currency'],lo=lo,hi=edge)
+        lo=edge
+    return dict(currency=bands['currency'],lo=lo,hi=None)
+
+def rule_features(std,item,bands=None):
+    """一件货用于规律分组的特征（没有的特征不出现，该货也就不进需要它的组）。std 为 std_names 行或 standard_name 结果。"""
+    std=dict(std) if std is not None else {}
+    out={k:std[k] for k in ('brand','function_id','pattern_id') if std.get(k)}
+    if std.get('overpaint'):out['overpaint']=True
+    band=price_band(item,bands)
+    if band:out['price']=band
+    return out
+
+def rule_applies(dims,std,item):
+    """一条规律（dims）是否适用于这件货：每一维都对上。价格维按货当前标价判断是否落在该区间。"""
+    std=dict(std) if std is not None else {}
+    item=dict(item) if item is not None else {}
+    if not dims:return False
+    for key,value in dims.items():
+        if key=='price':
+            amount=item.get('listed_price')
+            if amount is None or item.get('currency')!=value.get('currency'):return False
+            if value.get('lo') is not None and amount<value['lo']:return False
+            if value.get('hi') is not None and amount>=value['hi']:return False
+        elif key=='overpaint':
+            if bool(std.get('overpaint'))!=bool(value):return False
+        elif key not in LEARN_DIMS or std.get(key)!=value:return False
+    return True
+
+def learned_reason(rule):
+    """去掉类规律的自动移出理由。"""
+    return '已确认规律：'+rule['label']+'自动去掉'
+
+def learned_removal(item,config):
+    """入库 / 重判时的去掉类规律：适用时返回理由"已确认规律：…自动去掉"，否则 None。
+    config['learned_rules'] 为已确认规律（store 从 curio.db 读入）；已有人工决定的货（item['human_decided']）从不适用（AD-26）。"""
+    found=[r for r in (config or {}).get('learned_rules') or [] if r.get('direction')=='remove']
+    if not found or item.get('human_decided'):return None
+    try:std=standard_name(item,config)
+    except Exception:return None
+    for r in found:
+        if rule_applies(r['dims'],std,item):return learned_reason(r)
+    return None
+
+def learned_keep(item,std,learned):
+    """基础分的留下类规律加分：适用时返回 (理由片段, 加分)，否则 None。learned=dict(rules=[已确认规律…], bonus=N)。
+    同一件货若也适用已确认的去掉类规律，不加分（去掉优先，不出现互相矛盾的理由）。"""
+    if not learned or not learned.get('bonus'):return None
+    found=learned.get('rules') or []
+    if any(r.get('direction')=='remove' and rule_applies(r['dims'],std,item) for r in found):return None
+    for r in found:
+        if r.get('direction')=='keep' and rule_applies(r['dims'],std,item):
+            return '已确认规律：'+r['label']+' +%d'%learned['bonus'],learned['bonus']
+    return None
+
+def rules_overlap(a,b):
+    """两条规律的特征组合是否可能同时适用于同一件货（共有的维度取值相同，价格区间有交集）。"""
+    for key in set(a)&set(b):
+        if key=='price':
+            x,y=a[key],b[key]
+            if x.get('currency')!=y.get('currency'):return False
+            lo=max(v for v in (x.get('lo'),y.get('lo'),float('-inf')) if v is not None)
+            his=[v for v in (x.get('hi'),y.get('hi')) if v is not None]
+            if his and lo>=min(his):return False
+        elif a[key]!=b[key]:return False
+    return True
