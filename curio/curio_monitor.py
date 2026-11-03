@@ -441,6 +441,9 @@ def run(root,clock=time.time):
             check_etsy=None if etsy is None or auth_backoff_active(store) else etsy
             try:result['status_check_summary']=check_existing(store,api,config,budget,check_etsy)
             except Exception:result['status_checks']='本轮状态检查未完成，将在后续轮次重试'
+        # CAP-4：抓取与在售检查之后，在 AI 预算内给新货打分；失败只记 ai_status，不影响其它结果。
+        from . import ai
+        result.update(ai.run(store,root,config,clock))
         store.archive();store.set('last_collection',now())
         result['api_usage']=budget.snapshot();result.update(sched.summary())
         store.set('last_collection_result',json.dumps(result,ensure_ascii=False))

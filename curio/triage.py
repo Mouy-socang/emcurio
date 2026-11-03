@@ -80,13 +80,30 @@ def system_state(agent_decision):
     return 'auto_removed' if agent_decision == 'skip' else 'new'
 
 
-def _snapshot(item):
-    keys = item.keys()
-    return (item['agent_decision'], item['score'] if 'score' in keys else None, item['rule_version'])
+def _score(c, iid):
+    """CAP-4：该货当时的分数（scores 表；无分或表尚未建立时为 None）。"""
+    try:
+        r = c.execute('SELECT score FROM scores WHERE item_id=?', (iid,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return r[0] if r else None
+
+
+def _baseline_if_new(c, iid):
+    """人工动作（捞回、撤销）让货回到 new 时补写规则基线分（CAP-4），使排序与之后的决定快照有分。"""
+    from .store import refresh_baseline  # 延迟导入：store 依赖本模块
+    try:
+        refresh_baseline(c, iid)
+    except sqlite3.OperationalError:
+        pass  # scores / std_names 表尚未建立（只建了拣选表的连接）
+
+
+def _snapshot(c, item):
+    return (item['agent_decision'], _score(c, item['item_id']), item['rule_version'])
 
 
 def _event(c, iid, old, new, action, actor, item, reason=None, at=None, undoes=None, source=None, grp=None):
-    agent, score, version = _snapshot(item)
+    agent, score, version = _snapshot(c, item)
     cur = c.execute('''INSERT INTO triage_events(item_id,at,old_state,new_state,action,actor,agent_decision,score,
         rule_version,reason,undoes,source,grp) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (iid, at or now(), old, new, action, actor, agent, score, version, reason, undoes, source, grp))
@@ -180,6 +197,8 @@ def transition(c, iid, action, reason=None, at=None, actor='human', source=None,
     # 任何人工转换都清除 backlog。
     c.execute('UPDATE triage SET state=?,updated_at=?,backlog=0,rescued_at=COALESCE(?,rescued_at) WHERE item_id=?',
               (target, ts, rescued, iid))
+    if target == 'new':
+        _baseline_if_new(c, iid)
     eid = _event(c, iid, cur, target, action, actor, item, reason, at=ts, source=source, grp=grp)
     return dict(state=target, code=assigned, event=eid)
 
@@ -241,6 +260,8 @@ def undo_event(c, ev):
         ts = now()
         c.execute("UPDATE triage SET state=?,updated_at=?,backlog=0,rescued_at=CASE WHEN ?='rescue' THEN NULL ELSE rescued_at END WHERE item_id=?",
                   (e['old_state'], ts, e['action'], e['item_id']))
+        if e['old_state'] == 'new':
+            _baseline_if_new(c, e['item_id'])
         uid = _event(c, e['item_id'], cur, e['old_state'], 'undo', 'human', item, at=ts, undoes=e['id'])
         c.execute('UPDATE triage_events SET undone_by=? WHERE id=?', (uid, e['id']))
     last = group[-1]
@@ -271,12 +292,14 @@ def undo_market(c, iid):
 
 
 def queue(c, limit=100, offset=0):
-    """新货队列：捞回的排最前（最近捞回优先），其余按 first_seen 新到旧；不含 backlog。"""
+    """新货队列：捞回的排最前（最近捞回优先）；其后按分数高到低，无分的排在有分之后，再按 first_seen 新到旧；不含 backlog。
+    每件附 score、score_source、score_reason（CAP-4）。"""
     return [dict(r) for r in c.execute('''SELECT i.*,t.state triage_state,t.rescued_at,
-        (SELECT code FROM item_codes k WHERE k.item_id=i.item_id) code
-        FROM triage t JOIN items i ON i.item_id=t.item_id
+        (SELECT code FROM item_codes k WHERE k.item_id=i.item_id) code,
+        s.score score,s.source score_source,s.reason score_reason
+        FROM triage t JOIN items i ON i.item_id=t.item_id LEFT JOIN scores s ON s.item_id=i.item_id
         WHERE t.state='new' AND t.backlog=0 AND i.status='active'
-        ORDER BY t.rescued_at IS NULL, t.rescued_at DESC, i.first_seen DESC, i.item_id
+        ORDER BY t.rescued_at IS NULL, t.rescued_at DESC, s.score IS NULL, s.score DESC, i.first_seen DESC, i.item_id
         LIMIT ? OFFSET ?''', (limit, offset))]
 
 

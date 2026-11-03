@@ -168,3 +168,37 @@ def kb_fingerprint(config):
 def kb_status(config):
     """当前知识库状态：ok / missing / partial:…（重判脚本据此决定是否刷新标准名称）。"""
     return judge.kb_vocab((config or {}).get('em_kb_path'))[1]
+
+# ---- CAP-4 规则基线分（AD-15）：无 AI 时的"可能要"分数，始终可算。
+BASELINE_DECISION={'want':60,'probe':40,'skip':15}
+BASELINE_PARTS=(('pattern_id','图案',12),('form_id','器型',8),('function_id','功能',6))
+_GRADE=re.compile(r'^\s*(?:([1-4])|(IV|I{1,3})|(erste|zweite|dritte|vierte))\s*\.?\s*wahl\b',re.I)
+_GRADE_WORDS={'erste':1,'zweite':2,'dritte':3,'vierte':4}
+_ROMAN={'I':1,'II':2,'III':3,'IV':4}
+
+def seller_grade_level(grade):
+    """卖家原文等级（"1. Wahl"、"1 Wahl"、"II.Wahl"、"erste Wahl"…）→ 1–4；其它（含 5. Wahl）返回 None。"""
+    m=_GRADE.match(grade or '')
+    if not m:return None
+    if m.group(1):return int(m.group(1))
+    if m.group(2):return _ROMAN[m.group(2).upper()]
+    return _GRADE_WORDS[m.group(3).casefold()]
+
+def baseline_score(item,std=None):
+    """规则基线分（0–100 整数）与简短中文理由。
+    依据：判断结论（want 高于 probe）、标准名称完整度（有图案/器型/功能各加分）、卖家等级（1. Wahl 加、2. Wahl 及以下减）；
+    外画只标明、不减分。item/std 可为 dict 或 sqlite3.Row，std 为 std_names 行或 standard_name 结果。"""
+    item=dict(item) if item is not None else {}
+    std=dict(std) if std is not None else {}
+    decision=item.get('agent_decision') or 'probe'
+    score=BASELINE_DECISION.get(decision,40)
+    parts=['判断'+dict(want='想要',probe='询市',skip='不要').get(decision,'询市')]
+    have=[label for key,label,_ in BASELINE_PARTS if std.get(key)]
+    score+=sum(points for key,_,points in BASELINE_PARTS if std.get(key))
+    parts.append('有'+'、'.join(have) if have else '名称不全')
+    level=seller_grade_level(std.get('seller_grade'))
+    if level==1:score+=6;parts.append('1. Wahl')
+    elif level==2:score-=10;parts.append('2. Wahl')
+    elif level:score-=15;parts.append('%d. Wahl'%level)
+    if std.get('overpaint'):parts.append('外画（不减分）')
+    return max(0,min(100,int(score))),'；'.join(parts)

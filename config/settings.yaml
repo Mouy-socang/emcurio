@@ -14,3 +14,7 @@ api_budget:
   kleinanzeigen: 1500
 # EM 西洋瓷器知识库（标准名称词表来源，只读；Curiobject 从不写入）。
 em_kb_path: ~/Desktop/EM 西洋瓷器
+# CAP-4 AI 打分（claude-haiku-5-5，需 .env 的 ANTHROPIC_API_KEY）：每日 HTTP 请求上限（含重试），按柏林日期归零。
+# 每次请求最多给 20 件货打分；默认 100 次/天约每月 €3–5（最坏约 €25，按 1 美元≈0.9 欧元估算），明细见 README（AD-20：每月合计 €200 上限）；0 = 不启用。
+ai_budget:
+  requests_per_day: 100

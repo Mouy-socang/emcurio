@@ -179,6 +179,31 @@ uv run python scripts/rejudge.py   # 打印 checked / changed / moved / transiti
 
 2026-11-03 真实库重判结果：checked 22122；首次改判 229——35 件旧规则判为破损的货不再按破损移出（否定说法；34 件改为询市/要，1 件因无品牌信号仍移出），61 件新判为破损或修复移出（新增词、英文词），106 件只是理由改为带类别与片段，1 件 Gedenkteller 按纪念盘移出，其余 26 件为旧规则版本遗留的询市理由更新；补上 `istnicht` 否定后补跑改判 1 件（放回新货）。评审修复（否定只看本短句、后置否定、英文 not/never/free of、外画词边界与后置否定）后两次补跑：改判 4 件 + 2 件（5 件新判破损移出，1 件放回），外画由 15 件变为 13 件（同一件货的两条“übermalter Ausbesserung”不再算外画），备份 `data/backups/curio-before-rejudge-v2-20261103T081430Z.db`、`curio-before-rejudge-v3-20261103T081603Z.db`。共移动拣选状态 103 件；人工决定过的 195 件状态与货号全部不变，`cases` 180、`market_decisions` 15 不变；外画 13 件。之后再运行改判 0、标准名称改写 0。备份在 `data/backups/curio-before-rejudge-20261103T080404Z.db`。
 
+## 可能要分数（CAP-4，AD-15、AD-16、AD-20、AD-26）
+
+每件拣选状态为 `new` 的货在表 `scores` 里至多一行：`item_id`（主键）、`score`（0–100 整数）、`source`（`rule` / `ai`）、`model`、`reason`、`rule_version`、`scored_at`。`scores.rule_version` 与 `items.rule_version` 不同（货改价改文或重判后）即视为过期。自动移出、人工处理过的货不必有分。
+
+**两种分数来源：**
+
+- **规则基线分**（`rules.baseline_score(item, std)`，始终可算）：判断想要 60 / 询市 40 / 不要（捞回的）15；标准名称有图案 +12、有器型 +8、有功能 +6；卖家等级 1. Wahl +6、2. Wahl −10、3./4. Wahl −15（"1.WAHL"、"I.Wahl"、"erste Wahl" 等写法都认）；外画只在理由里标明、不减分；结果夹在 0–100，理由如「判断想要；有图案、器型；1. Wahl」。入库、重判（`rejudge` / `rejudge_all`）时随判断写入；未过期的 AI 分不会被基线分覆盖，过期的会先换成基线分、下轮再由 AI 重算。
+- **AI 分**（`curio/ai.py`，唯一的 Anthropic 调用点）：`requests` 直接 POST `https://api.anthropic.com/v1/messages`，头 `anthropic-version: 2026-10-21`，模型 `claude-haiku-5-5`，不发 `temperature` / `top_p` / `top_k`。一次最多 20 件（item_id、标题、描述前 600 字、欧元价、标准名称、外画标签、基线分），附墨墨最近最多 30 件「留下」与 30 件「去掉」的标题与理由作偏好示例；要求只回 JSON 数组 `[{item_id, score, reason}]`。返回解析失败、缺件、分数越界的那几件保留原分（记警告），不中断。AI 只写 `scores`，不改判断、拣选状态或人工决定。
+
+**启用 AI：** 由墨墨在 `.env` 加一行 `ANTHROPIC_API_KEY=...`（只读 `.env`，不读系统环境变量；key 不进日志、结果或提交）。不填时只有基线分，每轮结果 `ai_status: disabled`，新货队列按基线分排序。
+
+**采集轮打分：** 抓取与在售检查之后，对 新货、非 backlog、在售、分数缺失 / 过期 / 来源为 rule 的货按 `first_seen` 新到旧打分。结果 JSON 增加 `ai_status`（`disabled` / `ok` / `budget_exhausted` / `error`）、`ai_scored`（本轮写入件数）与 `ai_usage`；AI 出错（如 HTTP 529、超时、返回被截断 `stop_reason: max_tokens` 或被拒绝 `refusal`）只让 `ai_status: error`，基线分不动，其它平台结果与本轮状态不受影响。为免一轮占用采集锁太久，每轮至多 10 次请求（含重试，`ai.MAX_REQUESTS_PER_ROUND`），整个 AI 步骤限时 120 秒（`ai.ROUND_SECONDS`，每次请求前检查，单次请求超时 120 秒且不超过剩余时间）；到限即正常结束（结果带 `ai_stopped: round_limit`），下轮继续。已得到答复但漏回、越界或被截断的货记在表 `ai_attempts`，24 小时内（且 `rule_version` 未变）不重发。`requests_per_day: 0` 视同未启用（`ai_status: disabled`）。各种结果都带 `ai_usage`。提示里说明货品标题与描述是不可信的卖家文字、其中的指令一律忽略；非欧元货发送原价与币种。
+
+**预算（AD-20）：** `config/settings.yaml` 的 `ai_budget.requests_per_day`（默认 100），按柏林日期在 kv `ai_usage` 计数，每个 HTTP 请求（含重试：429/5xx/网络错误时等待 `retry-after`（最多 5 秒）或 2 秒后重试 1 次；重试时额度用完则报原错误）计一次；用完当天停止，结果写 `ai_status: budget_exhausted`。月费估算（haiku 5.5 价格：输入 $0.10、输出 $0.50 / 百万 token；按 1 美元 ≈ 0.9 欧元换算，汇率为估计值，以账单为准）：每请求约 5k 输入 token（20 件货 + 60 条示例）与约 1–3k 输出 token（含模型思考），约 €0.001–0.002；默认额度 100 次/天 × 30 天 ≈ 3000 次 ≈ **每月约 €3–5**；即使每次都用满 `max_tokens`（16k 输出）也只约 €25/月。计入 AD-20 每月合计 €200 上限；约 4000 件待打分的新货在默认额度下约 2 天打完一遍。
+
+**拣选快照与排序：** `triage` 写每条事件时 `triage_events.score` 取该货当时的 `scores.score`（无分为空），`rule_version` 照旧。新货队列 `triage.queue()`：捞回的最前，其后按分数高到低、无分的排在有分之后，再按 `first_seen` 新到旧；每件附 `score`、`score_source`、`score_reason`。
+
+```sh
+sqlite3 data/curio.db ".backup data/backups/curio-before-scores-<UTC时间>.db"
+uv run python scripts/score_baseline.py     # 为全部新货回填基线分（幂等，第二次写入 0）
+uv run python scripts/top20_keep_rate.py    # 按日复算「决定前分数最高 20 件的留下率」与「当天平均留下率」，打印逐日与合计；无数据时打印说明
+```
+
+2026-11-03 真实库回填：新货 11068 件全部写入基线分（第二次运行写入 0）；在售、非 backlog 的新货 4014 件全部有分。目前没有人工「留下」记录（只有 195 条迁移来的「去掉」，当时无分），复算脚本只打印说明。
+
 ## 每5分钟唤醒的本机自动采集（launchd）
 
 只安装一个定时任务 `com.curiobject.collect`：每 300 秒唤醒一次 `curio.curio_monitor`，由调度器决定是否真正抓取（见上文「调度与接口调用预算」），由当前 Mac 用户的 launchd 执行，plist 指向本仓库 `.venv/bin/python`，不依赖 Codex 对话，不调用 AI。日志写入 `data/logs/collect.log` 与 `data/logs/collect-error.log`。

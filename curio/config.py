@@ -5,6 +5,7 @@ import re
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_AI_REQUESTS_PER_DAY = 100
 
 def load(root=ROOT):
     root = Path(root)
@@ -22,6 +23,15 @@ def load(root=ROOT):
     for platform,value in budget.items():
         if type(value) is not int or value<0:raise ValueError('api_budget.'+platform+' 必须为非负整数')
     defaults['api_budget']={**DEFAULT_BUDGET,**budget}
+    # CAP-4 / AD-20：AI 打分每日请求上限（独立于平台预算，按柏林日期计数）。
+    ai=settings.get('ai_budget')
+    if ai is None:ai={}
+    if not isinstance(ai,dict):raise ValueError('ai_budget 必须为映射')
+    unknown=set(ai)-{'requests_per_day'}
+    if unknown:raise ValueError('ai_budget 含未知键：'+','.join(sorted(map(str,unknown))))
+    per_day=ai.get('requests_per_day',DEFAULT_AI_REQUESTS_PER_DAY)
+    if type(per_day) is not int or per_day<0:raise ValueError('ai_budget.requests_per_day 必须为非负整数')
+    defaults['ai_budget']={'requests_per_day':per_day}
     if not isinstance(defaults['keywords'],list) or not defaults['keywords'] or any(not isinstance(k,str) or not k.strip() for k in defaults['keywords']):
         raise ValueError('keywords 必须为非空文字列表')
     for key in ('auction_fee_rate','daily_budget','cheap_damaged_max'):
@@ -76,3 +86,8 @@ def etsy_credentials(root=ROOT):
     values=_env(root,('ETSY_API_KEY','ETSY_SHARED_SECRET')) or {}
     if not values.get('ETSY_API_KEY'):return None
     return values['ETSY_API_KEY'],values.get('ETSY_SHARED_SECRET','')
+
+def anthropic_key(root=ROOT):
+    """AI 打分只在 .env 填了 ANTHROPIC_API_KEY 时启用；未填返回 None（ai_status: disabled）。"""
+    values=_env(root,('ANTHROPIC_API_KEY',)) or {}
+    return values.get('ANTHROPIC_API_KEY') or None

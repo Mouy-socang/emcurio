@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from .price import prices, money
-from .rules import evaluate, standard_name, kb_fingerprint, kb_status
+from .rules import evaluate, standard_name, kb_fingerprint, kb_status, baseline_score
 from . import triage
 from screening.pipeline import process
 
@@ -79,11 +79,31 @@ def rejudge(c,config,precomputed=None):
             before=triage.state(c,r['item_id'])
             after=triage.system_place(c,r['item_id'])
             moved+=before is not None and before!=after
+            refresh_baseline(c,r['item_id'])
             changed+=1
             key='%s（%s）→%s（%s）'%(_category(r['agent_reason']),r['agent_decision'],_category(result['reason']),result['decision'])
             transitions[key]=transitions.get(key,0)+1
     return dict(checked=len(rows),changed=changed,blocked=matched,moved=moved,
                 transitions=dict(sorted(transitions.items(),key=lambda kv:-kv[1])))
+
+def write_score(c,item_id,score,source,reason,rule_version,model=None,ts=None):
+    """CAP-4：覆盖写入该货的分数（每件至多一行，以最新为准）。"""
+    c.execute('INSERT OR REPLACE INTO scores(item_id,score,source,model,reason,rule_version,scored_at) VALUES(?,?,?,?,?,?,?)',
+              (item_id,int(score),source,model,reason,rule_version,ts or now()))
+
+def refresh_baseline(c,item_id):
+    """只对拣选状态为 new 的货：没有分数、分数过期（rule_version 不同）或现有规则分与当前基线不同时写入基线分。
+    未过期的 AI 分保留。返回是否写入。"""
+    if triage.state(c,item_id)!='new':return False
+    item=c.execute('SELECT * FROM items WHERE item_id=?',(item_id,)).fetchone()
+    if not item:return False
+    old=c.execute('SELECT * FROM scores WHERE item_id=?',(item_id,)).fetchone()
+    if old and old['source']=='ai' and old['rule_version']==item['rule_version']:return False
+    std=c.execute('SELECT * FROM std_names WHERE item_id=?',(item_id,)).fetchone()
+    score,reason=baseline_score(item,std)
+    if old and (old['source'],old['score'],old['reason'],old['rule_version'])==('rule',score,reason,item['rule_version']):return False
+    write_score(c,item_id,score,'rule',reason,item['rule_version'])
+    return True
 
 def similar_prices(c,std_key):
     # 品牌段为空（-|…）的键会把各厂同功能的货混成一组，不算同类
@@ -125,6 +145,13 @@ class Store:
                 segments TEXT, kb_status TEXT NOT NULL, kb_fingerprint TEXT, generated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS std_names_key ON std_names(std_key,status);
             CREATE INDEX IF NOT EXISTS price_history_item ON price_history(item_id,seen_at);
+            -- CAP-4 可能要分数：每件货至多一行；rule_version 与 items 不同即过期。
+            CREATE TABLE IF NOT EXISTS scores(
+                item_id TEXT PRIMARY KEY, score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 100),
+                source TEXT NOT NULL CHECK(source IN ('rule','ai')), model TEXT, reason TEXT,
+                rule_version INTEGER, scored_at TEXT NOT NULL);
+            -- AI 已答复过的货（时间与当时 rule_version）：漏回、越界、截断的货 24 小时内不重发。
+            CREATE TABLE IF NOT EXISTS ai_attempts(item_id TEXT PRIMARY KEY, attempted_at TEXT NOT NULL, rule_version INTEGER);
             ''')
             # 故事 5：外画标记列（已有库补列，旧行默认 0，重判脚本刷新）。
             if 'overpaint' not in {r[1] for r in c.execute('PRAGMA table_info(std_names)')}:
@@ -187,6 +214,8 @@ class Store:
             # CAP-16：标题/描述变化、尚无结果或知识库变化时（重）生成标准名称，与判断同一事务。
             named=_std_name_or_none(c,p,config,changed)
             if named:write_std_name(c,p['item_id'],named,ts)
+            # CAP-4：新货随判断写规则基线分（变化后旧分过期即被替换，AI 分下轮重算）。
+            refresh_baseline(c,p['item_id'])
         return 'new' if old is None else 'changed' if changed else 'unchanged'
     def similar_prices(self,std_key):
         """同类历史价：标准名称分组键相同（且已生成名称）的全部货的 price_history，按时间排序。"""
@@ -300,6 +329,8 @@ class Store:
                     if old.get(r['item_id'])==_std_tuple(named):
                         unchanged+=1;continue
                     write_std_name(c,r['item_id'],named,ts);written+=1
+            # CAP-4：标准名称刷新后为全部新货补算基线分（未过期的 AI 分不动）。
+            result['scores_written']=sum(refresh_baseline(c,r[0]) for r in c.execute("SELECT item_id FROM triage WHERE state='new'").fetchall())
             result.update(std_written=written,std_unchanged=unchanged,std_failed=len(failures),
                           std_skipped=None if refresh else '知识库状态为 %s，未刷新标准名称'%status)
             return result
