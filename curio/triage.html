@@ -180,6 +180,36 @@ img{display:block}
 .foot{padding-top:16px}
 .foot .btn{width:100%}
 
+/* 06 客人（故事 14，customer-row / 邀请码行 / confirm-dialog）：行式列表，次按钮两列，危险动作先确认 */
+.inv{border-bottom:1px solid var(--hair);padding:6px 0 10px}
+.invline{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;min-height:var(--tap)}
+.invc{font-size:16px;letter-spacing:.06em}
+.invform{margin-top:4px}
+.invform .acts2,.grow .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+.glist{list-style:none;border-top:1px solid var(--hair)}
+.grow{padding:12px 0;border-bottom:1px solid var(--hair)}
+.grow .gn{font-family:var(--serif);font-weight:600;font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+.grow .gn .mono{font-family:var(--mono);font-weight:400;font-size:14px}
+.grow .gm{font-size:14px;color:var(--muted);overflow-wrap:anywhere}
+.grow .gst{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.grow .gst .tag{margin-left:0}
+.grow .gx{display:flex;flex-wrap:wrap;gap:0 16px}
+.grow .tmp{border-left:2px solid var(--ink);padding:6px 0 6px 12px;margin-top:8px}
+.grow .tmp .mono{font-size:20px;letter-spacing:.08em}
+.grow .tmp input{width:100%}
+.pick{border-left:2px solid var(--ink);padding:4px 0 8px 12px;margin-top:8px}
+.pick ul{list-style:none;border-top:1px solid var(--hair);margin-top:6px}
+.pick li{border-bottom:1px solid var(--hair)}
+.pick li button{display:block;width:100%;min-height:var(--tap);text-align:left;background:none;border:0;padding:6px 0;cursor:pointer;font:inherit;overflow-wrap:anywhere}
+.gnone{font-size:14px;color:var(--muted)}
+.gnone:empty{display:none}
+.dlgwrap{position:fixed;inset:0;background:rgba(31,29,26,.45);display:flex;align-items:flex-end;justify-content:center;z-index:30}
+.dlg{background:var(--surface);border-top:2px solid var(--ink);width:100%;max-width:456px;padding:18px var(--m) 24px}
+.dlg h2{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35}
+.dlg p{margin-top:8px;overflow-wrap:anywhere}
+.dlg .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
+@media (min-width:768px){.dlgwrap{align-items:center}}
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 </style></head><body>
 <div id="app">
@@ -189,7 +219,7 @@ img{display:block}
   <a class="tc" id="tab03" href="/#rank"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="ct mono" id="cRank">— / 10</span><span class="vh">件已排</span></a>
   <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="na">暂不可用</span></span>
   <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="na">暂不可用</span></span>
-  <span class="tc off" role="link" aria-disabled="true"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="na">暂不可用</span></span>
+  <a class="tc" id="tab06" href="/#guests"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="ct mono" id="cGuests">—</span><span class="vh">个待关联</span></a>
 </nav>
 <p class="im net" id="net" role="alert" hidden>网络已断开，操作未保存 · <button class="lnk lnk-pad" id="netRetry">重试</button></p>
 <main class="scr">
@@ -240,6 +270,34 @@ img{display:block}
   <div class="foot"><button class="btn primary" id="btnPreview" type="button">预览</button><p class="reason" id="whyPreview" hidden></p></div>
   <p class="im" id="previewMsg" role="alert" hidden></p>
 </section>
+<section id="guestsView" hidden aria-labelledby="h06">
+  <h1 class="vh" id="h06" tabindex="-1">客人</h1>
+  <div class="inv" id="invRow">
+    <p class="invline">当前邀请码 <span class="mono invc" id="invCode">—</span><span id="invNew" hidden> · 新码 <span class="mono invc" id="invNewCode"></span> <span class="tag" id="invTag">待同步</span></span>
+      <button class="lnk lnk-pad" id="invChange" type="button" aria-expanded="false" aria-controls="invForm">更换</button></p>
+    <p class="im" id="invFail" role="alert" hidden></p>
+    <div class="invform" id="invForm" hidden>
+      <div class="field"><label class="flabel" for="invInput">新邀请码</label>
+        <input class="ti mono" id="invInput" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="32" aria-describedby="invHint"></div>
+      <p class="reason" id="invHint">4–32 位字母、数字、下划线或连字符，不区分大小写。</p>
+      <div class="acts2"><button class="btn primary" id="invSave" type="button">保存</button><button class="btn" id="invCancel" type="button">取消</button></div>
+      <p class="im" id="invMsg" role="alert" hidden></p>
+    </div>
+  </div>
+  <p class="im" id="gErr" role="alert" hidden>未能读取客人 · <button class="lnk lnk-pad" id="gReload" type="button">重试</button></p>
+  <p class="im" id="gPullNote" hidden>名单未能从服务器更新，显示的是上次的名单 · <button class="lnk lnk-pad" id="gPullRetry" type="button">重试</button></p>
+  <p class="im" id="gNoGc" hidden>找不到 GoodCustomer 资料库：关联与新建档案要等找到资料库后才能用（请检查 config/settings.yaml 的 goodcustomer 路径）。名单与停用、重置照常可用。</p>
+  <p class="gnone" id="gPulled"></p>
+  <h2 class="sub" id="gPendH" tabindex="-1">待关联 <span class="mono" id="gPendN"></span></h2>
+  <ul class="glist" id="gPending" aria-labelledby="gPendH"></ul>
+  <div class="empty" id="gPendEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>暂无待关联的新注册</h2></div>
+  <h2 class="sub" id="gLinkedH" tabindex="-1">已关联 <span class="mono" id="gLinkedN"></span></h2>
+  <div class="field"><label class="flabel" for="gFilter">按微信名或用户名搜</label><input class="ti" id="gFilter" type="search" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+  <p class="gnone" id="gFilterNone" role="status"></p>
+  <ul class="glist" id="gLinked" aria-labelledby="gLinkedH"></ul>
+  <h2 class="sub" id="gDisH" tabindex="-1">已停用 <span class="mono" id="gDisN"></span></h2>
+  <ul class="glist" id="gDisabled" aria-labelledby="gDisH"></ul>
+</section>
 </main>
 <p class="vh" id="live" role="status" aria-live="polite"></p>
 <p class="vh" id="alert" role="alert" aria-live="assertive"></p>
@@ -283,6 +341,12 @@ img{display:block}
   <div class="top"><span class="mono" id="zPg"></span><button class="close" id="zClose" type="button">关闭</button></div>
   <div class="stagez" id="zStage"><img id="zImg" alt=""></div>
   <div class="ctl"><button class="btn" id="zOut" type="button" aria-label="缩小">−</button><button class="btn" id="zIn" type="button" aria-label="放大">+</button><button class="btn" id="zReset" type="button">复位</button><button class="btn" id="zPrev" type="button">上一张</button><button class="btn" id="zNext" type="button">下一张</button></div>
+</div>
+<div class="dlgwrap" id="cdlg" hidden>
+  <div class="dlg" role="alertdialog" aria-modal="true" aria-labelledby="cdT" aria-describedby="cdD">
+    <h2 id="cdT"></h2><p id="cdD"></p>
+    <div class="acts2"><button class="btn" id="cdNo" type="button">取消</button><button class="btn primary" id="cdYes" type="button"></button></div>
+  </div>
 </div>
 <script>const token='__TOKEN__';</script>
 <script src="/triage.js"></script>

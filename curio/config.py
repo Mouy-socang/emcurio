@@ -61,7 +61,25 @@ def load(root=ROOT):
     defaults['em_kb_path']=str(Path(kb.strip()).expanduser())
     # CAP-10：预估费用档位（config/fee_tiers.yaml，数据；推断在 judge.fee_tier）。
     defaults['fee_tiers']=fee_tiers(root)
+    # CAP-14：GoodCustomer 资料库与 gcdb.py 路径（展开 ~；不存在时不报错，06 客人提示找不到资料库）。
+    defaults['goodcustomer']=goodcustomer(settings.get('goodcustomer'))
     return defaults
+
+DEFAULT_GC_DB='~/Desktop/goodcustomerDB'
+DEFAULT_GCDB='~/Desktop/goodcustomer-plugin/skills/gc-schema/scripts/gcdb.py'
+
+def goodcustomer(value):
+    """校验 settings.yaml 的 goodcustomer 段：{db, gcdb} 两个文字路径（缺省用默认值），返回展开 ~ 后的绝对路径。"""
+    if value is None:value={}
+    if not isinstance(value,dict):raise ValueError('goodcustomer 必须为映射（db、gcdb）')
+    unknown=set(value)-{'db','gcdb'}
+    if unknown:raise ValueError('goodcustomer 含未知键：'+','.join(sorted(map(str,unknown))))
+    out={}
+    for key,default in (('db',DEFAULT_GC_DB),('gcdb',DEFAULT_GCDB)):
+        path=value.get(key,default)
+        if not isinstance(path,str) or not path.strip():raise ValueError('goodcustomer.'+key+' 必须为文字路径')
+        out[key]=str(Path(path.strip()).expanduser())
+    return out
 
 FEE_TIER_KEYS=('A','B','C','D')
 _FEE_CACHE={}

@@ -47,7 +47,7 @@ uv run python -m curio.review
 
 ### 后台 01 新货（CAP-6，故事 7）
 
-- 顶部分区 01–06：01 新货显示待处理件数；02 商品池、03 榜见下节；04–06 暂不可用。
+- 顶部分区 01–06：01 新货显示待处理件数；02 商品池、03 榜见下节；06 客人见"后台 06 客人"一节；04、05 暂不可用。
 - 拣选卡一次一件（分数高到低，捞回的在最前）：右滑留下、左滑去掉（拖过卡宽 35% 或快速甩动才生效，否则回弹），或按「去掉」「留下」，电脑上焦点不在输入框时 ← 去掉、→ 留下。界面先切到下一件再保存；保存失败时显示「N 件未保存 · 重试」、该件回到队首；断网显示「网络已断开，操作未保存 · 重试」。每个动作带 `request_id`（表 `triage_requests`），重放返回同一结果、不产生第二个事件。
 - 「撤销上一步」无时限、可连续多步（`triage.undo`，撤最近一次人工事件；货号保留不复用）。
 - 「已自动移出 N 件 · 查看」：列表附理由与移出时间，「捞回」后该件回到新货队首。
@@ -380,8 +380,8 @@ cd server && uv sync && CURIO_ADMIN_TOKEN=<本机测试密钥> uv run python app
 - 会话：随机令牌放在 `curio_session` Cookie（HttpOnly、SameSite=Lax、Secure、90 天，到期不续）。退出（在任一设备上）、重设密码、停用都使该账号全部会话失效；失效后再打开任何页面显示登录表单（用户名预填）与"登录已过期，请重新登录。"
 - 未登录访问任何客人路径都只显示注册/登录页（完成后只会回到 `/` 或 `/item/CO-NNNN`，其它一律回首页）；免登录的只有注册/登录/找回/设置新密码页、`/legal` 说明页、`/static/`、`/healthz`。
 - 同意记录（表 `consents`，只追加）：注册时写两行——`terms_privacy` 与 `cross_border_storage`（境外存储单独同意），各带版本号与 UTC 时间。`terms.md` 的版本号改变后，客人登录后先看到"用户协议已更新"确认页（同一个同意框），同意后再追加两行、继续原来的页面。登录后页头与页脚都有"用户协议与隐私说明"。
-- 停用账号（`accounts.set_status`，后台入口在故事 14）只看到"账号已停用"页与"退出登录"；找回密码显示"此账号已停用，请在微信中联系墨墨。"，不发信、旧重设链接失效。
-- 随故事 14（后台 06 客人）才有的：无邮箱客人的密码重置（墨墨后台重置）、停用/启用指令、删除账号。在那之前删除与撤回同意由墨墨手动处理（说明页第七条如此写明）。
+- 停用账号（Mac 指令 `disable_account`，后台 06 客人发起，见下文"后台 06 客人"）只看到"账号已停用"页与"退出登录"；找回密码显示"此账号已停用，请在微信中联系墨墨。"，不发信、旧重设链接失效。
+- 无邮箱客人的密码重置与停用账号由墨墨在后台 06 客人操作（故事 14）。停用不可恢复（不做启用）；删除账号与撤回同意待协议定稿，目前仍由墨墨手动处理（说明页第七条如此写明）。
 
 ### 限频（窗口 15 分钟，按 IP 与用户名分别计数，只存哈希）
 
@@ -498,6 +498,21 @@ uv run python scripts/publish.py publish [--flush]            # 生成完整快�
 - ¥ 显示"≈ ¥1,443"（读作"约 1443 元人民币"，四舍五入到元），页头下注"按当日汇率，以欧元为准"。快照没有汇率、汇率日期在未来、或距今超过 7 天时不出现切换、只显示欧元（选过 ¥ 的账号另注"汇率暂不可用，暂以欧元显示"）。
 - 预览（AD-28）按欧元显示，切换只在页面内换算、不保存（无表单、不提交到后台）。
 - 档位名称以快照的 `fee_label` 为准；`server/guest.py` 的 `FEE_LABELS` 只在快照没带名称时兜底（测试核对它与 yaml 一致）。
+
+## 后台 06 客人：账号关联与管理（故事 14，CAP-14；AD-8、AD-12、AD-24）
+
+- **账号名单**：服务器 `GET /admin/accounts`（管理密钥，契约 `contract/schemas/accounts_list.v1.schema.json`）只返回账号编号、用户名、微信名/称呼、状态、注册时间、`account_rev`——不含邮箱与任何哈希。Mac 每轮同步（`sync.run` 末尾的 `sync.pull_accounts`）与打开 06（`/api/guests?refresh=1`，限时 5 秒）时拉取，按 `account_id` 覆盖写 `curio.db` 的 `guest_accounts`（`account_rev` 不小于已有的才写）；服务器上没有的账号不删。拉取失败保留上次名单，结果写 `accounts_status: error` / `accounts_error`（kv `accounts_pull_error`），不计入同步连续失败、不影响其余部分。
+- **三个列表**：待关联（未关联、未停用；06 计数 = 待关联数）、已关联（按微信名或用户名即时过滤，"没有找到 …"）、已停用。空时显示"暂无待关联的新注册"。
+- **关联（只在本机，AD-12）**：表 `guest_links`（账号 → GC 编号，永不上线）与只追加的 `guest_link_log`（link / relink / unlink，含前后编号、时间、request_id）。即时生效，没有"待同步"，不经服务器。
+  - 「关联到已有客户」：按微信名、显示名、别名或编号即时搜索 GoodCustomer 档案（只读 `customers/` 与 `潜在客户/` 下的 `customer.json`，跳过已合并 / 已归档），点选即关联。
+  - 「新建档案」：以微信名/称呼为显示名调用 GoodCustomer 自带的 `gcdb.py --db <资料库> new-customer --name=…`，拿到新 GC 编号后同一操作内关联；gcdb 失败时不关联、行内报错。Curiobject 从不直接写资料库里的任何文件。
+  - 「更正关联」（重新选档案）、「解除关联」（回到待关联）都先出确认对话框。
+  - 资料库路径写在 `config/settings.yaml`：`goodcustomer.db`（默认 `~/Desktop/goodcustomerDB`）与 `goodcustomer.gcdb`（默认 `~/Desktop/goodcustomer-plugin/skills/gc-schema/scripts/gcdb.py`）。资料库不存在（没有 `_system/db.json`）时名单照常显示，关联区提示"找不到 GoodCustomer 资料库"。
+- **停用 / 重置密码（AD-24 指令）**：`disable_account.v1` / `reset_password.v1`，带 `command_id` 与按账号单调的 `target_seq`（kv `cmd_seq:account:<account_id>`，两种指令共用），经发件箱发送（表 `guest_commands` 记指令与发件箱记录的对应）。入队后行内"待同步"，后台进程内立即触发一次 flush；发件箱确认后换成"已停用"/"已重置"并 polite 播报；服务器回 `applied: false`（序号不大于已应用值、账号不存在、对已停用账号重置）按永久失败，行内"未同步 · 请处理"，不自动重发（`scripts/outbox.py` 处理）。服务器同一 `command_id` 只执行一次、重放返回第一次结果；停用与重置都使该账号全部会话与重设链接立即失效。停用不可恢复，已停用账号不提供重置；重置只在已关联列表提供。
+  - 临时密码由 Mac 生成（12 位，去掉 0、1、I、O、l、o），服务器只存 Argon2id 哈希（`events` 表里为 HMAC）。Mac 只把明文放进发件箱等发送，服务器答复后 flush 立即抹掉；`guest_requests` 等表从不写明文；`scripts/outbox.py list` 只显示账号编号前 8 位与序号。后台浏览器只在确认后显示一次临时密码与「复制」，离开 06 或页面即不可再见（同一 request_id 重放不再给出明文，提示再重置一次）。
+- **邀请码**：06 顶部显示当前邀请码（最近一条已送达的 `set_invite_code`）与「更换」；更换需确认，复用 `sync.enqueue_invite`；待确认的新码后跟"待同步"，期间旧码仍有效；不合规的码就地报错。
+- 接口（本机后台，令牌 + Origin 同其它写接口；写请求带 `request_id`，表 `guest_requests` 幂等）：`GET /api/guests[?refresh=1]`、`GET /api/guests/search?q=`、`POST /api/guests/link`（action：link / relink / unlink / create）、`POST /api/guests/command`（action：disable_account / reset_password）、`POST /api/guests/invite`。
+- 不在本故事：行为事件与 GC 交接文件重算（故事 15）、按账号排序（故事 16 起）、删除账号与撤回同意、自动匹配建议。
 
 ## 验证
 

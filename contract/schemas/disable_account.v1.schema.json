@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "disable_account.v1.schema.json",
+  "title": "disable_account 载荷 v1（Mac 指令：停用客人账号，AD-2、AD-8、AD-24）",
+  "description": "墨墨在后台 06 客人点“停用账号”（需确认）后入队。服务器把该账号状态改为 disabled、递增 account_rev，并使该账号全部会话与重设链接立即失效；停用不可恢复。同一 command_id 只执行一次（重放返回第一次结果）；target_seq 按账号单调（与 reset_password 共用计数器 account:<account_id>），不大于该账号已应用的最高序号时不生效；账号不存在时也不生效（确认里 applied 为 false）。",
+  "type": "object",
+  "required": ["schema_version", "command_id", "target_seq", "account_id"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "command_id": {
+      "type": "string",
+      "description": "小写 UUID，Mac 入队时生成。",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "target_seq": {
+      "type": "integer",
+      "description": "目标 account:<account_id> 的单调序号（Mac curio.db kv cmd_seq:account:<account_id>，从 1 开始）。",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "account_id": {
+      "type": "string",
+      "description": "服务器注册时生成的不透明账号编号（32 位小写十六进制）。",
+      "pattern": "^[0-9a-f]{32}$"
+    }
+  }
+}

@@ -163,6 +163,25 @@ class Store:
             -- CAP-10：墨墨手动改的预估费用档位（手动优先，AD-2）；删除该行即恢复自动推断。
             CREATE TABLE IF NOT EXISTS fee_overrides(item_id TEXT PRIMARY KEY,
                 tier TEXT NOT NULL CHECK(tier IN ('A','B','C','D','ask')), updated_at TEXT NOT NULL);
+            -- CAP-14 账号关联（AD-8、AD-12）：服务器账号名单的副本（按 account_id 覆盖写，服务器没有的不删）；
+            -- 账号 → GC 客户编号映射（永不上线）；只追加的关联日志（link / relink / unlink，含前后编号与时间）。
+            CREATE TABLE IF NOT EXISTS guest_accounts(account_id TEXT PRIMARY KEY, username TEXT NOT NULL,
+                nickname TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','disabled')),
+                created_at TEXT NOT NULL, account_rev INTEGER NOT NULL, pulled_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS guest_links(account_id TEXT PRIMARY KEY, customer_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS guest_link_log(id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('link','relink','unlink')), before_id TEXT, after_id TEXT,
+                at TEXT NOT NULL, request_id TEXT);
+            CREATE INDEX IF NOT EXISTS guest_link_log_account ON guest_link_log(account_id,id);
+            -- 06 客人的写请求幂等（同一 request_id 重放返回第一次的结果）；临时密码从不写入。
+            CREATE TABLE IF NOT EXISTS guest_requests(request_id TEXT PRIMARY KEY, payload TEXT NOT NULL,
+                result TEXT NOT NULL, at TEXT NOT NULL);
+            -- 停用 / 重置密码指令与发件箱记录的对应（AD-24）：待同步、已生效、未同步由发件箱状态得出。
+            CREATE TABLE IF NOT EXISTS guest_commands(command_id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE,
+                account_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('disable_account','reset_password')),
+                target_seq INTEGER NOT NULL, created_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS guest_commands_account ON guest_commands(account_id,created_at);
             ''')
             # 替代文字按图片身份（本机图文件名或图片地址）保存，图片增减时不串位；image_index 只作显示参考。
             cols={r[1] for r in c.execute('PRAGMA table_info(alt_texts)')}

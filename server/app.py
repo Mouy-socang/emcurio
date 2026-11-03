@@ -7,7 +7,11 @@
 - 设置只来自环境变量（systemd EnvironmentFile）：CURIO_ADMIN_TOKEN、CURIO_SERVER_DB、CURIO_CONTRACT_DIR、
   CURIO_PUBLIC_URL（重设链接用的站点地址）、CURIO_COOKIE_SECURE（默认 1；本机 http 测试设 0）、
   CURIO_MAILER / CURIO_MAIL_DIR（见 mailer.py）、CURIO_SERVER_SECRET（HMAC 密钥；不设时在库所在目录生成 server_secret）。
+- `GET /admin/accounts`：同一 Bearer 鉴权；账号名单（accounts_list.v1：账号编号、用户名、微信名/称呼、状态、注册时间、
+  account_rev，不含邮箱与任何哈希），Mac 每轮同步与打开后台 06 时拉取（故事 14）。
 - 已处理的载荷：ping（只存下）、set_invite_code（AD-24 指令：设置通用邀请码，服务器只存其哈希）、
+  disable_account / reset_password（AD-24 指令：停用账号、重置密码；同一 command_id 只执行一次，target_seq 按账号单调，
+  两者都使该账号全部会话与重设链接失效；临时密码只存哈希，events 表里存 HMAC）、
   snapshot（AD-5、AD-22：整份原子替换，编号 ≤ 当前的不替换，缺图拒收）、hide（含 unhide，按 hide_seq 与水位合并）、
   heartbeat（AD-10：已发布货下架检查最近成功时间；只留最新一份，不存入 events 表——每轮都发，不是事件）。
 - 图片（AD-13）：`POST /admin/images/check` 查哪些还没有，`PUT /admin/images/<name>` 上传（核对内容哈希），
@@ -168,7 +172,7 @@ def _store_event(db_path, envelope, clock=None):
             ack = {'ok': True, 'event_id': envelope['event_id'], 'received_at': row[1]}
             if row[2]:
                 ack = json.loads(row[2])
-            elif envelope['kind'] == 'set_invite_code':
+            elif envelope['kind'] in ('set_invite_code',) + accounts.ACCOUNT_COMMANDS:
                 done = c.execute('SELECT applied FROM commands WHERE command_id=?',
                                  (envelope['payload']['command_id'],)).fetchone()
                 ack['applied'] = bool(done and done[0])
@@ -192,6 +196,9 @@ def _store_event(db_path, envelope, clock=None):
         elif envelope['kind'] == 'set_invite_code':
             # ack 里的 applied：false 表示服务器已有更新的邀请码命令，本条未生效（Mac 端按永久失败处理）。
             ack['applied'] = accounts.apply_set_invite_code(c, envelope['payload'], now)
+        elif envelope['kind'] in accounts.ACCOUNT_COMMANDS:
+            # 停用 / 重置密码（AD-24）：applied 为 false 表示序号过旧、账号不存在或已停用（Mac 端按永久失败处理）。
+            ack['applied'] = accounts.apply_account_command(c, envelope['kind'], envelope['payload'], now)
         # ping 只存下。
         c.execute('INSERT INTO events(event_id,kind,schema_version,created_at,payload,envelope,received_at,ack) '
                   'VALUES(?,?,?,?,?,?,?,?)',
@@ -281,6 +288,8 @@ def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, ma
             contract.check(envelope)
             if envelope['kind'] == 'set_invite_code':
                 accounts.check_invite_command(envelope['payload'])
+            elif envelope['kind'] in accounts.ACCOUNT_COMMANDS:
+                accounts.check_account_command(envelope['kind'], envelope['payload'])
             elif envelope['kind'] == 'snapshot':
                 snapshot.check_snapshot(envelope['payload'])
             elif envelope['kind'] == 'hide':
@@ -295,6 +304,21 @@ def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, ma
             return await run_in_threadpool(_store_heartbeat, db_path, envelope, clock)
         status, result = await run_in_threadpool(_store_event, db_path, envelope, clock)
         return JSONResponse(result, status_code=status)
+
+    def _accounts_list():
+        c = connect(db_path)
+        try:
+            return accounts.list_accounts(c)
+        finally:
+            c.close()
+
+    @app.get('/admin/accounts')
+    async def admin_accounts(request: Request):
+        """账号名单（accounts_list.v1，AD-8、AD-9）：Mac 每轮同步与打开后台 06 时拉取；不含邮箱与任何哈希。"""
+        if not authorized(request):
+            return JSONResponse({'ok': False, 'detail': '未授权'}, status_code=401,
+                                headers={'WWW-Authenticate': 'Bearer'})
+        return JSONResponse(await run_in_threadpool(_accounts_list), headers={'Cache-Control': 'no-store'})
 
     images = snapshot.image_dir(db_path)
 

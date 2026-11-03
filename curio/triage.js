@@ -433,11 +433,13 @@ function setPrimaryReason(reason) {
 }
 // 当前分区的页面标题与回落焦点（01 新货 / 已自动移出 / 02 商品池 / 03 榜）。
 function viewTitle() {
+  if (!$('guestsView').hidden) return '客人 · 后台';
   if (!$('poolView').hidden) return '商品池 · 后台';
   if (!$('rankView').hidden) return '榜 · 后台';
   return $('arView').hidden ? '新货 · 后台' : '已自动移出 · 后台';
 }
 function viewFocus() {
+  if (!$('guestsView').hidden) return $('h06');
   if (!$('poolView').hidden) return $('h02');
   if (!$('rankView').hidden) return $('h03');
   return $('arView').hidden ? $('btnKeep') : $('arTitle');
@@ -727,3 +729,397 @@ $('zNext').onclick = () => setGi(gi + 1);
 window.addEventListener('offline', () => { setNet(true); shout('网络已断开，操作未保存'); });
 window.addEventListener('online', () => setNet(false));
 load();
+
+/* ---------- 06 客人（故事 14，CAP-14） ----------
+   待关联 / 已关联 / 已停用三个列表，邀请码行，confirm-dialog。关联只在本机（即时生效）；停用、重置、换邀请码
+   入发件箱后显示"待同步"，每 3 秒读一次状态，确认后换成结果并 polite 播报。临时密码只在本页内存里，
+   确认后显示一次与"复制"，离开 06 或离开页面即不可见。 */
+window.curioGuests = (function () {
+  const POLL = 3000;
+  let data = null, active = false, loading = false, timer = null, lastJson = '';
+  const temps = new Map();     // command_id -> {password, shown}
+  const msgs = new Map();      // account_id -> {text, retry}
+  const busy = new Set();      // account_id：写入中
+  const issued = new Set();    // 本页发出的指令 command_id（确认后播报一次）
+  let picker = null;           // {account_id, mode: 'link'|'relink', q, results, error}
+  let prevStates = null;       // command_id -> state；邀请码 'invite' -> 当前码
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const btn = (cls, text, k) => { const b = el('button', cls, text); b.type = 'button'; if (k) b.dataset.k = k; return b; };
+  const two = n => String(n).padStart(2, '0');
+  function when(iso) {
+    const d = new Date(iso); if (isNaN(d)) return '';
+    return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+  }
+  function keyOf() { const a = document.activeElement; return a && a.dataset ? a.dataset.k : null; }
+  function refocus(k, fallback) {
+    const t = k && document.querySelector('[data-k="' + CSS.escape(k) + '"]');
+    if (t && t.offsetParent !== null) t.focus(); else if (fallback) fallback.focus();
+  }
+
+  /* ---------- 读取与轮询 ---------- */
+  let again = null;            // 读取进行中又要读：结束后再读一次（refresh 优先）
+  async function load(refresh) {
+    if (loading) { again = again || refresh ? true : false; return; }
+    loading = true;
+    try {
+      const d = await get('/api/guests' + (refresh ? '?refresh=1' : ''));
+      $('gErr').hidden = true;
+      if (refresh && d.pull) $('gPullNote').hidden = d.pull.accounts_status !== 'error';
+      absorb(d);
+    } catch (e) {
+      if (active) { $('gErr').hidden = false; shout('未能读取客人'); }
+    } finally { loading = false; }
+    if (again !== null) { const r = again; again = null; return load(r); }
+    schedule();
+  }
+  function pendingAny() {
+    if (!data) return false;
+    if (data.invite.pending && data.invite.pending.state === 'pending') return true;
+    return ['pending', 'linked', 'disabled'].some(l => data[l].some(r =>
+      (r.disable && r.disable.state === 'pending') || (r.reset && r.reset.state === 'pending')));
+  }
+  function schedule() {
+    clearTimeout(timer); timer = null;
+    if (pendingAny()) timer = setTimeout(() => load(false), POLL);
+  }
+  function absorb(d) {
+    // 待同步 → 已生效：播报结果；重置的临时密码此刻才显示。
+    const now = new Map();
+    ['pending', 'linked', 'disabled'].forEach(l => d[l].forEach(r => {
+      if (r.disable && r.disable.command_id) now.set(r.disable.command_id, {state: r.disable.state, kind: 'disable', r});
+      if (r.reset) now.set(r.reset.command_id, {state: r.reset.state, kind: 'reset', r});
+    }));
+    now.forEach((v, id) => {
+      const before = prevStates ? prevStates.get(id) : undefined;
+      const watched = before === 'pending' || issued.has(id);
+      if (!watched || before === v.state) return;
+      if (v.state === 'done') {
+        if (v.kind === 'reset' && temps.has(id)) temps.get(id).shown = true;
+        say(v.kind === 'disable' ? '已停用' : '已重置');
+        issued.delete(id);
+      } else if (v.state === 'failed') {
+        shout('未同步，请处理'); issued.delete(id);
+      }
+    });
+    if (prevStates) {
+      const was = prevStates.get('invite'), cur = d.invite.current && d.invite.current.code;
+      if (was !== undefined && cur && was !== cur) say('邀请码已更换');
+    }
+    prevStates = new Map([...now].map(([id, v]) => [id, v.state]));
+    prevStates.set('invite', d.invite.current ? d.invite.current.code : null);
+    data = d;
+    $('cGuests').textContent = d.count;
+    const json = JSON.stringify(d);
+    if (json !== lastJson) { lastJson = json; render(); }
+  }
+
+  /* ---------- 绘制 ---------- */
+  function render() {
+    if (!data) return;
+    const k = keyOf(), typing = document.activeElement && document.activeElement.id === 'gPickQ';
+    renderInvite();
+    $('gNoGc').hidden = data.gc.available;
+    $('gPulled').textContent = (data.pulled_at ? '名单更新于 ' + when(data.pulled_at) : '名单尚未从服务器更新') +
+      (data.pull_error ? ' · 上次更新失败：' + data.pull_error : '');
+    fill($('gPending'), data.pending, 'pending');
+    $('gPendN').textContent = data.pending.length;
+    $('gPendEmpty').hidden = data.pending.length > 0;
+    $('gLinkedN').textContent = data.linked.length;
+    filterLinked();
+    fill($('gDisabled'), data.disabled, 'disabled');
+    $('gDisN').textContent = data.disabled.length;
+    if (typing) { const q = $('gPickQ'); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
+    else refocus(k);
+  }
+  function filterLinked() {
+    const q = $('gFilter').value.trim().toLowerCase();
+    const rows = q ? data.linked.filter(r => r.nickname.toLowerCase().includes(q) || r.username.toLowerCase().includes(q)) : data.linked;
+    fill($('gLinked'), rows, 'linked');
+    $('gFilterNone').textContent = q && !rows.length && data.linked.length ? '没有找到 ' + $('gFilter').value.trim() : '';
+  }
+  function fill(list, rows, kind) { list.replaceChildren(...rows.map(r => row(r, kind))); }
+  function tag(text) { return el('span', 'tag', text); }
+  function row(r, kind) {
+    const li = el('li', 'grow'); li.dataset.id = r.account_id;
+    const n = el('p', 'gn'); n.append(r.nickname, ' · ', el('span', 'mono', r.username)); li.append(n);
+    const m = el('p', 'gm', '注册 ' + when(r.created_at));
+    if (r.customer_id) m.append(' · ', el('span', 'mono', r.customer_id), r.customer_name ? ' ' + r.customer_name : '');
+    li.append(m);
+    const st = el('p', 'gst');
+    const dis = r.disable, rs = r.reset;
+    if (kind === 'disabled') st.append(tag('已停用'));
+    else if (dis && dis.state === 'pending') st.append(tag('停用 · 待同步'));
+    if (kind !== 'disabled' && rs && rs.state === 'pending') st.append(tag('重置密码 · 待同步'));
+    if (kind !== 'disabled' && rs && rs.state === 'done' && temps.has(rs.command_id)) st.append(tag('已重置'));
+    if (st.childNodes.length) li.append(st);
+    if (kind !== 'disabled' && rs && rs.state === 'done' && !temps.has(rs.command_id)) {
+      li.append(el('p', 'gm', '已重置 · 临时密码已不可见，如需请再重置一次'));
+    }
+    const fails = kind === 'disabled' ? [] : [[dis, '停用'], [rs, '重置密码']].filter(([c]) => c && c.state === 'failed');
+    if (fails.length) {
+      const f = el('p', 'im'); f.setAttribute('role', 'alert');
+      f.append(fails.map(([c, w]) => w + '未同步' + (c.error ? '（' + c.error + '）' : '')).join('；') +
+               '。同步（含发布）已暂停，需用 scripts/outbox.py 处理。');
+      li.append(f);
+    }
+    if (rs && rs.state === 'done' && temps.has(rs.command_id) && temps.get(rs.command_id).shown && kind !== 'disabled') li.append(tempBox(r, temps.get(rs.command_id)));
+    const msg = msgs.get(r.account_id);
+    if (msg) {
+      const p = el('p', 'im'); p.setAttribute('role', 'alert'); p.append(msg.text);
+      if (msg.retry) { const b = btn('lnk lnk-pad', '重试', r.account_id + ':retry'); b.onclick = msg.retry; p.append(' · ', b); }
+      li.append(p);
+    }
+    if (kind === 'disabled') return li;
+    const acts = el('div', 'acts2');
+    const isBusy = busy.has(r.account_id);
+    if (kind === 'pending') {
+      const a = btn('btn', '关联到已有客户', r.account_id + ':link'); a.onclick = () => openPicker(r, 'link');
+      const c = btn('btn', isBusy ? '正在新建…' : '新建档案', r.account_id + ':create'); c.onclick = () => create(r);
+      if (!data.gc.available) { a.setAttribute('aria-disabled', 'true'); c.setAttribute('aria-disabled', 'true'); a.onclick = c.onclick = () => shout('找不到 GoodCustomer 资料库'); }
+      if (isBusy) c.setAttribute('aria-disabled', 'true');
+      acts.append(a, c);
+    } else {
+      const a = btn('btn', '更正关联', r.account_id + ':relink'); a.onclick = () => openPicker(r, 'relink');
+      if (!data.gc.available) { a.setAttribute('aria-disabled', 'true'); a.onclick = () => shout('找不到 GoodCustomer 资料库'); }
+      const u = btn('btn', '解除关联', r.account_id + ':unlink'); u.onclick = () => confirmUnlink(r, u);
+      acts.append(a, u);
+    }
+    li.append(acts);
+    if (picker && picker.account_id === r.account_id) li.append(pickerBox(r));
+    const x = el('p', 'gx');
+    if (fails.length) return li;   // 上一条指令未同步：先处理，不再排新的
+    if (kind === 'linked') {
+      const resetBusy = rs && rs.state === 'pending';
+      const rb = btn('lnk lnk-pad', '重置密码', r.account_id + ':reset');
+      if (resetBusy) rb.setAttribute('aria-disabled', 'true');
+      rb.onclick = () => resetBusy ? shout('上一次重置还在待同步') : confirmReset(r, rb);
+      x.append(rb);
+    }
+    if (!(dis && dis.state === 'pending')) {
+      const db = btn('lnk lnk-pad', '停用账号', r.account_id + ':disable'); db.onclick = () => confirmDisable(r, db);
+      x.append(db);
+    }
+    if (x.childNodes.length) li.append(x);
+    return li;
+  }
+  function tempBox(r, t) {
+    const box = el('div', 'tmp');
+    box.append(el('p', null, '临时密码（只显示这一次，请在微信里发给' + r.nickname + '）'));
+    const line = el('p'); const code = el('span', 'mono', t.password);
+    const cp = btn('lnk lnk-pad', '复制', r.account_id + ':copy');
+    const note = el('p', 'im'); note.hidden = true;
+    cp.onclick = async () => {
+      try { await navigator.clipboard.writeText(t.password); note.textContent = '已复制临时密码'; note.hidden = false; say('已复制临时密码'); }
+      catch (e) {
+        const inp = el('input', 'ti mono'); inp.readOnly = true; inp.value = t.password; inp.setAttribute('aria-label', '临时密码');
+        note.replaceChildren('未能自动复制，请长按选择临时密码', inp); note.hidden = false;
+        inp.focus(); inp.select(); shout('未能自动复制，请手动复制');
+      }
+    };
+    line.append(code, ' ', cp); box.append(line, note);
+    return box;
+  }
+
+  /* ---------- 关联：搜索档案 ---------- */
+  function openPicker(r, mode) {
+    picker = {account_id: r.account_id, mode, q: '', results: [], error: ''};
+    msgs.delete(r.account_id); render();
+    const q = $('gPickQ'); if (q) q.focus();
+  }
+  function closePicker(r) { picker = null; render(); refocus(r.account_id + ':' + (r.customer_id ? 'relink' : 'link')); }
+  let searchTimer = null, searchSeq = 0;
+  function pickerBox(r) {
+    const box = el('div', 'pick');
+    const lab = el('label', 'flabel', picker.mode === 'relink' ? '改到哪位客户（按微信名、显示名、别名或编号搜）' : '关联到哪位客户（按微信名、显示名、别名或编号搜）');
+    lab.htmlFor = 'gPickQ';
+    const q = el('input', 'ti'); q.id = 'gPickQ'; q.type = 'search'; q.autocomplete = 'off'; q.spellcheck = false; q.value = picker.q;
+    q.oninput = () => { picker.q = q.value; clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 200); };
+    q.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); closePicker(r); } };
+    const st = el('p', 'gnone'); st.setAttribute('role', 'status');
+    const ul = el('ul');
+    if (picker.error) st.textContent = picker.error;
+    else if (picker.q.trim() && !picker.results.length) st.textContent = '没有找到 ' + picker.q.trim();
+    picker.results.forEach(c => {
+      const li = el('li'); const b = btn(null, null, r.account_id + ':pick:' + c.customer_id);
+      b.append(el('span', 'mono', c.customer_id), ' ' + c.display_name + (c.aliases.length ? '（' + c.aliases.join('、') + '）' : ''));
+      b.onclick = () => choose(r, c, b);
+      li.append(b); ul.append(li);
+    });
+    const cancel = btn('lnk lnk-pad', '取消', r.account_id + ':pickcancel'); cancel.onclick = () => closePicker(r);
+    box.append(lab, q, st, ul, cancel);
+    return box;
+  }
+  async function runSearch() {
+    if (!picker) return;
+    const mine = ++searchSeq, q = picker.q.trim();
+    if (!q) { picker.results = []; picker.error = ''; render(); return; }
+    try {
+      const r = await fetch('/api/guests/search?q=' + encodeURIComponent(q));
+      const d = await r.json();
+      if (mine !== searchSeq || !picker) return;
+      picker.results = r.ok ? d.results : []; picker.error = r.ok ? '' : (d.error || '搜索失败');
+    } catch (e) { if (picker) { picker.results = []; picker.error = '网络已断开，搜索失败'; } }
+    render();
+  }
+  function choose(r, c, opener) {
+    if (busy.has(r.account_id)) return;
+    if (picker.mode === 'relink') {
+      confirmDlg('更正关联', r.nickname + '（' + r.username + '）将从 ' + r.customer_id + ' 改到 ' + c.customer_id + ' ' + c.display_name + '。', '确认更正', opener,
+        () => write(r, {action: 'relink', account_id: r.account_id, customer_id: c.customer_id}));
+    } else write(r, {action: 'link', account_id: r.account_id, customer_id: c.customer_id});
+  }
+  function create(r) {
+    if (busy.has(r.account_id)) return;
+    write(r, {action: 'create', account_id: r.account_id});
+  }
+  function confirmUnlink(r, opener) {
+    confirmDlg('解除关联', r.nickname + '（' + r.username + '）与 ' + r.customer_id + ' 解除关联后回到待关联。', '确认解除', opener,
+      () => write(r, {action: 'unlink', account_id: r.account_id}));
+  }
+
+  /* ---------- 写入（幂等 request_id；失败行内"未保存 · 重试"，重试用同一个 request_id） ---------- */
+  async function write(r, body, rq) {
+    if (busy.has(r.account_id)) return;
+    const request_id = rq || rid();
+    busy.add(r.account_id); msgs.delete(r.account_id); render();
+    let res;
+    try { res = await post('/api/guests/link', Object.assign({request_id}, body)); }
+    catch (e) { res = null; }
+    busy.delete(r.account_id);
+    if (!res || !res.ok) {
+      const text = res && res.status === 400 && res.data.error ? res.data.error : '未保存';
+      msgs.set(r.account_id, {text, retry: () => write(r, body, request_id)});
+      shout(text === '未保存' ? '未保存，请重试' : text);
+      render(); refocus(r.account_id + ':retry');
+      return;
+    }
+    picker = null;
+    const d = res.data;
+    const next = nextFocus(r);
+    say(body.action === 'unlink' ? '已解除关联' : d.action === 'create' ? '已新建档案 ' + d.customer_id + ' 并关联' :
+        (body.action === 'relink' ? '已更正关联到' : '已关联到') + (d.display_name || d.customer_id));
+    await load(false);
+    refocus(next, body.action === 'unlink' ? $('gPendH') : body.action === 'relink' ? $('gLinkedH') : $('gPendH'));
+  }
+  function nextFocus(r) {
+    // 行移走后焦点落到同列表下一行（否则上一行）的第一个按钮。
+    const li = document.querySelector('li.grow[data-id="' + CSS.escape(r.account_id) + '"]');
+    const sib = li && (li.nextElementSibling || li.previousElementSibling);
+    const b = sib && sib.querySelector('button[data-k]');
+    return b ? b.dataset.k : r.account_id + ':relink';
+  }
+
+  /* ---------- 停用 / 重置密码（AD-24 指令） ---------- */
+  function confirmDisable(r, opener) {
+    confirmDlg('停用账号', '停用后 ' + r.nickname + '（' + r.username + '）现有登录立即失效，再登录只看到停用提示，不再记录浏览。停用不可恢复。', '确认停用', opener,
+      () => commandWrite(r, 'disable_account'));
+  }
+  function confirmReset(r, opener) {
+    confirmDlg('重置密码', '重置后该客人所有设备都会退出登录。临时密码在服务器确认后显示一次。', '确认重置', opener,
+      () => commandWrite(r, 'reset_password'));
+  }
+  async function commandWrite(r, action, rq) {
+    const request_id = rq || rid();
+    msgs.delete(r.account_id);
+    let res;
+    try { res = await post('/api/guests/command', {action, account_id: r.account_id, request_id}); }
+    catch (e) { res = null; }
+    if (!res || !res.ok) {
+      const text = res && res.status === 400 && res.data.error ? res.data.error : '未保存';
+      msgs.set(r.account_id, {text, retry: () => commandWrite(r, action, request_id)});
+      shout(text === '未保存' ? '未保存，请重试' : text);
+      render(); refocus(r.account_id + ':retry');
+      return;
+    }
+    const d = res.data;
+    if (d.temp_password) temps.set(d.command_id, {password: d.temp_password, shown: false});
+    if (!d.replayed) issued.add(d.command_id);
+    if (d.password_lost) msgs.set(r.account_id, {text: '未能取得临时密码，请再重置一次'});
+    await load(false);
+    refocus(r.account_id + ':' + (action === 'reset_password' ? 'reset' : 'relink'), $('gPendH'));
+  }
+
+  /* ---------- 邀请码 ---------- */
+  function renderInvite() {
+    const inv = data.invite;
+    $('invCode').textContent = inv.current ? inv.current.code : '未设置';
+    const p = inv.pending;
+    $('invNew').hidden = !p;
+    if (p) { $('invNewCode').textContent = p.code; $('invTag').textContent = p.state === 'failed' ? '未同步' : '待同步'; }
+    $('invFail').hidden = !(p && p.state === 'failed');
+    $('invFail').textContent = p && p.state === 'failed' ? '新邀请码未同步 · 请处理（scripts/outbox.py list）' : '';
+  }
+  function openInvite() {
+    $('invForm').hidden = false; $('invChange').setAttribute('aria-expanded', 'true');
+    $('invMsg').hidden = true; $('invInput').value = ''; $('invInput').focus();
+  }
+  function closeInvite() {
+    $('invForm').hidden = true; $('invChange').setAttribute('aria-expanded', 'false'); $('invChange').focus();
+  }
+  let invRid = null, invLast = '';
+  function saveInvite() {
+    const code = $('invInput').value.trim();
+    if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) {
+      $('invMsg').textContent = '邀请码须为 4–32 位字母、数字、下划线或连字符'; $('invMsg').hidden = false;
+      $('invInput').setAttribute('aria-invalid', 'true'); $('invInput').focus(); return;
+    }
+    $('invInput').removeAttribute('aria-invalid');
+    confirmDlg('更换邀请码', '新邀请码 ' + code + '：旧邀请码将立即失效，已注册的客人不受影响。服务器确认前旧码仍有效。', '确认更换', $('invSave'), async () => {
+      if (code !== invLast) { invRid = rid(); invLast = code; }
+      let res;
+      try { res = await post('/api/guests/invite', {code, request_id: invRid}); } catch (e) { res = null; }
+      if (!res || !res.ok) {
+        $('invMsg').textContent = res && res.status === 400 && res.data.error ? res.data.error : '未保存 · 请重试';
+        $('invMsg').hidden = false; shout('未保存，请重试'); $('invSave').focus(); return;
+      }
+      invRid = null; invLast = '';
+      closeInvite(); await load(false);
+    });
+  }
+
+  /* ---------- confirm-dialog（role=alertdialog；焦点先在"取消"；困在框内；Esc / 取消关闭并回到触发处） ---------- */
+  let dlgOpener = null, dlgYes = null;
+  function confirmDlg(title, text, yes, opener, onYes) {
+    dlgOpener = opener; dlgYes = onYes;
+    $('cdT').textContent = title; $('cdD').textContent = text; $('cdYes').textContent = yes;
+    $('cdlg').hidden = false; $('cdNo').focus();
+  }
+  function closeDlg(run) {
+    $('cdlg').hidden = true;
+    const fn = dlgYes, opener = dlgOpener; dlgYes = dlgOpener = null;
+    if (opener && opener.isConnected) opener.focus(); else if (opener && opener.dataset && opener.dataset.k) refocus(opener.dataset.k);
+    if (run && fn) fn();
+  }
+  document.addEventListener('keydown', e => {
+    if ($('cdlg').hidden) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDlg(false); return; }
+    if (e.key === 'Tab') {
+      const f = [$('cdNo'), $('cdYes')];
+      if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[1].focus(); }
+      else if (!e.shiftKey && document.activeElement === f[1]) { e.preventDefault(); f[0].focus(); }
+      else if (!f.includes(document.activeElement)) { e.preventDefault(); f[0].focus(); }
+    }
+  }, true);
+  $('cdNo').onclick = () => closeDlg(false);
+  $('cdYes').onclick = () => closeDlg(true);
+  $('invChange').onclick = () => $('invForm').hidden ? openInvite() : closeInvite();
+  $('invCancel').onclick = closeInvite;
+  $('invSave').onclick = saveInvite;
+  $('invInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); saveInvite(); } });
+  $('gFilter').addEventListener('input', () => { if (data) filterLinked(); });
+  $('gReload').onclick = () => load(true);
+  $('gPullRetry').onclick = () => load(true);
+
+  // 计数：打开后台时读一次（不拉服务器）。
+  load(false);
+  return {
+    open() { active = true; load(true); },
+    leave() {
+      active = false;
+      // 已显示过的临时密码离开 06 即不可再见。
+      [...temps].forEach(([id, t]) => { if (t.shown) temps.delete(id); });
+      if (!$('cdlg').hidden) closeDlg(false);
+      if (data) { lastJson = ''; render(); }
+    }
+  };
+})();

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "accounts_list.v1.schema.json",
+  "title": "账号名单 v1（GET /admin/accounts 的响应，服务器 → Mac，AD-8、AD-9、AD-12）",
+  "description": "Mac 每轮同步与打开后台 06 客人时拉取，按 account_id 覆盖写入 curio.db 的 guest_accounts；服务器上没有的账号 Mac 不删（服务器不删账号）。只含墨墨辨认与管理所需字段：不含邮箱、密码哈希、会话、同意记录或任何其它个人信息。按注册时间、account_id 排序。",
+  "type": "object",
+  "required": ["schema_version", "accounts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "accounts": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "required": ["account_id", "username", "nickname", "status", "created_at", "account_rev"],
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+          "username": {"type": "string", "minLength": 1, "maxLength": 40},
+          "nickname": {"type": "string", "minLength": 1, "maxLength": 60, "description": "微信名/称呼"},
+          "status": {"type": "string", "enum": ["active", "disabled"]},
+          "created_at": {
+            "type": "string",
+            "description": "注册时间，UTC，ISO 8601 带 Z，精确到毫秒。",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+          },
+          "account_rev": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}
+        }
+      }
+    }
+  }
+}

@@ -11,6 +11,7 @@
                                                      丢掉快照时同时撤掉它的待送达记录，之后重新 publish
 
 被拒收的记录（failed_at 有值）会让同步停在它这里（sync_status: blocked），不会跳过。
+停用账号 / 重置密码（故事 14）只从后台 06 客人发起；list 只显示账号编号前 8 位与序号，从不打印临时密码。
 """
 import argparse, json, sys
 from pathlib import Path
@@ -30,6 +31,16 @@ def _invite_summary(payload):
         return '邀请码（无法读取）'
 
 
+def _account_summary(kind, payload):
+    """停用 / 重置只显示账号编号前 8 位与序号；从不打印临时密码。"""
+    try:
+        p = json.loads(payload)
+        what = '停用账号' if kind == 'disable_account' else '重置密码'
+        return f"{what} {p['account_id'][:8]}…（序号 {p['target_seq']}）"
+    except Exception:
+        return '账号指令（无法读取）'
+
+
 def cmd_list(store, show_all, out):
     with store.connect() as c:
         where = '' if show_all else 'WHERE sent_at IS NULL'
@@ -42,6 +53,8 @@ def cmd_list(store, show_all, out):
         line = f"#{r['seq']} {r['kind']} {r['created_at']} 尝试 {r['attempts']} 次 · {state}"
         if r['kind'] == 'set_invite_code':
             line += ' · ' + _invite_summary(r['payload'])
+        elif r['kind'] in sync.ACCOUNT_COMMANDS:
+            line += ' · ' + _account_summary(r['kind'], r['payload'])
         if r['last_error'] and not r['sent_at']:
             line += ' · ' + r['last_error']
         out(line)
@@ -67,6 +80,15 @@ def cmd_invite(store, code, out, seq=None):
 
 def cmd_requeue(store, seq, out):
     with store.connect() as c:
+        row = c.execute('SELECT kind,payload FROM outbox WHERE seq=? AND sent_at IS NULL', (seq,)).fetchone()
+        if row and row['kind'] == 'reset_password':
+            try:
+                erased = json.loads(row['payload']).get('temp_password') == sync.ERASED
+            except (ValueError, AttributeError):
+                erased = True
+            if erased:
+                out(f'#{seq} 是重置密码指令，临时密码已抹掉，不能重发：请 drop 这一条，再在后台 06 客人重新重置')
+                return 1
         n = c.execute('UPDATE outbox SET failed_at=NULL,last_error=NULL WHERE seq=? AND sent_at IS NULL', (seq,)).rowcount
     if not n:
         out(f'#{seq} 不存在或已送达')

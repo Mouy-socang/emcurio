@@ -180,7 +180,7 @@ def ranked(db):
 
 def test_tabs_02_and_03_enabled_and_scripts_served(http):
     page = http['page']
-    assert 'href="/#pool"' in page and 'href="/#rank"' in page and page.count('暂不可用') == 3
+    assert 'href="/#pool"' in page and 'href="/#rank"' in page and page.count('暂不可用') == 2
     assert 'id="poolView"' in page and 'id="rankView"' in page and '/ranking.js' in page
     status, headers, body = http['raw']('/ranking.js')
     assert status == 200 and 'javascript' in headers['Content-Type'] and b'/api/rank/preview' in body

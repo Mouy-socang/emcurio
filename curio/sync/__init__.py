@@ -12,6 +12,9 @@
   逐张上传、核对确认，再查一次全部在服务器上才提交（AD-13）；本机缺图按永久失败处理。
 - 发送前后都按 `contract/schemas/` 校验（标准库最小校验器，只支持这些 Schema 用到的关键字）。
 - 连续 3 次 flush 失败（含意外异常）发一次 macOS 通知；只有 ok 清零，timeout 不改计数。
+- 账号指令（故事 14，AD-24）：停用 / 重置密码经 `enqueue_account_command` 入队（按账号单调 target_seq）；服务器
+  applied 不为 true 按永久失败；重置的临时密码明文在服务器答复后立即从发件箱抹掉。`run` 每轮末尾拉一次账号名单
+  （`pull_accounts`，GET /admin/accounts）写入 guest_accounts。
 - 管理密钥只从 .env 读取，不进日志、错误信息或数据库。
 """
 import json
@@ -298,6 +301,49 @@ def enqueue_invite(c, code, at_least=None):
     return enqueue(c, 'set_invite_code', payload), seq
 
 
+# ---------- 账号指令（AD-24：停用、重置密码；故事 14） ----------
+
+ACCOUNT_COMMANDS = ('disable_account', 'reset_password')
+ACCOUNT_NOT_APPLIED = '服务器未执行该账号指令（序号过旧、账号不存在或已停用）'
+_ACCOUNT_ID_RE = re.compile(r'[0-9a-f]{32}')
+# 临时密码字符：去掉 0、1、I、O、l、o 等易混字符（与 reset_password.v1 的 pattern 一致）。
+TEMP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+TEMP_LENGTH = 12
+ERASED = '（已抹掉）'
+
+
+def new_temp_password():
+    """Mac 生成的 12 位临时密码（secrets，去掉易混字符）。"""
+    import secrets
+    return ''.join(secrets.choice(TEMP_ALPHABET) for _ in range(TEMP_LENGTH))
+
+
+def enqueue_account_command(c, kind, account_id):
+    """入队停用或重置密码指令（AD-24），返回 (event_id, payload)。target_seq 按账号单调（kv `cmd_seq:account:<id>`，
+    两种指令共用）。重置时 payload 里带 Mac 生成的临时密码明文——只在发件箱里待到服务器确认（flush 确认后抹掉），
+    调用方把它交给墨墨的浏览器后不得另存。不提交。"""
+    if kind not in ACCOUNT_COMMANDS:
+        raise ContractError('未知的账号指令')
+    if not isinstance(account_id, str) or not _ACCOUNT_ID_RE.fullmatch(account_id):
+        raise ContractError('账号编号无效')
+    seq = next_target_seq(c, 'account:' + account_id)
+    payload = {'schema_version': 1, 'command_id': str(uuid.uuid4()), 'target_seq': seq, 'account_id': account_id}
+    if kind == 'reset_password':
+        payload['temp_password'] = new_temp_password()
+    return enqueue(c, kind, payload), payload
+
+
+def _erase_secret(c, seq, payload_text):
+    """服务器已答复（确认或不生效）的重置指令：抹掉发件箱里的临时密码明文（AD-24：Mac 不保存明文）。"""
+    try:
+        payload = json.loads(payload_text)
+    except (ValueError, RecursionError):
+        return
+    if isinstance(payload, dict) and 'temp_password' in payload:
+        payload['temp_password'] = ERASED
+        c.execute('UPDATE outbox SET payload=? WHERE seq=?', (json.dumps(payload, ensure_ascii=False, sort_keys=True), seq))
+
+
 def image_dir(store):
     """发布图片（转码后、内容哈希命名）在本机的目录：curio.db 同目录下 publish_images/。"""
     return Path(store.path).parent / 'publish_images'
@@ -491,6 +537,9 @@ def _post(session, url, token, envelope, timeout, deadline, monotonic, image_dir
     if envelope['kind'] == 'set_invite_code' and body.get('applied') is not True:
         # 服务器已有序号更大的邀请码指令（例如 Mac 库从备份恢复后计数器回退）：重发也不会生效。
         return INVITE_NOT_APPLIED, True, body
+    if envelope['kind'] in ACCOUNT_COMMANDS and body.get('applied') is not True:
+        # 序号不大于服务器已应用值、账号不存在或已停用：重发也不会生效（后台显示"未同步 · 请处理"）。
+        return ACCOUNT_NOT_APPLIED, True, body
     return None, False, body
 
 
@@ -569,6 +618,9 @@ def flush(store, root=ROOT, seconds=FLUSH_SECONDS, session=None, monotonic=time.
             error_now, permanent, ack = _post_with_deadline(session, url, token, envelope, deadline, monotonic,
                                                             image_dir(store))
         with store.connect() as c:
+            if row['kind'] == 'reset_password' and (ack is not None or (error_now and permanent)):
+                # 服务器已答复或永久拒收：明文立即抹掉；暂时失败（5xx、超时）保留原样，下次照发同一个密码。
+                _erase_secret(c, row['seq'], row['payload'])
             if error_now:
                 c.execute('UPDATE outbox SET attempts=attempts+1,last_error=?,failed_at=? WHERE seq=?',
                           (error_now, utc_now() if permanent else None, row['seq']))
@@ -657,9 +709,73 @@ def send_heartbeat(store, root=ROOT, session=None, monotonic=time.monotonic, clo
     return {'heartbeat_status': 'ok', 'heartbeat_at': envelope['payload']['sent_at']}, False
 
 
+# ---------- 账号名单（AD-8、AD-9；故事 14） ----------
+
+ACCOUNTS_SECONDS = 10        # 名单拉取限时
+KV_ACCOUNTS_AT = 'accounts_pulled_at'
+KV_ACCOUNTS_ERROR = 'accounts_pull_error'
+
+
+def pull_accounts(store, root=ROOT, session=None, monotonic=time.monotonic, seconds=ACCOUNTS_SECONDS):
+    """GET /admin/accounts（accounts_list.v1），按 account_id 覆盖写入 guest_accounts（account_rev 不小于已有的才写，
+    晚到的旧名单不覆盖新值）；服务器上没有的账号不删。返回结果字段（accounts_status: ok / error；未配置服务器时 {}）。
+    失败只写结果字段，保留上次名单，不抛异常。"""
+    url, token, _ = server_settings(root)
+    if url is None:
+        return {}
+    session = session or requests.Session()
+    deadline = monotonic() + seconds
+    box = {}
+
+    def work():
+        try:
+            box['r'] = _call(session, 'GET', url + '/admin/accounts', token, min(REQUEST_TIMEOUT, seconds),
+                             deadline, monotonic)
+        except Exception as e:
+            box['r'] = (None, None, f'拉取账号名单失败（{type(e).__name__}）')
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(max(0.0, seconds))
+    status, body, error = box.get('r', (None, None, '服务器响应超时'))
+    if error is None and not 200 <= (status or 0) < 300:
+        error = _http_error(status, body)[0]
+    if error is None:
+        try:
+            bad = validate(body, load_schema('accounts_list', 1)) if isinstance(body, dict) else ['$ 应为 object']
+        except ContractError as e:
+            bad = [str(e)]
+        if bad:
+            error = '账号名单不合契约：' + '；'.join(bad)[:200]
+    if error is None:
+        bad = [a['account_id'] for a in body['accounts'] if not _ACCOUNT_ID_RE.fullmatch(a['account_id'])]
+        if bad:
+            error = '账号名单不合契约：account_id 不符合要求'
+    if error:
+        log.warning('账号名单未拉取：%s', error)
+        store.set(KV_ACCOUNTS_ERROR, error)
+        return {'accounts_status': 'error', 'accounts_error': error}
+    at = utc_now()
+    written = 0
+    with store.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        for a in body['accounts']:
+            written += c.execute(
+                'INSERT INTO guest_accounts(account_id,username,nickname,status,created_at,account_rev,pulled_at) '
+                'VALUES(?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET username=excluded.username,'
+                'nickname=excluded.nickname,status=excluded.status,created_at=excluded.created_at,'
+                'account_rev=excluded.account_rev,pulled_at=excluded.pulled_at '
+                'WHERE excluded.account_rev>=guest_accounts.account_rev',
+                (a['account_id'], a['username'], a['nickname'], a['status'], a['created_at'], a['account_rev'], at)
+            ).rowcount
+        c.execute('INSERT OR REPLACE INTO kv VALUES(?,?)', (KV_ACCOUNTS_AT, at))
+        c.execute('DELETE FROM kv WHERE k=?', (KV_ACCOUNTS_ERROR,))
+    return {'accounts_status': 'ok', 'accounts_total': len(body['accounts']), 'accounts_written': written}
+
+
 def run(store, root=ROOT, session=None, monotonic=time.monotonic, clock=time.time):
-    """采集调度每轮（含空闲轮）调用：限时 flush 发件箱，再发一次心跳（AD-10）。
-    flush 或心跳失败都计入连续失败（一轮最多计一次）；任何意外都只变成 sync_status: error。"""
+    """采集调度每轮（含空闲轮）调用：限时 flush 发件箱，再发一次心跳（AD-10），再拉一次账号名单（故事 14）。
+    flush 或心跳失败都计入连续失败（一轮最多计一次）；名单拉取失败只写结果字段（accounts_status: error），
+    不影响其余部分；任何意外都只变成 sync_status: error。"""
     try:
         result = flush(store, root, session=session, monotonic=monotonic, record=False)
         failed = result['sync_status'] == 'error'
@@ -671,6 +787,11 @@ def run(store, root=ROOT, session=None, monotonic=time.monotonic, clock=time.tim
                 beat, beat_failed = {'heartbeat_status': 'error', 'heartbeat_error': f'心跳未发出（{type(e).__name__}）'}, True
             result.update(beat)
             failed = failed or beat_failed
+            try:
+                result.update(pull_accounts(store, root, session, monotonic))
+            except Exception as e:      # 名单的意外不丢掉其余结果
+                log.warning('账号名单未拉取（%s）', type(e).__name__)
+                result.update({'accounts_status': 'error', 'accounts_error': f'拉取账号名单失败（{type(e).__name__}）'})
         status = 'error' if failed else result['sync_status']
         streak = _record_round(store, status)
         if failed or 'sync_error' in result:

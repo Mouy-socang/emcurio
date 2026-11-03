@@ -1,6 +1,7 @@
 """本机后台服务（只绑定本机；手机经 tailscale serve 访问，AD-4）。打开页面不触发采集或模型调用。
 
-`/` 为后台一页拣选（CAP-6，curio/triage.html + triage.js）：01 新货、02 商品池与 03 榜（故事 11，ranking.js）；
+`/` 为后台一页拣选（CAP-6，curio/triage.html + triage.js）：01 新货、02 商品池与 03 榜（故事 11，ranking.js）、
+06 客人（故事 14，curio/guests.py：账号关联、停用、重置密码、邀请码）；
 旧审核页在 `/old`。`/preview/…` 为发布前预览（AD-28）：Mac 用客人页同一份模板渲染候选快照，只在后台可见，
 页内只引用本机地址（CSP 同客人页），不上传、不入发件箱、不记录行为；发布只从预览横条发起。"""
 import argparse,html as htmlmod,ipaddress,json,logging,re,secrets,threading
@@ -48,12 +49,20 @@ def message_page(title,text,status=200):
             '<title>%s · 后台</title><link rel="stylesheet" href="/preview/bar.css"></head><body class="pvempty"><main><h1>%s</h1><p>%s</p>'
             '<p><a href="/#rank">回到 03 榜</a></p></main></body></html>')%(htmlmod.escape(title),htmlmod.escape(title),htmlmod.escape(text))
 
-def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
+def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=None,pull=None,gcdb_run=None):
     """root：.env 与本机已下载图片所在（测试传临时目录）；fetch：卖家图片下载函数（测试注入）；
-    flush：发布入队后在后台线程触发一次同步（默认 sync.flush(store, root)）。"""
+    flush：发布入队后在后台线程触发一次同步（默认 sync.flush(store, root)）。
+    gc：GoodCustomer 资料库与 gcdb.py 路径（默认读 config/settings.yaml 的 goodcustomer；测试传临时库）；
+    pull：打开 06 客人时拉取账号名单（默认 sync.pull_accounts(store, root)）；gcdb_run：调用 gcdb 的函数（测试注入）。"""
     if host not in LOCAL_HOSTS:raise ValueError('后台只监听本机地址（AD-4）；手机请经 tailscale serve 访问')
-    from . import ranking,publish,sync
+    from . import ranking,publish,sync,guests
     if flush is None:flush=lambda:sync.flush(store,root)
+    if pull is None:pull=lambda:sync.pull_accounts(store,root,seconds=5)
+    def gc_settings():
+        if gc is not None:return gc
+        try:return load()['goodcustomer']
+        except Exception:
+            log.exception('读取 goodcustomer 设置失败');return None
     # 当前预览的候选快照：payload、rank、names、fp（内容指纹）、at、pages（渲染结果缓存）。只在内存，不落库、不上传。
     # gen：每次作废加一；生成中途被作废的预览不保存。build_lock：同一时刻只生成一个预览。
     preview={};state={'gen':0}
@@ -235,6 +244,19 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
             if url.path=='/ranking.js':
                 return self.reply(200,(ROOT/'curio/ranking.js').read_text(),'application/javascript; charset=utf-8')
             if url.path=='/api/pool':return self.reply(200,ranking.pool(store,root))
+            if url.path=='/api/guests':
+                # 06 客人：refresh=1（打开分区时）先拉一次账号名单；失败只记下，照常返回上次的名单。
+                q=parse_qs(url.query);pulled=None
+                if q.get('refresh',[''])[0]=='1':
+                    try:pulled=pull()
+                    except Exception:
+                        log.exception('账号名单拉取失败');pulled={'accounts_status':'error'}
+                data=guests.view(store,gc_settings())
+                if pulled is not None:data['pull']=pulled
+                return self.reply(200,data)
+            if url.path=='/api/guests/search':
+                try:return self.reply(200,{'results':guests.search(gc_settings(),parse_qs(url.query).get('q',[''])[0])})
+                except guests.GuestError as e:return self.reply(400,{'error':str(e)})
             if url.path=='/api/rank':return self.reply(200,ranking.rank_state(store,root))
             if url.path=='/preview':
                 self.send_response(303);self.send_header('Location','/preview/');self.send_header('Content-Length','0');self.end_headers();return
@@ -280,7 +302,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
             hosts={h.lower() for h in (self.headers.get('Host'),self._forwarded_host()) if h}
             if self.headers.get('X-Curio-Token')!=token or (origin and urlparse(origin).netloc.lower() not in hosts):
                 return self.reply(403,{'error':'请刷新本机审核页后重试'})
-            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
+            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/guests/link','/api/guests/command','/api/guests/invite','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<=150000:raise ValueError('请求过大或为空')
@@ -313,6 +335,20 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None):
                     result=curio_monitor.recheck_item(store,data['item_id'],load())
                     # 复查判下架：mark_gone 已在同一事务里入队隐藏（已发布的货），立即触发一次发送。
                     if result.get('outcome')=='gone':drop_preview();kick()
+                    return self.reply(200,result)
+                # 06 客人（故事 14）：关联只在 curio.db；停用、重置、换邀请码入发件箱后立即触发一次发送。
+                if self.path=='/api/guests/link':
+                    action=data['action']
+                    if action=='create':
+                        return self.reply(200,guests.create_and_link(store,gc_settings(),data['account_id'],data['request_id'],gcdb_run))
+                    return self.reply(200,guests.link(store,gc_settings(),action,data['account_id'],data['request_id'],data.get('customer_id')))
+                if self.path=='/api/guests/command':
+                    result=guests.command(store,data['action'],data['account_id'],data['request_id'])
+                    if not result.get('replayed'):kick()
+                    return self.reply(200,result)
+                if self.path=='/api/guests/invite':
+                    result=guests.change_invite(store,data['code'],data['request_id'])
+                    if not result.get('replayed'):kick()
                     return self.reply(200,result)
                 if self.path=='/api/archive-classifications/review':
                     from .archive_review import review

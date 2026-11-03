@@ -263,9 +263,11 @@ def check_invite_command(payload):
 
 
 def redact(kind, payload):
-    """存入 events 表前去掉明文：邀请码换成原文的 HMAC-SHA256（只用于重放比对；大小写不同即不同内容）。"""
+    """存入 events 表前去掉明文：邀请码、临时密码换成原文的 HMAC-SHA256（只用于重放比对；大小写不同即不同内容）。"""
     if kind == 'set_invite_code':
         payload = dict(payload, code='hmac-sha256:' + _mac(payload['code']))
+    elif kind == 'reset_password':
+        payload = dict(payload, temp_password='hmac-sha256:' + _mac(payload['temp_password']))
     return payload
 
 
@@ -285,6 +287,69 @@ def apply_set_invite_code(c, payload, now):
     c.execute('INSERT INTO commands(command_id,kind,target,target_seq,applied,at) VALUES(?,?,?,?,?,?)',
               (payload['command_id'], 'set_invite_code', INVITE_TARGET, payload['target_seq'], int(applied), iso(now)))
     return applied
+
+
+# ---------- 账号指令（AD-24：停用、重置密码；故事 14） ----------
+
+ACCOUNT_COMMANDS = ('disable_account', 'reset_password')
+_ACCOUNT_ID_RE = re.compile(r'[0-9a-f]{32}')
+# 临时密码字符（Mac 生成，12 位）：去掉 0、1、I、O、l、o 等易混字符。
+TEMP_PASSWORD_RE = re.compile(r'[A-HJ-NP-Za-km-np-z2-9]{12}')
+
+
+def account_target(account_id):
+    return 'account:' + account_id
+
+
+def check_account_command(kind, payload):
+    """Schema 之外的严格检查（Schema 的 `$` 会放过结尾换行）。"""
+    if not _UUID_RE.fullmatch(payload['command_id']):
+        raise BadCommand(f'{kind} 载荷不合契约：command_id 不符合要求')
+    if not _ACCOUNT_ID_RE.fullmatch(payload['account_id']):
+        raise BadCommand(f'{kind} 载荷不合契约：account_id 不符合要求')
+    seq = payload['target_seq']
+    if type(seq) is not int or not 1 <= seq <= _MAX_SEQ:
+        raise BadCommand(f'{kind} 载荷不合契约：target_seq 必须为 1 到 2^63-1 的整数')
+    if kind == 'reset_password' and not TEMP_PASSWORD_RE.fullmatch(payload['temp_password']):
+        raise BadCommand('reset_password 载荷不合契约：temp_password 不符合要求')
+
+
+def apply_account_command(c, kind, payload, now):
+    """在调用方事务内执行停用或重置密码（AD-24）。同一 command_id 只执行一次，重放返回第一次的结果；
+    target_seq 不大于该账号已应用的最高序号（停用与重置共用）时不生效；账号不存在、或对已停用账号重置时也不生效。
+    生效时递增 account_rev，并使该账号全部会话与重设链接立即失效。返回是否生效。"""
+    done = c.execute('SELECT applied FROM commands WHERE command_id=?', (payload['command_id'],)).fetchone()
+    if done:
+        return bool(done[0])
+    account_id = payload['account_id']
+    target = account_target(account_id)
+    row = c.execute('SELECT status FROM accounts WHERE account_id=?', (account_id,)).fetchone()
+    last = c.execute('SELECT max(target_seq) FROM commands WHERE target=? AND applied=1', (target,)).fetchone()[0]
+    applied = row is not None and (last is None or payload['target_seq'] > last)
+    if applied and kind == 'reset_password' and row[0] != 'active':
+        applied = False
+    if applied:
+        at = iso(now)
+        if kind == 'disable_account':
+            c.execute("UPDATE accounts SET status='disabled',updated_at=?,account_rev=account_rev+1 WHERE account_id=?",
+                      (at, account_id))
+        else:
+            c.execute('UPDATE accounts SET password_hash=?,updated_at=?,account_rev=account_rev+1 WHERE account_id=?',
+                      (HASHER.hash(payload['temp_password']), at, account_id))
+        _revoke_all(c, account_id, now)
+    c.execute('INSERT INTO commands(command_id,kind,target,target_seq,applied,at) VALUES(?,?,?,?,?,?)',
+              (payload['command_id'], kind, target, payload['target_seq'], int(applied), iso(now)))
+    return applied
+
+
+def list_accounts(c):
+    """账号名单（accounts_list.v1）：只返回账号编号、用户名、微信名/称呼、状态、注册时间、account_rev；
+    不含邮箱与任何哈希（AD-8）。"""
+    rows = c.execute('SELECT account_id,username,nickname,status,created_at,account_rev FROM accounts '
+                     'ORDER BY created_at,account_id').fetchall()
+    return {'schema_version': 1,
+            'accounts': [{'account_id': r[0], 'username': r[1], 'nickname': r[2], 'status': r[3],
+                          'created_at': r[4], 'account_rev': r[5]} for r in rows]}
 
 
 # ---------- 账号 ----------
@@ -345,7 +410,7 @@ def set_password(c, account_id, password, now):
 
 
 def set_status(c, account_id, status, now):
-    """账号状态只由 Mac 指令改（AD-24，故事 14 接入）；停用使全部会话失效。"""
+    """账号状态只由 Mac 指令改（AD-24；指令路径见 apply_account_command）；停用使全部会话失效。"""
     if status not in ('active', 'disabled'):
         raise ValueError('未知状态')
     with _tx(c):

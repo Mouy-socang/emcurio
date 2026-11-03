@@ -18,3 +18,8 @@ em_kb_path: ~/Desktop/EM 西洋瓷器
 # 每次请求最多给 20 件货打分；默认 100 次/天约每月 €3–5（最坏约 €25，按 1 美元≈0.9 欧元估算），明细见 README（AD-20：每月合计 €200 上限）；0 = 不启用。
 ai_budget:
   requests_per_day: 100
+# 后台 06 客人（故事 14，AD-12）：GoodCustomer 资料库与它自带的 gcdb.py。Curiobject 只读档案（customer.json），
+# 新建档案只经 `gcdb.py --db <资料库> new-customer --name …`，从不直接写资料库里的任何文件。
+goodcustomer:
+  db: ~/Desktop/goodcustomerDB
+  gcdb: ~/Desktop/goodcustomer-plugin/skills/gc-schema/scripts/gcdb.py
