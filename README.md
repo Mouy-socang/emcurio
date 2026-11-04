@@ -247,6 +247,13 @@ uv run python scripts/rejudge.py   # 打印 checked / changed / moved / transiti
 - 候选：除分数缺失 / 过期 / 来源为 rule 的新货外，已有 AI 分但现主图还没看过的新货也进候选，同一张主图只送检一次（`ai_attempts.image` 记送检时主图）。
 - 标题白瓷同步收紧：标题写 weiß / weiss / white 且只带金饰（`Goldrand`、`vergoldet`）也算白瓷（`硬过滤：纯白瓷（标题写 weiß）`）；带彩绘 / 蓝白（如 `mit blauem Dekor`、`Rote Rose`）不算。已在库的货需重判才按新规则移出。
 
+**看图识别功能、器型、图案（故事 21）：** 同一次打分请求里（不新增请求类型，共用 `ai_budget.requests_per_day` 与每轮上限），对附主图的货让模型再从 EM 西洋瓷器知识库词表（功能、器型、图案，只读）各选一个编号：`function`（FN-）、`form`（MS-）、`pattern`（MP-），选不出为 `null`。
+- 词表直接读知识库 CSV 的编号与中文名列（功能词表、Meissen 器型索引、Meissen 图案主题数据；只读，按编号去重），以"编号 中文名"列入 system 提示（`ai.feature_vocab` / `ai.system_prompt`，路径取 `em_kb_path`）；有词表时 system 为带 `cache_control: ephemeral` 的文本块。知识库缺失时提示里不列、不要求三项、也不显示。
+- 编号先去空白、转大写；不在词表里的编号或自由文字记为未知（记警告）；某类词表为空时该字段可缺省。回复缺三个字段时不写三项，分数与硬筛观察照写。回复里出现过的附图货记入 `feature_attempts`（漏回的货不记）；带图被拒（HTTP 400）时整批记一次。为三项送检过的主图 7 天后可再送。
+- 结果存表 `visual_features(item_id, image, function_code, form_code, pattern_code, model, checked_at)`，绑定送检时的主图，主图变了即作废、之后重看；表 `feature_attempts(item_id, image, attempted_at)` 与 `ai_attempts.image` 分开，故已看过硬筛的货也能补做。
+- 候选：需要打分 / 硬筛的新货照旧排最前；其后是只补三项的货（主图可看、现主图还没有三项、7 天内没为三项送检过），**留下（商品池）**优先，再新货。只补三项的货在请求里标 `"features_only": true`，不打分，只回三项观察与功能 / 器型 / 图案；不写分数、不写 `ai_attempts`（留下的货），现主图已有硬筛观察时不覆盖、不重新落位（AD-26）；带图被拒后的无图重发里去掉这些货。结果 JSON 的 `ai_featured` 为本轮写入三项的件数（各种结果都带）。
+- 显示：卡片字段 `vision_line`，一行"看图：咖啡杯碟 · 新剪裁器型 · 蓝洋葱"（中文名，查不到中文名时显示编号，未知的段省略，三段都未知为"看图：未识别"，没看过或知识库读不了为空）。01 卡片直接显示（不随分数遮挡），02 卡片在分数行下，详情页在标准名称下（注明"AI 看图识别，仅供参考"）。不改标准名称与墨墨改过的名称。
+
 **拣选快照与排序：** `triage` 写每条事件时 `triage_events.score` 取该货当时的 `scores.score`（无分为空），`rule_version` 照旧。新货队列 `triage.queue()`：捞回的最前，其后按分数高到低、无分的排在有分之后，再按 `first_seen` 新到旧；每件附 `score`、`score_source`、`score_reason`。
 
 ```sh

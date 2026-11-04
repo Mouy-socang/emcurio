@@ -223,6 +223,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS visual_checks(item_id TEXT PRIMARY KEY, image TEXT NOT NULL,
                 single_cup INTEGER NOT NULL, plain_white INTEGER NOT NULL, not_porcelain INTEGER NOT NULL,
                 model TEXT, checked_at TEXT NOT NULL);
+            -- 故事 21 看图三项：AI 对送检主图选的功能（FN-）、器型（MS-）、图案（MP-）编号（选不出为 NULL）；
+            -- image 为送检时的 items.image，与现主图不同即作废。feature_attempts：这张主图已为三项送检过（含缺字段、带图被拒），只一次。
+            CREATE TABLE IF NOT EXISTS visual_features(item_id TEXT PRIMARY KEY, image TEXT NOT NULL,
+                function_code TEXT, form_code TEXT, pattern_code TEXT, model TEXT, checked_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS feature_attempts(item_id TEXT PRIMARY KEY, image TEXT, attempted_at TEXT NOT NULL);
             -- CAP-6 后台拣选：动作请求幂等（同一 request_id 重放返回同一结果）、墨墨点评、图片替代文字。
             CREATE TABLE IF NOT EXISTS triage_requests(request_id TEXT PRIMARY KEY, payload TEXT NOT NULL, result TEXT NOT NULL, at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS comments(item_id TEXT PRIMARY KEY, text TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -799,6 +804,41 @@ def item_images(c,iid,item_image='',root=ROOT):
 def _std(c,iid):
     return c.execute('SELECT * FROM std_names WHERE item_id=?',(iid,)).fetchone()
 
+_KB_PATH_CACHE={}
+
+def _kb_path(root=ROOT):
+    """EM 知识库路径：复用 config.load 的解析取 em_kb_path（按 settings.yaml 修改时间缓存）；读不到时为 None。"""
+    from .config import load
+    f=Path(root)/'config/settings.yaml'
+    try:mtime=f.stat().st_mtime_ns
+    except OSError:mtime=None
+    key=(str(f),mtime)
+    if key not in _KB_PATH_CACHE:
+        try:path=load(root)['em_kb_path']
+        except Exception:path=None
+        _KB_PATH_CACHE.clear();_KB_PATH_CACHE[key]=path
+    return _KB_PATH_CACHE[key]
+
+def vision_line(c,iid,image,root=ROOT):
+    """故事 21：一行"看图：功能 · 器型 · 图案"（知识库中文名，查不到中文名时显示编号；未知的段省略；三段都未知为"看图：未识别"）。
+    现主图没看过、知识库缺失或读取出错、表尚未建立时为 None。"""
+    try:
+        row=c.execute('SELECT function_code,form_code,pattern_code FROM visual_features WHERE item_id=? AND image=?',
+                      (iid,image)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:return None
+    from .ai import feature_vocab
+    try:
+        path=_kb_path(root)
+        names=feature_vocab(path) if path else None
+    except Exception:
+        log.warning('看图识别：知识库读取出错，不显示')
+        names=None
+    if not names:return None
+    parts=[names[k].get(code) or code for k,code in zip(('function','form','pattern'),row) if code]
+    return '看图：'+(' · '.join(parts) if parts else '未识别')
+
 def card(c,item,root=ROOT):
     """刷货卡与列表行共用的展示字段：标准名称（无则卖家标题并标 lang）、价格、平台、分数与理由、首图、货号、标签。"""
     item=dict(item);iid=item['item_id']
@@ -817,7 +857,8 @@ def card(c,item,root=ROOT):
                 price=price_label(item.get('listed_price'),item.get('currency')),
                 platform=PLATFORM_LABELS.get(item.get('platform'),item.get('platform') or ''),
                 score=score['score'] if score else None,score_reason=score['reason'] if score else None,
-                image=images[0]['src'] if images else None,code=triage.code(c,iid),tags=tags,status=item.get('status'))
+                image=images[0]['src'] if images else None,code=triage.code(c,iid),tags=tags,status=item.get('status'),
+                vision_line=vision_line(c,iid,item.get('image'),root))
 
 def auction_tag(c,item,now=None):
     """02 / 03 卡片的拍卖标签（故事 20）：纯拍卖（未转为普通货）为"竞拍 · 11月5日 21:05 结束"（柏林时间），

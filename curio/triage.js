@@ -99,6 +99,8 @@ function cardEl(c) {
     if (!scoreOpen(c.item_id)) sc.classList.add('veil');
     meta.append(sc);
   }
+  // 故事 21：看图识别的功能 · 器型 · 图案（不随分数遮挡，直接显示）。
+  if (c.vision_line) { const vl = document.createElement('p'); vl.className = 'vis'; vl.textContent = c.vision_line; meta.append(vl); }
   const acts = document.createElement('div'); acts.className = 'facts';
   const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn'; rm.dataset.act = 'remove'; rm.textContent = '去掉';
   const kp = document.createElement('button'); kp.type = 'button'; kp.className = 'btn primary'; kp.dataset.act = 'keep'; kp.textContent = '留下';
@@ -851,6 +853,9 @@ async function openDetail(id, mode, opener) {
   const tags = $('dTags'); tags.textContent = '';
   const pr = document.createElement('span'); pr.className = 'mono'; pr.textContent = d.price; tags.append(pr);
   (d.tags || []).forEach(x => tags.append(tagEl(x)));
+  // 故事 21：看图识别一行（在标准名称附近；没看过不显示）。
+  const vis = $('dVision'); vis.textContent = d.vision_line || ''; vis.hidden = !d.vision_line;
+  vis.title = 'AI 看图识别，仅供参考'; vis.setAttribute('aria-label', d.vision_line ? d.vision_line + '（AI 看图识别，仅供参考）' : '');
   // 图库
   const th = $('thumbs'); th.textContent = '';
   d.images.forEach((im, n) => {

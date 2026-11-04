@@ -207,6 +207,8 @@
     }
     body.append(code, t, p, st);
     const sc = scoreEl(c, true); if (sc) body.append(sc);
+    // 故事 21：看图识别的功能 · 器型 · 图案。
+    if (c.vision_line) body.append(el('p', 'vis', c.vision_line));
     body.append(acts);
     if (conv) body.append(conv);
     if (confirmBox) body.append(confirmBox);
