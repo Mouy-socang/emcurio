@@ -1395,8 +1395,9 @@ def _euro(v):
     return '€%d' % round(v) if v >= 10 else '€%.2f' % v
 
 
-def composite_reason(parts, why, names, demand_ok=True):
-    """一句中文理由，如 "口味 82（梅森·洋葱·盘：你留下 6/20）· 性价比 40（同类中位 €80）· 客群 75"。"""
+def composite_reason(parts, why, names, demand_ok=True, weights=None):
+    """一句中文理由，如 "口味 82（梅森·洋葱·盘：你留下 6/20）· 性价比 40（同类中位 €80）· 客群 75"。
+    weights 里权重为 0 的性价比不写进理由（2026-11-04 起性价比暂停用）。"""
     t = why.get('taste')
     if t:
         momo = '%s：你留下 %d/%d' % (_group_label(t['key'], names), t['kept'], t['total'])
@@ -1407,8 +1408,10 @@ def composite_reason(parts, why, names, demand_ok=True):
     if why.get('ai') is not None:
         momo += '；AI 分 %d' % round(why['ai'])
     value = '同类中位 ' + _euro(why['median']) if why.get('median') else why.get('value_missing') or '无同类'
-    text = '口味 %d（%s）· 性价比 %d（%s）· 客群 %d' % (round(parts['momo']), momo, round(parts['value']), value,
-                                                round(parts['trend']))
+    text = '口味 %d（%s）' % (round(parts['momo']), momo)
+    if not weights or weights.get('value'):
+        text += '· 性价比 %d（%s）' % (round(parts['value']), value)
+    text += '· 客群 %d' % round(parts['trend'])
     if not demand_ok:
         text += '（客群数据缺）'
     return text
@@ -1442,7 +1445,7 @@ def composite_scores(items, demand, names, params):
         why = dict(taste=why_t[iid], brand=it.get('brand'), median=why_v[iid][0], value_missing=why_v[iid][1],
                    ai=it.get('ai_score') if iid in ai else None)
         out[iid] = dict(parts, score=composite_total(parts, params),
-                        reason=composite_reason(parts, why, names, demand is not None))
+                        reason=composite_reason(parts, why, names, demand is not None, params['weights']))
     return out
 
 

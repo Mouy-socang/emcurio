@@ -17,7 +17,8 @@ from curio.config import ROOT, scoring_override, scoring_rules
 from curio.schedule import BERLIN
 from curio.store import Store, card
 
-PARAMS = scoring_rules(ROOT)
+# 公式测试固定用方案 C 的权重（55/25/20），不随线上配置（2026-11-04 起 70/0/30）变。
+PARAMS = scoring_override(scoring_rules(ROOT), {'momo': 55, 'value': 25, 'trend': 20})
 NAMES = dict(brand={'Meissen': '梅森'}, pattern={'MP-ON': '洋葱'}, function={'F-PL': '盘'})
 TODAY = date(2026, 11, 4)
 
@@ -335,8 +336,8 @@ def test_compare_header_shares_and_caveat(db, tmp_path):
     buf = []
     mod.main(['--set', 'value=35', '--db', str(db.path), '--gc', str(tmp_path / 'nope')], out=buf.append)
     text = '\n'.join(buf)
-    assert '当前：口味 55.0% · 性价比 25.0% · 客群 20.0% · 客人 0.0%' in text
-    assert '对比：口味 50.0% · 性价比 31.8% · 客群 18.2% · 客人 0.0%' in text
+    assert '当前：口味 70.0% · 性价比 0.0% · 客群 30.0% · 客人 0.0%' in text
+    assert '对比：口味 51.9% · 性价比 25.9% · 客群 22.2% · 客人 0.0%' in text
     assert '只拿"当前参数"与"对比参数"两栏互相比较' in text
 
 
@@ -453,3 +454,13 @@ def test_compare_script_readonly(db, tmp_path):
     with pytest.raises(SystemExit) as e:
         mod.main(['--set', 'bogus=1', '--db', str(path)])
     assert e.value.code == 2
+
+
+def test_reason_omits_zero_weight_value():
+    # 2026-11-04 起性价比权重为 0：理由里不再写性价比。
+    parts = dict(momo=82, value=40, trend=75, customer=0)
+    why = dict(taste=None, brand=None, median=80, value_missing=None, ai=None)
+    with_v = judge.composite_reason(parts, why, {}, True, dict(momo=55, value=25, trend=20, customer=0))
+    without = judge.composite_reason(parts, why, {}, True, dict(momo=70, value=0, trend=30, customer=0))
+    assert '性价比 40' in with_v and '性价比' not in without
+    assert without.startswith('口味 82') and without.endswith('客群 75')
