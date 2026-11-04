@@ -50,7 +50,7 @@ def signed_up(client, db, **over):
 
 
 def home_ok(r):
-    return r.status_code == 200 and '今日榜' in r.text and '/register' not in r.text
+    return r.status_code == 200 and 'MyR12' in r.text and '/register' not in r.text
 
 
 # ---------- 名单 ----------
@@ -93,7 +93,7 @@ def test_disable_revokes_sessions_and_reset_links_and_shows_disabled_page(client
     other = make_client_like(client)
     assert login(other).status_code == 303
     r = other.get('/')
-    assert r.status_code == 403 and '<h1>账号已停用</h1>' in r.text and '今日榜' not in r.text
+    assert r.status_code == 403 and '<h1>账号已停用</h1>' in r.text and 'MyR12' not in r.text
     assert client.get('/admin/accounts', headers=AUTH).json()['accounts'][0]['status'] == 'disabled'
 
 

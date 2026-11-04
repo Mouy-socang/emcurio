@@ -173,8 +173,8 @@ def add(db, cfg, n, title=None, description='Sehr guter Zustand.'):
         return iid, triage.code(c, iid)
 
 
-def ten(db, cfg):
-    out = [add(db, cfg, n) for n in range(1, 11)]
+def full_rank(db, cfg):
+    out = [add(db, cfg, n) for n in range(1, publish.RANK_SIZE + 1)]
     with db.connect() as c:
         publish.set_rank(c, [code for _, code in out])
     return out
@@ -186,7 +186,7 @@ def payload_of(db, code):
 
 
 def test_manual_tier_wins_and_restore_auto(db, cfg):
-    (iid, code), *_ = ten(db, cfg)
+    (iid, code), *_ = full_rank(db, cfg)
     it, _ = payload_of(db, code)
     assert (it['fee_tier'], it['fee_amount']) == ('B', 42)
     r = db.save_fee(iid, 'C', 'fee-1')
@@ -240,14 +240,14 @@ def test_save_fee_rejects_bad_input(db, cfg):
 
 
 def test_reason_never_in_snapshot(db, cfg):
-    ten(db, cfg)
+    full_rank(db, cfg)
     snap, _ = publish.candidate(db, ROOT)
     text = json.dumps(snap, ensure_ascii=False)
     assert '→' not in text and 'reason' not in text and '高 28 cm' not in text
 
 
 def test_fee_change_marks_unpublished_changes(db, cfg):
-    (iid, code), *_ = ten(db, cfg)
+    (iid, code), *_ = full_rank(db, cfg)
     with db.connect() as c:
         before = publish.status_fingerprint(c)
     db.save_fee(iid, 'D', 'f1')
@@ -259,7 +259,7 @@ def test_fee_change_marks_unpublished_changes(db, cfg):
 
 
 def test_fee_amount_change_in_yaml_marks_unpublished(db, cfg, tmp_path):
-    ten(db, cfg)
+    full_rank(db, cfg)
     shutil.copytree(ROOT / 'config', tmp_path / 'cfgroot' / 'config')
     fees = fee_tiers(tmp_path / 'cfgroot')
     with db.connect() as c:
@@ -277,7 +277,7 @@ def test_fee_amount_change_in_yaml_marks_unpublished(db, cfg, tmp_path):
 
 
 def test_root_config_is_used_by_publish(db, cfg, tmp_path):
-    (iid, code), *_ = ten(db, cfg)
+    (iid, code), *_ = full_rank(db, cfg)
     root = tmp_path / 'cfgroot'
     shutil.copytree(ROOT / 'config', root / 'config')
     path = root / 'config' / 'fee_tiers.yaml'
@@ -302,7 +302,7 @@ def test_root_config_is_used_by_publish(db, cfg, tmp_path):
 def test_mac_and_server_agree_on_fee_and_fx_rules(db, cfg, mutate):
     """同一份坏快照：Mac（Schema 校验 + publish.check_fees）与服务器（jsonschema + snapshot.check_snapshot）都拒收。"""
     import subprocess, sys
-    ten(db, cfg)
+    full_rank(db, cfg)
     snap, _ = publish.candidate(db, ROOT)
     publish.check_fees(snap)
     assert not sync.validate(snap, json.loads((ROOT / 'contract/schemas/snapshot.v1.schema.json').read_text()))
@@ -329,7 +329,7 @@ def test_mac_and_server_agree_on_fee_and_fx_rules(db, cfg, mutate):
 
 
 def test_published_snapshot_carries_fee_and_fx(db, cfg):
-    (iid, code), *_ = ten(db, cfg)
+    (iid, code), *_ = full_rank(db, cfg)
     db.save_fee(iid, 'A', 'f1')
     fx.refresh(db, clock=lambda: 1_800_000_000, get=fake_ecb('2026-11-02', '7.8'))
     result = publish.publish(db, ROOT)
@@ -351,7 +351,7 @@ def test_published_snapshot_carries_fee_and_fx(db, cfg):
 
 
 def test_snapshot_without_any_rate_has_no_fx_fields(db, cfg):
-    ten(db, cfg)
+    full_rank(db, cfg)
     snap, _ = publish.candidate(db, ROOT)
     assert 'fx_rate' not in snap and 'fx_date' not in snap
 

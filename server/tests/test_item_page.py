@@ -47,7 +47,7 @@ def day(offset):
     return (TODAY - timedelta(days=offset)).isoformat()
 
 
-def items_with(client, n=12, fee=None, comment=None, imgs=2):
+def items_with(client, n=14, fee=None, comment=None, imgs=2):
     out = []
     for k in range(1, n + 1):
         it = make_item(k, [(put_image(client, f'b{k}-{j}'), put_image(client, f't{k}-{j}')) for j in range(imgs)])
@@ -148,7 +148,7 @@ def test_ask_tier_shows_please_ask(client):
     (lambda it: (it.update(fee_tier='ask'), it.pop('fee_amount')), '请咨询'),           # 请咨询还带档位名称
 ])
 def test_bad_fee_fields_rejected(client, mutate, detail):
-    items = items_with(client, n=10, imgs=1)
+    items = items_with(client, n=12, imgs=1)
     mutate(items[0])
     r = send(client, 'snapshot', build(1, items))
     assert r.status_code == 400 and detail in r.json()['detail']
@@ -159,7 +159,7 @@ def test_bad_fee_fields_rejected(client, mutate, detail):
     ({'fx_rate': -1, 'fx_date': '2026-11-02'}, '不符合要求'), ({'fx_rate': 60, 'fx_date': '2026-11-02'}, '不符合要求'), ({'fx_rate': 7.8, 'fx_date': '2026-13-40'}, '日期无效'),
 ])
 def test_bad_fx_rejected(client, extra, detail):
-    payload = build(1, items_with(client, n=10, imgs=1))
+    payload = build(1, items_with(client, n=12, imgs=1))
     payload.update(extra)
     r = send(client, 'snapshot', payload)
     assert r.status_code == 400 and detail in r.json()['detail']
@@ -167,7 +167,7 @@ def test_bad_fx_rejected(client, extra, detail):
 
 def test_snapshot_without_fee_or_fx_still_renders(client):
     """故事 10 的旧快照（没有档位、没有汇率）：不出现预估费用小节（不显示"请咨询"），点评顺延为 02；只显示欧元。"""
-    items = items_with(client, n=10, imgs=1, comment='好')
+    items = items_with(client, n=12, imgs=1, comment='好')
     for it in items:
         it.pop('fee_tier'), it.pop('fee_amount'), it.pop('fee_label')
     assert send(client, 'snapshot', build(1, items)).status_code == 200

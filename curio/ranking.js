@@ -4,8 +4,8 @@
    发布不在这里：只从预览横条（/preview/，preview-bar.js）发起。 */
 (function () {
   'use strict';
-  const SIZE = 10;
-  const REASON_FULL = '榜已满 10 件，请先移出一件';
+  const SIZE = 12;
+  const REASON_FULL = '榜已满 ' + SIZE + ' 件，请先移出一件';
   const LONG_PRESS = 350;
 
   let view = 'new';
@@ -377,7 +377,7 @@
     else offMsg.hidden = true;
     // 预览
     let reason = null;
-    if (order.length < SIZE) reason = '榜需满 10 件才能发布';
+    if (order.length < SIZE) reason = '榜需满 ' + SIZE + ' 件才能发布';
     else if (unsaved || saving) reason = '排序尚未保存';
     else if (off.length) reason = '榜里有已下架或不能发布的货，请先补位';
     disable($('btnPreview'), reason, $('whyPreview'));

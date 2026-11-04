@@ -39,7 +39,7 @@ def client(db, clock):
 @pytest.fixture
 def published(client, db, clock):
     items = [make_item(n, [(put_image(client, f'b{n}'), put_image(client, f't{n}'))]) for n in range(1, 31)]
-    payload = build(7, items, rank=[it['code'] for it in items][5:15])
+    payload = build(7, items, rank=[it['code'] for it in items][5:17])
     assert send(client, 'snapshot', payload).status_code == 200
     fresh_heartbeat(client, clock)
     sign_in(client)
@@ -113,7 +113,7 @@ def test_cli_reads_stdin_and_writes_json(published):
                        input=json.dumps({'payload': payload, 'path': '/', 'received_at': received}).encode())
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out['status'] == 200 and '今日榜' in out['body']
+    assert out['status'] == 200 and 'MyR12' in out['body']
 
 
 def test_preview_with_fee_and_fx_matches_live_page_except_local_switch(client, db, monkeypatch, clock):

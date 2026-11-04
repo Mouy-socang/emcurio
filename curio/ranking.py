@@ -22,7 +22,7 @@ from .store import card, now
 SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 RENDER_TIMEOUT = 60
 REASON_KA = 'Kleinanzeigen 的货不能上榜'
-REASON_FULL = '榜已满 10 件，请先移出一件'
+REASON_FULL = f'榜已满 {publish.RANK_SIZE} 件，请先移出一件'
 
 
 class PreviewError(RuntimeError):

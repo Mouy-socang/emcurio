@@ -84,7 +84,7 @@ def test_two_tastes_different_pool_order_same_rank_same_set(scene):
     pb, rb = all_pool(scene['b'])
     pc, rc = all_pool(scene['c'])
     assert pa == scene['order_a'] and pb == scene['order_b'] and pc == scene['pool']    # 未关联：墨墨顺序
-    assert ra == rb == rc == scene['pool'][:10]                                            # 今日榜人人相同
+    assert ra == rb == rc == scene['pool'][:12]                                            # 榜人人相同
     assert sorted(pa) == sorted(pb) == sorted(pc) and len(pa) == 30
 
 
@@ -142,7 +142,7 @@ def test_new_snapshot_without_account_drops_its_order(scene, app):
 ])
 def test_bad_orders_reject_whole_snapshot(app, db, mutate, detail):
     client = browser(app)
-    good = build(1, [make_item(n, []) for n in range(1, 12)])
+    good = build(1, [make_item(n, []) for n in range(1, 14)])
     aid = uuid.uuid4().hex
     payload = dict(good, orders={aid: list(good['pool'])})
     mutate(payload, aid)
@@ -167,7 +167,7 @@ def test_view_for_account_unit():
 
 def test_check_snapshot_semantic_checks_without_schema():
     """语义检查独立于 Schema 也拒收（两道关）。"""
-    payload = build(1, [make_item(n, []) for n in range(1, 12)])
+    payload = build(1, [make_item(n, []) for n in range(1, 14)])
     for bad in ({'A' * 32: payload['pool'][:1]}, {'a' * 32: ['CO-0001', 'CO-0001']}, {'a' * 32: ['CO-9999']}):
         with pytest.raises(snapshot.BadSnapshot):
             snapshot.check_snapshot(dict(payload, orders=bad))

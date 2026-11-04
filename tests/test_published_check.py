@@ -500,7 +500,7 @@ STALE = '部分货品状态可能未更新，下单前请先问墨墨。'
 
 def test_demo_gone_disappears_and_stale_heartbeat_shows_notice(db, cfg, root, live):
     ids = []
-    for n in range(1, 13):
+    for n in range(1, publish.RANK_SIZE + 3):
         db.ingest(dict(item_id=f'it{n:03d}', platform='ebay', title=f'Meissen Tasse Nr {n}', price=100 + n,
                        currency='EUR', buying='FIXED_PRICE', url=f'https://www.ebay.de/itm/{n}',
                        image=f'https://i.ebayimg.com/images/g/{n}.png'), cfg)
@@ -508,7 +508,7 @@ def test_demo_gone_disappears_and_stale_heartbeat_shows_notice(db, cfg, root, li
             triage.keep(c, f'it{n:03d}')
             ids.append((f'it{n:03d}', triage.code(c, f'it{n:03d}')))
     with db.connect() as c:
-        publish.set_rank(c, [code for _, code in ids[:10]])
+        publish.set_rank(c, [code for _, code in ids[:publish.RANK_SIZE]])
     publish.publish(db, root, fetch=lambda url: png(800, 600))
     with db.connect() as c:
         sync.enqueue_invite(c, 'MOMO2026')
@@ -518,7 +518,7 @@ def test_demo_gone_disappears_and_stale_heartbeat_shows_notice(db, cfg, root, li
     assert s.post(live + '/register', allow_redirects=False,
                   data={'invite': 'MOMO2026', 'username': 'wangjie', 'password': 'meissen1710', 'nickname': '王姐',
                         'consent': 'yes', 'next': '/'}).status_code == 303
-    gone_iid, gone_code = ids[11]
+    gone_iid, gone_code = ids[publish.RANK_SIZE + 1]
     assert gone_code in s.get(live + '/').text
     # 发布过、还没收到心跳：提示。
     assert STALE in s.get(live + '/').text

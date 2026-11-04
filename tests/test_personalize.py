@@ -362,8 +362,8 @@ def test_repo_config_loads():
 pytest_sips = pytest.mark.skipif(shutil.which('sips') is None, reason='需要 macOS 自带 sips')
 
 
-def ranked_pool(store, cfg, n=12):
-    """12 件可发布的货（远程图只经假下载），榜取前 10。KPM 与 Meissen 交替。"""
+def ranked_pool(store, cfg, n=publish.RANK_SIZE + 2):
+    """RANK_SIZE + 2 件可发布的货（远程图只经假下载），榜取前 RANK_SIZE。KPM 与 Meissen 交替。"""
     codes = []
     for i in range(1, n + 1):
         brand = 'KPM Berlin' if i % 2 else 'Meissen'
@@ -371,7 +371,7 @@ def ranked_pool(store, cfg, n=12):
         codes.append(add(store, cfg, i, f'g{i}', brand, form,
                          image=f'https://i.ebayimg.com/images/g/{i}.png'))
     with store.connect() as c:
-        publish.set_rank(c, codes[:10])
+        publish.set_rank(c, codes[:publish.RANK_SIZE])
     return codes
 
 
@@ -393,7 +393,7 @@ def test_publish_writes_orders_and_count(store, gc, root, cfg):
     snap = snapshot_payloads(store)[-1]
     assert set(snap['orders']) == {a, b}
     assert all(set(o) <= set(snap['pool']) and len(set(o)) == len(o) for o in snap['orders'].values())
-    assert snap['rank'] == codes[:10]
+    assert snap['rank'] == codes[:publish.RANK_SIZE]
     sync.check_envelope({'schema_version': 1, 'event_id': str(uuid.uuid4()), 'kind': 'snapshot',
                          'created_at': '2026-11-03T08:00:00.000Z', 'payload': snap})
     # 快照里不出现客户编号与画像
@@ -449,7 +449,7 @@ def test_check_orders_rejects_bad(bad):
                                  {'a' * 32: 'CO-0001'}, [POOL2]])
 def test_contract_rejects_bad_orders(bad):
     schema = sync.load_schema('snapshot', 1)
-    good = {'schema_version': 1, 'publish_no': 1, 'hide_watermark': 1, 'rank': ['CO-0001'] * 10, 'pool': POOL2,
+    good = {'schema_version': 1, 'publish_no': 1, 'hide_watermark': 1, 'rank': ['CO-0001'] * publish.RANK_SIZE, 'pool': POOL2,
             'items': [], 'tombstones': []}
     assert not [e for e in sync.validate(dict(good, orders={'a' * 32: POOL2}), schema) if 'orders' in e]
     assert [e for e in sync.validate(dict(good, orders=bad), schema) if 'orders' in e]
@@ -510,7 +510,7 @@ def test_demo_two_tastes_on_local_server(store, gc, root, cfg, live):
     assert publish.publish(store, root, fetch=Fetch(), gc=gc)['orders'] == 2
     assert sync.flush(store, root)['sync_status'] == 'ok'
     (pa, ra), (pb, rb), (pc, rc) = pool_of(sa, live), pool_of(sb, live), pool_of(sc, live)
-    assert pa != pb and ra == rb == rc == codes[:10]
+    assert pa != pb and ra == rb == rc == codes[:publish.RANK_SIZE]
     assert len(pa) == len(pb) == len(pc) == 26 and sorted(pa) == sorted(pb) == sorted(pc)
     assert pc == moomoo(store)                                     # 未关联：墨墨顺序
     assert set(brands_of(store, pa[:13])) == {'Meissen'} and set(brands_of(store, pb[:13])) == {'KPM Berlin'}

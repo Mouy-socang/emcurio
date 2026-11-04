@@ -320,7 +320,7 @@ def home_page(env, view, params, cur=None, stale=False, track=False):
     labels = summary_labels(options, chosen)
     more = filter_query(chosen)
     more = (more + '&' if more else '') + f'n={len(first) + PAGE_SIZE}'
-    return render_page(env, 'home.html', '今日榜', view=view, rank=view.rank, pool_total=len(view.pool),
+    return render_page(env, 'home.html', 'MyR12', view=view, rank=view.rank, pool_total=len(view.pool),
                        options=options, chosen=chosen, cards=first, shown_total=len(shown), labels=labels,
                        next_offset=len(first) if len(first) < min(len(shown), MAX_SHOWN) else None,
                        query=filter_query(chosen),

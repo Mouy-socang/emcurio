@@ -771,13 +771,13 @@ def test_end_to_end_with_local_server(tmp_path, store, gc):
         # 重置：待同步 → 确认后旧会话失效、临时密码可登录、服务器只存哈希
         temp = guests.command(store, 'reset_password', ids['wangjie'], 'p1')['temp_password']
         assert by(guests.view(store, gc), 'linked', 'wangjie')['reset']['state'] == 'pending'
-        assert '今日榜' in wang.get(url + '/').text
+        assert 'MyR12' in wang.get(url + '/').text
         assert sync.flush(store, tmp_path)['sync_status'] == 'ok'
         assert by(guests.view(store, gc), 'linked', 'wangjie')['reset']['state'] == 'done'
         assert '登录已过期，请重新登录。' in wang.get(url + '/').text
         assert login('wangjie', 'meissen1710')[0].status_code == 401
         r, wang2 = login('wangjie', temp)
-        assert r.status_code == 303 and '今日榜' in wang2.get(url + '/').text
+        assert r.status_code == 303 and 'MyR12' in wang2.get(url + '/').text
 
         # 停用：待同步 → 确认后进已停用；现有登录失效、再登录只见停用页
         guests.command(store, 'disable_account', ids['lily_sg'], 'd1')
@@ -786,7 +786,7 @@ def test_end_to_end_with_local_server(tmp_path, store, gc):
         assert '登录已过期，请重新登录。' in lily.get(url + '/').text
         r, lily2 = login('lily_sg', 'meissen1710')
         page = lily2.get(url + '/')
-        assert page.status_code == 403 and '此账号已停用' in page.text and '今日榜' not in page.text
+        assert page.status_code == 403 and '此账号已停用' in page.text and 'MyR12' not in page.text
         assert sync.pull_accounts(store, tmp_path)['accounts_status'] == 'ok'
         assert names(guests.view(store, gc), 'disabled') == ['lily_sg']
 

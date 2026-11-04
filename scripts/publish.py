@@ -1,7 +1,7 @@
 """设置今日榜与发布快照（故事 10 的临时入口；故事 11 用后台排榜与预览界面替代，命令保留）。
 
   uv run python scripts/publish.py rank                       显示当前的榜
-  uv run python scripts/publish.py rank CO-0001 … CO-0010     按名次设置榜（至多 10 件，须都在商品池里；不足 10 件不能发布）
+  uv run python scripts/publish.py rank CO-0001 … CO-0012     按名次设置榜（至多 12 件，须都在商品池里；不足 12 件不能发布）
   uv run python scripts/publish.py publish                    生成完整快照（转码图片）并入发件箱；下一轮采集或 flush 时
                                                               先传图、经服务器确认，再提交快照
   uv run python scripts/publish.py publish --flush            入队后立刻 flush 一次

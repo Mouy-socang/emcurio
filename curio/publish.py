@@ -1,7 +1,7 @@
 """发布快照与即时隐藏（AD-5、AD-6、AD-13、AD-22；CAP-7、CAP-9）。
 
 - 入选：拣选状态 kept、items.status='active'、非 Kleinanzeigen、欧元标价的货；商品池按墨墨留下时间新到旧。
-- 榜：`publish_rank` 表里墨墨指定的恰好 10 件，且都须在入选集合内；不足 10 件拒绝生成（FR-16）。
+- 榜：`publish_rank` 表里墨墨指定的恰好 RANK_SIZE（12）件，且都须在入选集合内；不足拒绝生成（FR-16）。
 - 白名单（AD-6）：快照只含 contract/schemas/snapshot.v1 里的字段；卖家原文先清洗（去平台名、商品号、卖家/店铺、链接）。
 - 图片（AD-13）：用系统 `sips` 转成最长边 1600 与 600 的 JPEG，文件名 = 内容 sha256 前 16 位 + .jpg，
   放在 curio.db 同目录的 publish_images/；同步模块提交快照前先上传、经服务器确认（curio/sync）。
@@ -42,7 +42,7 @@ from .config import ROOT
 
 log = logging.getLogger(__name__)
 
-RANK_SIZE = 10
+RANK_SIZE = 12
 TOMBSTONE_DAYS = 90
 LOCK_SECONDS = 1800
 SIZES = ((1600, 'full'), (600, 'thumb'))
@@ -145,7 +145,7 @@ def rank(c):
 
 
 def set_rank(c, codes, keep_stale=False):
-    """设置榜（按名次，至多 10 件，须都在商品池内）。不提交。
+    """设置榜（按名次，至多 RANK_SIZE 件，须都在商品池内）。不提交。
     keep_stale：已在榜上、之后下架或不再合格的货允许原样留在榜里（后台排序时不因它卡住；发布时仍会拒绝）。"""
     codes = [str(x).strip().upper() for x in codes]
     stale = set(rank(c)) if keep_stale else set()
@@ -560,7 +560,7 @@ def _tombstones(c, pool_codes, now):
 
 
 def check_rank(c):
-    """榜须恰好 10 件且都能发布；否则抛 PublishError。返回榜（货号按名次）。"""
+    """榜须恰好 RANK_SIZE 件且都能发布；否则抛 PublishError。返回榜（货号按名次）。"""
     ranked = rank(c)
     if len(ranked) < RANK_SIZE:
         raise PublishError(f'榜需满 {RANK_SIZE} 件才能发布（现在 {len(ranked)} 件）')

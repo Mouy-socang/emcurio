@@ -24,6 +24,8 @@ from curio import publish, sync, triage
 from curio.config import load
 from curio.store import Store
 
+RANK = publish.RANK_SIZE
+
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_PY = ROOT / 'server' / '.venv' / 'bin' / 'python'
 TOKEN = 'test-admin-token-SENTINEL'
@@ -129,24 +131,24 @@ def do_publish(db, root, fetch):
 
 # ---------- 榜与入选 ----------
 
-def test_rank_needs_ten(db, cfg, root, fetch):
-    _, codes = pool(db, cfg, 9)
+def test_rank_needs_full_size(db, cfg, root, fetch):
+    _, codes = pool(db, cfg, RANK - 1)
     set_rank(db, codes)
     with pytest.raises(publish.PublishError) as e:
         do_publish(db, root, fetch)
-    assert '榜需满 10 件才能发布' in str(e.value)
+    assert f'榜需满 {RANK} 件才能发布' in str(e.value)
     assert outbox(db) == [] and fetch.urls == []
 
 
 def test_set_rank_rejects_ineligible(db, cfg):
-    _, codes = pool(db, cfg, 11)
+    _, codes = pool(db, cfg, RANK + 1)
     ka, ka_code = add(db, cfg, 50, platform='kleinanzeigen')
     with pytest.raises(publish.PublishError, match='Kleinanzeigen'):
-        set_rank(db, codes[:9] + [ka_code])
-    with pytest.raises(publish.PublishError, match='最多 10 件'):
+        set_rank(db, codes[:RANK - 1] + [ka_code])
+    with pytest.raises(publish.PublishError, match=f'最多 {RANK} 件'):
         set_rank(db, codes)
     with pytest.raises(publish.PublishError, match='重复'):
-        set_rank(db, codes[:9] + codes[:1])
+        set_rank(db, codes[:RANK - 1] + codes[:1])
     with pytest.raises(publish.PublishError, match='不存在'):
         set_rank(db, ['CO-9999'])
     iid = 'it%03d' % 3
@@ -167,13 +169,13 @@ def test_first_publish_snapshot_is_whitelisted(db, cfg, root, fetch):
     removed, removed_code = add(db, cfg, 62)
     with db.connect() as c:
         triage.remove(c, removed)
-    set_rank(db, codes[:10])
+    set_rank(db, codes[:RANK])
     result = do_publish(db, root, fetch)
-    assert result['rank'] == 10 and result['pool'] == 30 and result['image_failures'] == 0
+    assert result['rank'] == RANK and result['pool'] == 30 and result['image_failures'] == 0
     [row] = outbox(db, 'snapshot')
     snap = row['payload']
     assert snap['publish_no'] == result['publish_no'] == snap['hide_watermark']
-    assert snap['rank'] == codes[:10]
+    assert snap['rank'] == codes[:RANK]
     assert snap['pool'] == list(reversed(codes))            # 留下时间新到旧（同一秒按货号新到旧）
     assert ka_code not in snap['pool'] and removed_code not in snap['pool'] and snap['tombstones'] == []
     allowed = {'code', 'std_name', 'title', 'title_lang', 'brand', 'form_id', 'form', 'pattern_id', 'pattern',
@@ -202,7 +204,7 @@ def test_first_publish_snapshot_is_whitelisted(db, cfg, root, fetch):
 
 
 def test_local_downloaded_images_used_and_alt_text_kept(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 10)
+    iids, codes = pool(db, cfg, RANK)
     src = png(800, 1000)
     name = __import__('hashlib').sha256(src).hexdigest() + '.png'
     folder = root / 'data' / 'porcelain' / 'images'
@@ -242,7 +244,7 @@ def test_price_bands_left_closed(price, band):
 
 
 def test_kleinanzeigen_never_in_snapshot(db, cfg, root, fetch):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     _, ka_code = add(db, cfg, 70, platform='kleinanzeigen')
     set_rank(db, codes)
     do_publish(db, root, fetch)
@@ -253,27 +255,27 @@ def test_kleinanzeigen_never_in_snapshot(db, cfg, root, fetch):
 # ---------- 发布锁与序号 ----------
 
 def test_concurrent_publish_is_refused(db, cfg, root, fetch):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     publish._lock(db, 'other-owner', time.time)
     with pytest.raises(publish.PublishBusy) as e:
         do_publish(db, root, fetch)
     assert '另一个发布正在进行' in str(e.value) and outbox(db) == []
     publish._unlock(db, 'other-owner')
-    assert do_publish(db, root, fetch)['rank'] == 10
+    assert do_publish(db, root, fetch)['rank'] == RANK
     with db.connect() as c:
         assert c.execute("SELECT v FROM kv WHERE k='publish_lock'").fetchone() is None     # 发布后释放
 
 
 def test_expired_lock_does_not_block(db, cfg, root, fetch):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     publish._lock(db, 'crashed', lambda: time.time() - publish.LOCK_SECONDS - 5)
-    assert do_publish(db, root, fetch)['rank'] == 10
+    assert do_publish(db, root, fetch)['rank'] == RANK
 
 
 def test_publish_and_hide_share_one_counter(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 10)
+    iids, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     first = do_publish(db, root, fetch)['publish_no']
     db.mark_gone(iids[0])
@@ -283,7 +285,7 @@ def test_publish_and_hide_share_one_counter(db, cfg, root, fetch):
     assert [h['hide_seq'] for h in hides] == [first + 1, first + 2]
     assert [(h['code'], h['action'], h['reason']) for h in hides] == [(codes[0], 'hide', 'sold'),
                                                                     (codes[1], 'hide', 'removed')]
-    # 榜里两件已离开（下架、去掉）：补位前不能再发布；隐藏不受"满 10 件"限制。
+    # 榜里两件已离开（下架、去掉）：补位前不能再发布；隐藏不受"满 RANK 件"限制。
     with pytest.raises(publish.PublishError, match=f'榜里第 1 名 {codes[0]} 已不能发布.*请换一件'):
         do_publish(db, root, fetch)
     assert len(outbox(db, 'snapshot')) == 1
@@ -292,8 +294,8 @@ def test_publish_and_hide_share_one_counter(db, cfg, root, fetch):
 # ---------- 即时隐藏 ----------
 
 def test_hide_and_unhide_follow_state_changes(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 11)
-    set_rank(db, codes[:10])
+    iids, codes = pool(db, cfg, RANK + 1)
+    set_rank(db, codes[:RANK])
     do_publish(db, root, fetch)
     a, b, c_ = iids[0], iids[1], iids[2]
     db.mark_gone(a)
@@ -313,7 +315,7 @@ def test_hide_and_unhide_follow_state_changes(db, cfg, root, fetch):
 
 
 def test_unpublished_item_changes_do_not_enqueue(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 12)
+    iids, codes = pool(db, cfg, RANK + 2)
     with db.connect() as c:
         triage.remove(c, iids[0])
     db.mark_gone(iids[1])
@@ -326,7 +328,7 @@ def test_unpublished_item_changes_do_not_enqueue(db, cfg, root, fetch):
 
 
 def test_hide_is_in_same_transaction_as_state_change(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 10)
+    iids, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     do_publish(db, root, fetch)
     with pytest.raises(RuntimeError):
@@ -339,7 +341,7 @@ def test_hide_is_in_same_transaction_as_state_change(db, cfg, root, fetch):
 
 
 def test_tombstones_for_left_items(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 12)
+    iids, codes = pool(db, cfg, RANK + 2)
     set_rank(db, codes[2:])
     do_publish(db, root, fetch)
     db.mark_gone(iids[0])
@@ -376,14 +378,14 @@ def test_oversized_payload_refused(db):
 
 @pytest.mark.skipif(not SERVER_PY.exists(), reason='先在 server/ 下 uv sync')
 def test_snapshot_and_hide_contract_agree_with_server(db, cfg, root, fetch):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     do_publish(db, root, fetch)
     snap = outbox(db, 'snapshot')[0]['payload']
     hide = {'schema_version': 1, 'code': 'CO-0001', 'hide_seq': 5, 'action': 'hide', 'reason': 'sold',
             'at': '2026-11-03T08:00:00.000Z'}
     cases = [('snapshot', snap), ('hide', hide),
-             ('snapshot', dict(snap, rank=snap['rank'][:9])),
+             ('snapshot', dict(snap, rank=snap['rank'][:RANK - 1])),
              ('snapshot', dict(snap, items=[dict(snap['items'][0], url='https://x')] + snap['items'][1:])),
              ('snapshot', dict(snap, items=[dict(snap['items'][0], price_band='cheap')] + snap['items'][1:])),
              ('hide', dict(hide, action='delete')), ('hide', dict(hide, code='CO-1')),
@@ -409,12 +411,12 @@ def test_snapshot_and_hide_contract_agree_with_server(db, cfg, root, fetch):
 
 def test_publish_script_rank_and_publish(db, cfg, root, fetch):
     from scripts import publish as cli
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     lines = []
     args = ['--db', str(db.path), '--root', str(root)]
-    assert cli.main(args + ['rank'] + codes[:9], out=lines.append, fetch=fetch) == 0
+    assert cli.main(args + ['rank'] + codes[:RANK - 1], out=lines.append, fetch=fetch) == 0
     assert cli.main(args + ['publish'], out=lines.append, fetch=fetch) == 1
-    assert '榜需满 10 件才能发布' in lines[-1]
+    assert f'榜需满 {RANK} 件才能发布' in lines[-1]
     assert cli.main(args + ['rank'] + codes, out=lines.append, fetch=fetch) == 0
     assert cli.main(args + ['rank'], out=lines.append, fetch=fetch) == 0
     assert codes[0] in lines[-1]
@@ -476,13 +478,13 @@ def cards(html):
 
 def test_end_to_end_publish_hide_and_missing_image(db, cfg, root, fetch, live, only_localhost):
     iids, codes = pool(db, cfg, 30)
-    set_rank(db, codes[:10])
+    set_rank(db, codes[:RANK])
     s = guest(live, db, root)
     assert 'action="/register"' in requests.get(live + '/').text and requests.get(live + '/api/pool').status_code == 401
     do_publish(db, root, fetch)
     assert sync.flush(db, root)['sync_status'] == 'ok'
     home = s.get(live + '/').text
-    assert re.findall(r'<li class="rk"><a class="rk-a" href="/item/(CO-\d+)"', home) == codes[:10]
+    assert re.findall(r'<li class="rk"><a class="rk-a" href="/item/(CO-\d+)"', home) == codes[:RANK]
     assert cards(home) == list(reversed(codes))[:20]
     more = s.get(live + '/api/pool?offset=20').json()
     assert more['total'] == 30 and cards(more['html']) == list(reversed(codes))[20:]
@@ -602,7 +604,7 @@ def published_codes(db):
 
 
 def test_snapshot_promoted_only_on_server_ack(db, cfg, root, fetch, mock):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     no = do_publish(db, root, fetch)['publish_no']
     assert statuses(db) == {no: 'pending'}
@@ -611,19 +613,19 @@ def test_snapshot_promoted_only_on_server_ack(db, cfg, root, fetch, mock):
     assert sync.flush(db, root)['sync_status'] == 'ok'
     assert statuses(db) == {no: 'delivered'}
     with db.connect() as c:
-        assert c.execute('SELECT count(*) FROM publish_history').fetchone()[0] == 10
+        assert c.execute('SELECT count(*) FROM publish_history').fetchone()[0] == RANK
 
 
 def test_drop_snapshot_and_republish_keeps_hiding_live_items(db, cfg, root, fetch, mock):
     from scripts import outbox as outbox_cli
-    iids, codes = pool(db, cfg, 11)
-    set_rank(db, codes[:10])
+    iids, codes = pool(db, cfg, RANK + 1)
+    set_rank(db, codes[:RANK])
     first = do_publish(db, root, fetch)['publish_no']
     assert sync.flush(db, root)['sync_status'] == 'ok'
     with db.connect() as c:
         triage.remove(c, iids[0])                              # 已上线的货：推隐藏
     new_iid, new_code = add(db, cfg, 40)                       # 只在第二份快照里的货
-    set_rank(db, codes[1:11])
+    set_rank(db, codes[1:RANK + 1])
     second = do_publish(db, root, fetch)['publish_no']
     mock.snapshot_status = 400
     assert sync.flush(db, root)['sync_status'] == 'blocked'
@@ -644,7 +646,7 @@ def test_drop_snapshot_and_republish_keeps_hiding_live_items(db, cfg, root, fetc
 
 
 def test_hides_bypass_temporarily_failing_snapshot_in_order(db, cfg, root, fetch, mock):
-    iids, codes = pool(db, cfg, 10)
+    iids, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     do_publish(db, root, fetch)
     sync.flush(db, root)
@@ -670,7 +672,7 @@ def test_hides_bypass_temporarily_failing_snapshot_in_order(db, cfg, root, fetch
 
 @pytest.mark.parametrize('mode', ['put500', 'connection', 'bad_bytes'])
 def test_image_upload_failure_keeps_snapshot_pending(db, cfg, root, fetch, mock, mode):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     no = do_publish(db, root, fetch)['publish_no']
     if mode == 'put500':
@@ -722,7 +724,7 @@ def test_size_limit_measures_sent_bytes_with_cjk(db, mock, root):
 # ---------- 评审修正：撤销组、reconcile、锁 ----------
 
 def test_group_undo_reconciles_every_item(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 10)
+    iids, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     do_publish(db, root, fetch)
     with db.connect() as c:
@@ -746,7 +748,7 @@ def test_reconcile_table_check_and_real_errors(db, cfg, root, fetch):
 
 
 def test_hide_when_price_no_longer_eur_or_invalid(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 10)
+    iids, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     do_publish(db, root, fetch)
     with db.connect() as c:
@@ -760,15 +762,15 @@ def test_hide_when_price_no_longer_eur_or_invalid(db, cfg, root, fetch):
 
 
 def test_malformed_lock_value_is_tolerated(db, cfg, root, fetch):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     for bad in ('[1,2]', '{"owner":"x","until":"soon"}', 'not json', '{"until":null}'):
         db.set('publish_lock', bad)
-        assert do_publish(db, root, fetch)['rank'] == 10
+        assert do_publish(db, root, fetch)['rank'] == RANK
 
 
 def test_lock_refreshed_and_ownership_checked_before_enqueue(db, cfg, root):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     set_rank(db, codes)
     seen = []
 
@@ -863,7 +865,7 @@ def test_download_follows_allowed_redirect():
 # ---------- 评审修正：载荷有效性 ----------
 
 def test_items_without_images_are_named(db, cfg, root):
-    _, codes = pool(db, cfg, 10)
+    _, codes = pool(db, cfg, RANK)
     add(db, cfg, 11, image='https://i.ebayimg.com/images/g/broken11.png')
     set_rank(db, codes)
 
@@ -878,7 +880,7 @@ def test_items_without_images_are_named(db, cfg, root):
 
 
 def test_long_fields_truncated_and_default_alt_uses_std_name(db, cfg, root, fetch):
-    iids, codes = pool(db, cfg, 10)
+    iids, codes = pool(db, cfg, RANK)
     with db.connect() as c:
         c.execute("UPDATE std_names SET std_name=?, brand=?, segments=? WHERE item_id=?",
                   ('名' * 400, 'B' * 99, json.dumps({'function': '杯' * 300, 'pattern': None}), iids[0]))

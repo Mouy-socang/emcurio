@@ -112,7 +112,7 @@ def rows(db, sql, *args):
 
 
 def logged_in_home(r):
-    return r.status_code == 200 and '<h1 class="display">今日榜</h1>' in r.text and '/register' not in r.text
+    return r.status_code == 200 and '<h1 class="display">MyR12</h1>' in r.text and '/register' not in r.text
 
 
 def logged_in_item(r):
@@ -378,7 +378,7 @@ def test_session_expires_after_90_days_with_username_prefilled(client, clock):
 def test_unknown_cookie_is_treated_as_expired(client):
     client.cookies.set(guest.COOKIE, 'not-a-real-token')
     r = client.get('/')
-    assert '登录已过期，请重新登录。' in r.text and '今日榜' not in r.text
+    assert '登录已过期，请重新登录。' in r.text and 'MyR12' not in r.text
 
 
 def test_cookie_secure_by_default(make, monkeypatch):
@@ -506,7 +506,7 @@ def test_disabled_account_sees_only_disabled_page(client, db, clock):
         r = client.get(path)
         assert r.status_code == 403 and '<h1>账号已停用</h1>' in r.text
         assert '此账号已停用，如有疑问请在微信中联系墨墨。' in r.text and '退出登录' in r.text
-        assert '今日榜' not in r.text
+        assert 'MyR12' not in r.text
     assert client.post('/logout').status_code == 303
 
 
@@ -798,7 +798,7 @@ def test_reconsent_after_terms_version_change(make, db, tmp_path):
     c2 = make(terms_path=newer)
     c2.cookies = c1.cookies
     r = c2.get('/item/CO-0001')
-    assert r.status_code == 200 and '用户协议已更新' in r.text and '今日榜' not in r.text
+    assert r.status_code == 200 and '用户协议已更新' in r.text and 'MyR12' not in r.text
     assert 'action="/consent"' in r.text and 'name="next" value="/item/CO-0001"' in r.text
     assert c2.get('/legal').status_code == 200                       # 说明页仍可读
     bad = c2.post('/consent', data={'next': '/item/CO-0001'})

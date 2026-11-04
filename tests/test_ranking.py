@@ -1,6 +1,6 @@
 """故事 11（CAP-7）：后台 02 商品池、03 榜、预览与发布——服务端可验证的部分。
 
-覆盖 I/O 矩阵：加入榜到 10 件、榜满 / Kleinanzeigen 不能上榜、上移 / 拖动后保存（名次存储）、不足 10 件不能预览、
+覆盖 I/O 矩阵：加入榜到 12 件、榜满 / Kleinanzeigen 不能上榜、上移 / 拖动后保存（名次存储）、不足 12 件不能预览、
 预览（与客人页同一模板、页内只引用本机地址、不入发件箱、不分配编号、不记录行为）、只从预览发布与发布状态、
 发布后改排序 / 点评即"有未发布的修改"、移出商品池（隐藏入队并移出榜）、榜内货下架。
 图片用系统 sips 真转码（源图现做的 PNG），远程图片只经注入的假下载；任何非 127.0.0.1 的请求直接失败。
@@ -28,6 +28,8 @@ import requests
 from curio import publish, sync, triage
 from curio.config import load
 from curio.store import Store
+
+RANK = publish.RANK_SIZE
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_PY = ROOT / 'server' / '.venv' / 'bin' / 'python'
@@ -186,7 +188,7 @@ def test_tabs_02_and_03_enabled_and_scripts_served(http):
     assert status == 200 and 'javascript' in headers['Content-Type'] and b'/api/rank/preview' in body
     js = body.decode()
     # 只在把手上长按拖动；播报文案照 EXPERIENCE.md。
-    assert "'已拿起，第 '" in js and "'已放到第 '" in js and '榜需满 10 件才能发布' in js and '排序尚未保存' in js
+    assert "'已拿起，第 '" in js and "'已放到第 '" in js and "'榜需满 ' + SIZE + ' 件才能发布'" in js and f'const SIZE = {RANK};' in js and '排序尚未保存' in js
     css = page
     assert '-webkit-touch-callout:none' in css and 'touch-action:none' in css
     assert '>发布<' not in re.search(r'<section id="rankView".*?</section>', page, re.S)[0]   # 03 上不放"发布"
@@ -213,15 +215,15 @@ def test_pool_lists_kept_items_by_score_with_flags(db, cfg, http):
 
 
 def test_add_to_rank_until_full_then_preview_enabled(db, cfg, http):
-    _, codes = kept(db, cfg, 12)
-    status, d = http['save'](codes[:9])
-    assert status == 200 and d['count'] == 9
-    assert http['post']('/api/rank/preview', {'rank': codes[:9]}) == (400, {'error': '榜需满 10 件才能发布（现在 9 件）'})
-    status, d = http['save'](codes[:10])
-    assert status == 200 and d['count'] == 10 and [r['code'] for r in d['rows']] == codes[:10]
+    _, codes = kept(db, cfg, RANK + 2)
+    status, d = http['save'](codes[:RANK - 1])
+    assert status == 200 and d['count'] == RANK - 1
+    assert http['post']('/api/rank/preview', {'rank': codes[:RANK - 1]}) == (400, {'error': f'榜需满 {RANK} 件才能发布（现在 {RANK - 1} 件）'})
+    status, d = http['save'](codes[:RANK])
+    assert status == 200 and d['count'] == RANK and [r['code'] for r in d['rows']] == codes[:RANK]
     assert http['get']('/api/pool')['items'][-1]['rank_pos'] == 1        # 分数最低的 codes[0] 在榜第 1 名
-    status, d = http['save'](codes[:11])
-    assert status == 400 and '最多 10 件' in d['error'] and ranked(db) == codes[:10]
+    status, d = http['save'](codes[:RANK + 1])
+    assert status == 400 and f'最多 {RANK} 件' in d['error'] and ranked(db) == codes[:RANK]
 
 
 def test_kleinanzeigen_cannot_be_ranked(db, cfg, http):
@@ -232,7 +234,7 @@ def test_kleinanzeigen_cannot_be_ranked(db, cfg, http):
 
 
 def test_move_up_and_drag_save_order(db, cfg, http):
-    _, codes = kept(db, cfg, 10)
+    _, codes = kept(db, cfg, RANK)
     http['save'](codes)
     up = codes[:]
     up[1], up[2] = up[2], up[1]                       # 第 3 名上移到第 2 名
@@ -241,7 +243,7 @@ def test_move_up_and_drag_save_order(db, cfg, http):
     dragged = up[:]
     dragged.insert(4, dragged.pop(0))                 # 第 1 名拖到第 5 名
     http['save'](dragged)
-    assert ranked(db) == dragged and [r['pos'] for r in http['get']('/api/rank')['rows']] == list(range(1, 11))
+    assert ranked(db) == dragged and [r['pos'] for r in http['get']('/api/rank')['rows']] == list(range(1, RANK + 1))
 
 
 def test_rank_save_is_idempotent_by_request_id(db, cfg, http):
@@ -266,13 +268,13 @@ def test_writes_need_token_and_same_origin(db, cfg, http):
 # ---------- 移出 / 放回商品池 ----------
 
 def test_out_of_pool_hides_published_item_and_leaves_rank(db, cfg, http, root, fetch):
-    iids, codes = kept(db, cfg, 12)
-    http['save'](codes[:10])
+    iids, codes = kept(db, cfg, RANK + 2)
+    http['save'](codes[:RANK])
     publish.publish(db, root, fetch=fetch)
     before = len(outbox(db, 'hide'))
     status, d = http['post']('/api/pool/action', {'action': 'out_of_pool', 'item_id': iids[2], 'request_id': 'o1'})
     assert status == 200 and d['state'] == 'out_of_pool' and d['left_rank'] is True
-    assert codes[2] not in ranked(db) and len(ranked(db)) == 9
+    assert codes[2] not in ranked(db) and len(ranked(db)) == RANK - 1
     hides = outbox(db, 'hide')
     assert len(hides) == before + 1 and hides[-1]['payload']['code'] == codes[2]
     assert hides[-1]['payload']['action'] == 'hide' and hides[-1]['payload']['reason'] == 'removed'
@@ -280,7 +282,7 @@ def test_out_of_pool_hides_published_item_and_leaves_rank(db, cfg, http, root, f
     assert http['post']('/api/pool/action', {'action': 'out_of_pool', 'item_id': iids[2], 'request_id': 'o1'})[0] == 200
     assert len(outbox(db, 'hide')) == before + 1
     pool_ = http['get']('/api/pool')
-    assert pool_['counts'] == {'kept': 11, 'out': 1, 'rank': 9} and pool_['out'][0]['code'] == codes[2]
+    assert pool_['counts'] == {'kept': RANK + 1, 'out': 1, 'rank': RANK - 1} and pool_['out'][0]['code'] == codes[2]
     status, d = http['post']('/api/pool/action', {'action': 'back_to_pool', 'item_id': iids[2], 'request_id': 'b1'})
     assert status == 200 and d['state'] == 'kept' and outbox(db, 'hide')[-1]['payload']['action'] == 'unhide'
     assert codes[2] not in ranked(db)                  # 放回商品池不自动回到榜
@@ -291,25 +293,25 @@ def test_out_of_pool_hides_published_item_and_leaves_rank(db, cfg, http, root, f
 # ---------- 榜内下架 ----------
 
 def test_gone_item_in_rank_marked_and_blocks_preview_until_replaced(db, cfg, http):
-    iids, codes = kept(db, cfg, 12)
-    http['save'](codes[:10])
+    iids, codes = kept(db, cfg, RANK + 2)
+    http['save'](codes[:RANK])
     db.mark_gone(iids[3])
     d = http['get']('/api/rank')
     row = d['rows'][3]
     assert row['off'] is True and row['gone'] is True and '已下架' in row['reason']
     assert sum(r['off'] for r in d['rows']) == 1
     # 下架的行可原样留在榜里继续排序。
-    moved = codes[:10]
+    moved = codes[:RANK]
     moved[0], moved[1] = moved[1], moved[0]
     assert http['save'](moved)[0] == 200 and ranked(db) == moved
     status, err = http['post']('/api/rank/preview', {'rank': moved})
     assert status == 400 and '第 4 名' in err['error']
     # 补位：移出下架的，加入另一件。
-    fixed = [c for c in moved if c != codes[3]] + [codes[10]]
+    fixed = [c for c in moved if c != codes[3]] + [codes[RANK]]
     assert http['save'](fixed)[0] == 200
     assert http['post']('/api/rank/preview', {'rank': fixed})[0] == 200
     # 新加入的货必须合格（下架的不能再加回来）。
-    status, err = http['save'](fixed[:9] + [codes[3]])
+    status, err = http['save'](fixed[:RANK - 1] + [codes[3]])
     assert status == 400 and '已下架' in err['error']
 
 
@@ -317,15 +319,15 @@ def test_gone_item_in_rank_marked_and_blocks_preview_until_replaced(db, cfg, htt
 
 def test_preview_renders_candidate_with_guest_templates_locally(db, cfg, http, fetch):
     _, codes = kept(db, cfg, 25)
-    rank = list(reversed(codes[5:15]))
+    rank = list(reversed(codes[5:5 + RANK]))
     http['save'](rank)
     status, d = http['post']('/api/rank/preview', {'rank': rank})
     assert status == 200 and d['url'] == '/preview/' and d['pool'] == 25
     status, headers, body = http['raw']('/preview/')
     html = body.decode()
     assert status == 200 and headers['Content-Security-Policy'].startswith("default-src 'self'")
-    # 横条在顶：返回修改 / 发布；客人页本体与服务器同一份模板（今日榜、全部藏品）。
-    assert html.index('class="pvbar"') < html.index('<h1 class="display">今日榜')
+    # 横条在顶：返回修改 / 发布；客人页本体与服务器同一份模板（MyR12、全部藏品）。
+    assert html.index('class="pvbar"') < html.index('<h1 class="display">MyR12')
     assert '返回修改' in html and '>发布</button>' in html and '全部藏品' in html
     assert re.findall(r'<li class="rk"><a class="rk-a" href="/preview/item/(CO-\d+)"', html) == rank
     # 页内只引用本机地址：没有外部主机、原平台链接或图片地址。
@@ -357,22 +359,22 @@ def test_preview_renders_candidate_with_guest_templates_locally(db, cfg, http, f
 
 
 def test_preview_invalidated_by_rank_change(db, cfg, http):
-    _, codes = kept(db, cfg, 11)
-    http['save'](codes[:10])
-    assert http['post']('/api/rank/preview', {'rank': codes[:10]})[0] == 200
+    _, codes = kept(db, cfg, RANK + 1)
+    http['save'](codes[:RANK])
+    assert http['post']('/api/rank/preview', {'rank': codes[:RANK]})[0] == 200
     assert 'class="pvbar"' in http['raw']('/preview/')[2].decode()
-    http['save'](codes[1:11])
+    http['save'](codes[1:RANK + 1])
     status, _, body = http['raw']('/preview/')
     assert status == 200 and '预览已失效' in body.decode()
     # 界面所见的榜与库里不同（别处改过）：不生成预览。
-    assert http['post']('/api/rank/preview', {'rank': codes[:10]})[0] == 409
+    assert http['post']('/api/rank/preview', {'rank': codes[:RANK]})[0] == 409
 
 
 # ---------- 发布（只从预览横条） ----------
 
 def test_publish_only_from_preview_and_status(db, cfg, http):
-    iids, codes = kept(db, cfg, 12)
-    rank = codes[:10]
+    iids, codes = kept(db, cfg, RANK + 2)
+    rank = codes[:RANK]
     http['save'](rank)
     assert http['get']('/api/rank')['status'] == {'published_at': None, 'publish_no': None, 'dirty': True, 'orders': 0}
     status, d = http['post']('/api/rank/publish', {'rank': rank, 'request_id': 'p0'})
@@ -410,12 +412,12 @@ def test_publish_only_from_preview_and_status(db, cfg, http):
     assert http['post']('/api/triage/alt', {'item_id': iids[1], 'index': 0, 'text': ''})[0] == 200
     # 商品池变化（价格、下架）→ 有未发布的修改。
     assert http['get']('/api/rank')['status']['dirty'] is False
-    db.mark_gone(iids[11])
+    db.mark_gone(iids[RANK + 1])
     assert http['get']('/api/rank')['status']['dirty'] is True
 
 
 def test_publish_failure_keeps_rank(db, cfg, http):
-    _, codes = kept(db, cfg, 10)
+    _, codes = kept(db, cfg, RANK)
     http['save'](codes)
     assert http['post']('/api/rank/preview', {'rank': codes})[0] == 200
     with db.connect() as c:          # 另一个发布正在进行（发布锁）
@@ -433,13 +435,13 @@ def test_publish_failure_keeps_rank(db, cfg, http):
 
 
 def test_preview_needs_rank_list(db, cfg, http):
-    kept(db, cfg, 10)
+    kept(db, cfg, RANK)
     assert http['post']('/api/rank/preview', {})[0] == 400
     assert http['post']('/api/rank/preview', {'rank': 'CO-0001'}) == (400, {'error': '榜须为货号列表'})
 
 
 def test_comment_after_preview_blocks_publish(db, cfg, http):
-    iids, codes = kept(db, cfg, 10)
+    iids, codes = kept(db, cfg, RANK)
     http['save'](codes)
     assert http['post']('/api/rank/preview', {'rank': codes})[0] == 200
     assert http['post']('/api/triage/comment', {'item_id': iids[0], 'text': '新点评'})[0] == 200
@@ -449,16 +451,16 @@ def test_comment_after_preview_blocks_publish(db, cfg, http):
 
 
 def test_out_of_pool_of_unranked_item_invalidates_preview(db, cfg, http):
-    iids, codes = kept(db, cfg, 11)
-    http['save'](codes[:10])
-    assert http['post']('/api/rank/preview', {'rank': codes[:10]})[0] == 200
-    status, d = http['post']('/api/pool/action', {'action': 'out_of_pool', 'item_id': iids[10], 'request_id': 'o'})
+    iids, codes = kept(db, cfg, RANK + 1)
+    http['save'](codes[:RANK])
+    assert http['post']('/api/rank/preview', {'rank': codes[:RANK]})[0] == 200
+    status, d = http['post']('/api/pool/action', {'action': 'out_of_pool', 'item_id': iids[RANK], 'request_id': 'o'})
     assert status == 200 and d['left_rank'] is False
     assert '预览已失效' in http['raw']('/preview/')[2].decode()
 
 
 def test_publish_rechecks_content_fingerprint(db, cfg, root, fetch):
-    iids, codes = kept(db, cfg, 10)
+    iids, codes = kept(db, cfg, RANK)
     with db.connect() as c:
         publish.set_rank(c, codes)
     payload, _ = publish.candidate(db, root, fetch)
@@ -474,7 +476,7 @@ def test_publish_rechecks_content_fingerprint(db, cfg, root, fetch):
 
 
 def test_expect_rank_mismatch_leaves_no_trace(db, cfg, root, fetch):
-    _, codes = kept(db, cfg, 10)
+    _, codes = kept(db, cfg, RANK)
     with db.connect() as c:
         publish.set_rank(c, codes)
         seq = c.execute("SELECT v FROM kv WHERE k='publish_seq'").fetchone()
@@ -488,7 +490,7 @@ def test_expect_rank_mismatch_leaves_no_trace(db, cfg, root, fetch):
 
 
 def test_request_result_recorded_with_snapshot_and_replayed(db, cfg, root, fetch):
-    _, codes = kept(db, cfg, 10)
+    _, codes = kept(db, cfg, RANK)
     with db.connect() as c:
         publish.set_rank(c, codes)
     first = publish.publish(db, root, fetch=fetch, expect_rank=codes, request_id='once')
@@ -501,7 +503,7 @@ def test_request_result_recorded_with_snapshot_and_replayed(db, cfg, root, fetch
 
 
 def test_concurrent_retry_waits_for_first_publish(db, cfg, http, monkeypatch):
-    _, codes = kept(db, cfg, 10)
+    _, codes = kept(db, cfg, RANK)
     http['save'](codes)
     assert http['post']('/api/rank/preview', {'rank': codes})[0] == 200
     real = publish.prepare_images
@@ -523,7 +525,7 @@ def test_concurrent_retry_waits_for_first_publish(db, cfg, http, monkeypatch):
 
 
 def test_preview_invalidated_while_generating_is_not_kept(db, cfg, http, monkeypatch):
-    iids, codes = kept(db, cfg, 10)
+    iids, codes = kept(db, cfg, RANK)
     http['save'](codes)
     real = publish.candidate
 
@@ -595,14 +597,14 @@ def live(tmp_path):
 
 def test_acceptance_preview_then_publish_matches_guest_home(db, cfg, root, fetch, live):
     from curio.review import server
-    iids, codes = kept(db, cfg, 12)
+    iids, codes = kept(db, cfg, RANK + 2)
     httpd = server(db, port=0, root=root, fetch=fetch)          # 默认 flush：sync.flush(store, root) → 本机服务器
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = 'http://127.0.0.1:' + str(httpd.server_port)
     try:
         token = re.search("const token='([^']+)'", requests.get(base + '/').text)[1]
         h = {'X-Curio-Token': token}
-        # 02 商品池按分数列出 12 件；加入 10 件、排序（上移、拖动）。
+        # 02 商品池按分数列出 RANK + 2 件；加入 RANK 件、排序（上移、拖动）。
         assert [it['code'] for it in requests.get(base + '/api/pool').json()['items']] == list(reversed(codes))
         rank = []
         for n, code in enumerate(reversed(codes[2:])):

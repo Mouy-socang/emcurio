@@ -240,7 +240,7 @@ img{display:block}
 <nav class="tabs" aria-label="后台分区">
   <a class="tc" id="tab01" aria-current="page" href="/#new"><span class="ix" aria-hidden="true">01</span><b>新货</b><span class="ct mono" id="cNew">—</span><span class="vh">件待处理</span></a>
   <a class="tc" id="tab02" href="/#pool"><span class="ix" aria-hidden="true">02</span><b>商品池</b><span class="ct mono" id="cPool">—</span><span class="vh">件已留下</span></a>
-  <a class="tc" id="tab03" href="/#rank"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="ct mono" id="cRank">— / 10</span><span class="vh">件已排</span></a>
+  <a class="tc" id="tab03" href="/#rank"><span class="ix" aria-hidden="true">03</span><b>榜</b><span class="ct mono" id="cRank">— / 12</span><span class="vh">件已排</span></a>
   <a class="tc" id="tab04" href="/#match"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="ct mono" id="cMatch">—</span><span class="vh">位客人有待处理的匹配</span></a>
   <a class="tc" id="tab05" href="/#rules"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="ct mono" id="cRules">—</span><span class="vh">条待确认规律</span></a>
   <a class="tc" id="tab06" href="/#guests"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="ct mono" id="cGuests">—</span><span class="vh">个待关联</span></a>
@@ -277,7 +277,7 @@ img{display:block}
 </section>
 <section id="poolView" hidden aria-labelledby="h02">
   <h1 class="vh" id="h02" tabindex="-1">商品池</h1>
-  <p class="poolsum">已留下 <span class="mono" id="poolN">—</span> 件 · 榜 <span class="mono" id="poolRankN">—</span> / <span class="mono">10</span></p>
+  <p class="poolsum">已留下 <span class="mono" id="poolN">—</span> 件 · 榜 <span class="mono" id="poolRankN">—</span> / <span class="mono">12</span></p>
   <p class="im" id="poolErr" role="alert" hidden>未能读取商品池 · <button class="lnk lnk-pad" id="poolReload" type="button">重试</button></p>
   <ol class="plist" id="poolList" aria-label="已留下的货，按分数高到低"></ol>
   <div class="empty" id="poolEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>商品池还没有货</h2><p class="muted">在 01 新货里留下的货会出现在这里。</p></div>
@@ -290,7 +290,7 @@ img{display:block}
   <p class="im" id="rankErr" role="alert" hidden></p>
   <p class="im" id="rankOff" hidden></p>
   <ol class="rl" id="rankList" aria-label="榜，按名次"></ol>
-  <div class="empty" id="rankEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>榜还是空的</h2><p class="muted">从 02 商品池"加入榜"，排满 10 件后预览、发布。</p><p><a class="btn" href="/#pool">去 02 商品池</a></p></div>
+  <div class="empty" id="rankEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>榜还是空的</h2><p class="muted">从 02 商品池"加入榜"，排满 12 件后预览、发布。</p><p><a class="btn" href="/#pool">去 02 商品池</a></p></div>
   <div class="foot"><button class="btn primary" id="btnPreview" type="button">预览</button><p class="reason" id="whyPreview" hidden></p></div>
   <p class="im" id="previewMsg" role="alert" hidden></p>
 </section>

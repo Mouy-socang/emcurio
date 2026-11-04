@@ -7,8 +7,8 @@
 {% if track %}<span hidden data-track-page="home" data-who="{{ track }}" data-params='{{ chosen|tojson }}'></span>{% endif %}
 {{ site_head(cur, here, updated, stale) }}
 <div class="head">
-  <p class="eb" aria-hidden="true">Today's Ten</p>
-  <h1 class="display">今日榜</h1>
+  <p class="eb" aria-hidden="true">Today's Twelve</p>
+  <h1 class="display">MyR12</h1>
 </div>
 {% if not rank and not pool_total %}
 <div class="empty">
@@ -16,7 +16,7 @@
 </div>
 {% else %}
 {% if rank %}
-<ol class="rank" aria-label="今日榜，{{ rank|length }} 件">
+<ol class="rank" aria-label="MyR12，{{ rank|length }} 件">
 {% for it in rank %}{{ rank_card(loop.index, it, cur) }}
 {% endfor %}</ol>
 {% endif %}
