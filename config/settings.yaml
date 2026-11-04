@@ -19,7 +19,7 @@ em_kb_path: ~/Desktop/EM 西洋瓷器
 # CAP-4 AI 打分（claude-haiku-5-5，需 .env 的 ANTHROPIC_API_KEY）：每日 HTTP 请求上限（含重试），按柏林日期归零。
 # 每次请求最多给 20 件货打分；默认 100 次/天约每月 €3–5（最坏约 €25，按 1 美元≈0.9 欧元估算），明细见 README（AD-20：每月合计 €200 上限）；0 = 不启用。
 ai_budget:
-  requests_per_day: 100
+  requests_per_day: 400
 # 后台 06 客人（故事 14，AD-12）：GoodCustomer 资料库与它自带的 gcdb.py。Curiobject 只读档案（customer.json），
 # 新建档案只经 `gcdb.py --db <资料库> new-customer --name …`，从不直接写资料库里的任何文件。
 goodcustomer:
