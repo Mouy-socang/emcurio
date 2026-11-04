@@ -9,7 +9,7 @@
   --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
   --tap:44px;--m:18px;
 }
-html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%;scroll-padding-top:var(--tabs-h,0px)}
 body{background:var(--surface);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.6;overflow-x:hidden}
 button{font:inherit;color:inherit}
 img{display:block}
@@ -20,7 +20,7 @@ img{display:block}
 :focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 
 /* section-tabs */
-.tabs{display:flex;border-top:2px solid var(--ink);border-bottom:1px solid var(--hair);overflow-x:auto;scrollbar-width:none}
+.tabs{display:flex;border-top:2px solid var(--ink);border-bottom:1px solid var(--hair);overflow-x:auto;scrollbar-width:none;position:sticky;top:0;z-index:5;background:var(--surface)}
 .tabs::-webkit-scrollbar{display:none}
 .tc{flex:0 0 92px;min-height:var(--tap);padding:8px 10px 9px;border-right:1px solid var(--hair);display:flex;flex-direction:column;color:var(--ink);text-decoration:none}
 .tc:focus-visible{outline-offset:-4px}
@@ -43,7 +43,7 @@ img{display:block}
 
 /* 01 新货瀑布流（故事 22，waterfall-card）：一个 <ol>，DOM 顺序 = 阅读顺序；脚本按顺序放入当前较短的一列
    （绝对定位，不用 CSS columns）。卡上无分数；「去掉」「留下」两颗等宽按钮；处理后淡出。 */
-.fbar{position:sticky;top:0;z-index:2;background:var(--surface);border-bottom:1px solid var(--hair);padding-bottom:4px}
+.fbar{position:sticky;top:var(--tabs-h,0px);z-index:2;background:var(--surface);border-bottom:1px solid var(--hair);padding-bottom:4px}
 .fbar .im{margin-top:4px}
 .feed{list-style:none;position:relative;margin-top:16px}
 .fc{position:absolute;left:0;top:0;width:50%;background:var(--surface);transition:opacity .22s ease-out}

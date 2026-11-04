@@ -3,6 +3,15 @@
    原生 JS，无构建、无外部库。所有写请求带 X-Curio-Token；留下 / 去掉 / 捞回 / 撤销带 request_id（服务端幂等）。 */
 'use strict';
 const $ = id => document.getElementById(id);
+
+// 顶部分区栏固定在页顶；量出它的高度，让 01 的计数条贴在它下面、跳转定位不被它挡住
+(() => {
+  const tabs = document.querySelector('.tabs');
+  if (!tabs) return;
+  const set = () => document.documentElement.style.setProperty('--tabs-h', tabs.offsetHeight + 'px');
+  set();
+  if (window.ResizeObserver) new ResizeObserver(set).observe(tabs);
+})();
 const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const rid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2);
 const LABEL = {keep: '留下', remove: '去掉'};
