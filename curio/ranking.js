@@ -90,17 +90,22 @@
   }
 
   /* ---------- 读取 ---------- */
+  let poolSeq = 0;               // 商品池读取序号：较早发出的读取晚到时丢弃，不覆盖之后的操作
   async function loadPool(anchor, top) {
+    const seq = ++poolSeq;
     try {
       const d = await get('/api/pool');
+      if (seq !== poolSeq) return false;
       pool = d;
       d.items.concat(d.out).forEach(c => { if (c.code) cards.set(c.code, c); });
       if (!rankLoaded && !unsaved && !saving) { order = d.rank.slice(); saved = d.rank.slice(); }
       $('poolErr').hidden = true;
     } catch (e) {
+      if (seq !== poolSeq) return false;
       if (view === 'pool') { $('poolErr').hidden = false; shout('未能读取商品池'); }
     }
     renderPool(anchor, top); counts();
+    return true;
   }
   function absorb(d) {
     d.rows.forEach(r => { cards.set(r.code, Object.assign({}, cards.get(r.code) || {}, r)); info.set(r.code, {off: r.off, gone: r.gone, reason: r.reason}); });
@@ -224,14 +229,24 @@
     const src = fromKept ? pool.items : pool.out, dst = fromKept ? pool.out : pool.items;
     const i = src.findIndex(x => x.item_id === c.item_id);
     const row = Object.assign({}, i >= 0 ? src[i] : c, {sold: !!d.sold});
+    if (d.left_rank) {
+      row.rank_pos = null;
+      order = order.filter(x => x !== c.code); saved = saved.filter(x => x !== c.code);
+      $('poolRankN').textContent = order.length;
+    }
     if (i >= 0) src.splice(i, 1);
-    if (!dst.some(x => x.item_id === c.item_id)) dst.unshift(row);
+    if (!dst.some(x => x.item_id === c.item_id)) {
+      // 与服务端同序：分数高到低、无分在后；同分时刚处理的在前。
+      const rank = x => x.score == null ? -Infinity : x.score;
+      const at = dst.findIndex(x => rank(x) <= rank(row));
+      dst.splice(at < 0 ? dst.length : at, 0, row);
+    }
     pool.counts.kept = pool.items.length; pool.counts.out = pool.out.length;
   }
   const calm = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function fadeOut(li) {
     if (!li || calm()) return Promise.resolve();
-    li.classList.add('leaving');
+    li.classList.add('leaving'); li.inert = true;     // 淡出期间不可点、不可聚焦
     return new Promise(r => setTimeout(r, 220));
   }
   async function poolAct(action, c, msg, btn) {
@@ -251,8 +266,7 @@
     }
     setNet(false);
     const d = res.data;
-    // 不用响应里的榜覆盖本地（可能是重放的旧结果）：只拿掉移出商品池的那件，其余以重新读取的榜为准。
-    if (d.left_rank) { order = order.filter(x => x !== c.code); saved = saved.filter(x => x !== c.code); }
+    // 不用响应里的榜覆盖本地（可能是重放的旧结果）：只拿掉移出商品池的那件（moveLocal），其余以重新读取的榜为准。
     const rankNote = d.left_rank ? '，并已移出榜' : '';
     const next = {out_of_pool: '已移出商品池' + rankNote, mark_sold: '已标记售出' + rankNote,
                   undo_sold: '已撤销售出', back_to_pool: '已放回商品池'}[action];
@@ -261,12 +275,14 @@
     const part = {out_of_pool: ':out', mark_sold: ':sold'}[action] || ':back';
     const k = sib ? sib.dataset.id + part : null;
     const sid = sib ? sib.dataset.id : null, top = li && sib === li.nextElementSibling ? li.getBoundingClientRect().top : null;
+    poolSeq++;                                // 作废此前还在路上的商品池读取
     await fadeOut(li);
     moveLocal(action, c, d);
     renderPool(sid, top); counts();
-    refocus(k, $('h02'), true);
+    if (k) refocus(k, $('h02'), true); else $('h02').focus({preventScroll: true});
     say(next);
-    loadPool(sid).then(() => refocus(k, $('h02'), true));
+    // 后台重读：只在是最新一次读取时重画；重画沿用当时的焦点（用户已移开焦点就不抢回来）。
+    loadPool(sid);
     loadRank();
   }
 

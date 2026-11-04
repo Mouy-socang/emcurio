@@ -120,7 +120,8 @@ def run_with(root, clock, ebay_api, check=None):
     with patch('curio.curio_monitor.EbayAPI', return_value=ebay_api), \
          patch('curio.curio_monitor.collect_ebay', Mock(return_value=0)) as e, \
          patch('curio.curio_monitor.collect_ka', side_effect=lambda store, config, budget=None: store.set('ka_status', 'ok') or 0), \
-         patch('curio.curio_monitor.check_existing', check or Mock(return_value={'attempted': 0, 'errors': 0})) as c:
+         patch('curio.curio_monitor.check_existing', check or Mock(return_value={'attempted': 0, 'errors': 0})) as c, \
+         patch('curio.curio_monitor.archive_pool', Mock(return_value={})):   # 商品池存档另见 test_pool_check.py
         return curio_monitor.run(root, clock), e, c
 
 
@@ -162,7 +163,9 @@ def test_not_due_after_five_minutes(db, cfg, root):
 
 def test_nothing_published_counts_as_success_without_work(db, cfg, root):
     clock = Clock()
-    add(db, cfg, 1, published=False)
+    iid, _ = add(db, cfg, 1, published=False)
+    curio_monitor._ensure_check_events(db)
+    curio_monitor._record_check(db, iid, 'ebay', 'active', 'test')   # 刚查过：商品池检查未到期（故事 26）
     not_due_except_published(db, clock, 16)
     api = FakeEbay(db)
     result, *_ = run_with(root, clock, api)
@@ -181,7 +184,8 @@ def test_published_check_runs_before_fetch(db, cfg, root):
     with patch('curio.curio_monitor.EbayAPI', return_value=api), \
          patch('curio.curio_monitor.collect_ebay', side_effect=lambda *a: order.append('fetch') or 0), \
          patch('curio.curio_monitor.collect_ka', side_effect=lambda store, config, budget=None: store.set('ka_status', 'ok') or 0), \
-         patch('curio.curio_monitor.check_existing', side_effect=lambda *a: order.append('check') or {'errors': 0}):
+         patch('curio.curio_monitor.check_existing', side_effect=lambda *a: order.append('check') or {'errors': 0}), \
+         patch('curio.curio_monitor.archive_pool', Mock(return_value={})):
         curio_monitor.run(root, clock)
     assert order == ['published', 'fetch', 'check']
 

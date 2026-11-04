@@ -510,6 +510,200 @@ def check_published(store,api,config,budget=None,etsy=None,rows=None,sched=None,
         summary['platforms'][platform]=dict(items=len(todo),ok=ok,status=note)
     return summary
 
+POOL_PLATFORMS=('ebay','kleinanzeigen','etsy')
+POOL_MIN=5              # 每轮每平台商品池检查份额至少 5 件（仍受预算）
+POOL_SECONDS=240
+ARCHIVE_SECONDS=90      # 每轮商品池存档（快照）限时，未完成的下轮继续
+ARCHIVE_ATTEMPTS=5      # 一件货存档最多尝试几轮（平台已删图的已下架货不会无休止重试）
+
+def pool_rows(store,hours,clock=time.time):
+    """商品池（拣选留下）里仍在售、距上次确定判定（status_check_events 最近一条 active / gone）≥ hours 小时的
+    eBay / Kleinanzeigen / Etsy 货，最久没查的在前（从没查成过的最前）；失败、暂停、无法确认的记录不算，下轮即重试。
+    已在已发布货检查里的货（published 未隐藏的 eBay / Etsy 货）不在这里。"""
+    from .publish import _has_table
+    _ensure_check_events(store)
+    cutoff=_iso_utc(datetime.fromtimestamp(clock()-hours*3600,timezone.utc))
+    with store.connect() as c:
+        if not _has_table(c,'triage'):return []
+        pub=("AND NOT EXISTS(SELECT 1 FROM published p WHERE p.item_id=i.item_id AND p.hidden=0 AND i.platform IN ('ebay','etsy'))"
+             if _has_table(c,'published') else '')
+        rows=[dict(r) for r in c.execute(f"""SELECT * FROM (SELECT i.*,
+              COALESCE((SELECT max(e.checked_at) FROM status_check_events e WHERE e.item_id=i.item_id
+                        AND e.outcome IN ('active','gone')),'') pool_last_check
+              FROM triage t JOIN items i ON i.item_id=t.item_id
+              WHERE t.state='kept' AND i.status='active' AND i.platform IN ('ebay','kleinanzeigen','etsy') {pub})
+            WHERE pool_last_check<? ORDER BY pool_last_check ASC,item_id""",(cutoff,))]
+    for r in rows:r.pop('pool_last_check',None)
+    return rows
+
+def _ka_usable(store,config,clock=time.time):
+    return bool(config['kleinanzeigen_enabled']) and clock()>=float(store.get('ka_pause_until','0'))
+
+def pool_platform_ok(store,platform,config,budget,clock=time.time,ebay=True,etsy=True):
+    """本轮能否查该平台的商品池货：客户端可用（eBay 凭据、Etsy 启用且未鉴权退避、Kleinanzeigen 启用且未暂停）且还有检查预算。"""
+    if platform=='ebay':ok=ebay
+    elif platform=='etsy':ok=etsy
+    elif platform=='kleinanzeigen':ok=_ka_usable(store,config,clock)
+    else:ok=False
+    return bool(ok) and (budget is None or budget.available(platform,'check'))
+
+def _pool_share(budget,platform):
+    """本轮商品池检查份额：剩余在售检查预算 ÷ 到柏林午夜还剩的检查轮数 的一半，至少 POOL_MIN 件（Etsy 按 100 件一次请求折算）。"""
+    from .schedule import check_rounds_left
+    from .etsy import BATCH
+    if budget is None:return None
+    n=max(POOL_MIN,budget.check_remaining(platform)//check_rounds_left(budget.clock())//2)
+    return n*BATCH if platform=='etsy' else n
+
+def check_pool(store,api,config,budget=None,etsy=None,rows=None,clock=time.time,monotonic=time.monotonic,root=None):
+    """商品池优先在售检查（故事 26）：普通在售轮转之前，先查商品池里到期（pool_rows）的货，计入在售检查预算（purpose=check）。
+    每平台本轮最多 _pool_share 件，其余留给普通轮转、下轮再查；预算用完即停（计 budget_skipped，不算错误）；
+    超时或 Kleinanzeigen 中途被拦而没查的计 deferred。份额内：attempted + budget_skipped + deferred + 未返回的 Etsy 货 = 选中件数。
+    判定与落库复用 _check_one / Etsy 批量判定；每件写一条 status_check_events。暂停、无法确认、请求失败都计 errors。
+    判下架的货若还没有含本机图片的快照，立即做一次商品池存档（root 给出时；同样限时、受尝试次数上限）。
+    返回 dict(attempted, active, gone, errors, budget_skipped, deferred, due)。"""
+    from .schedule import BudgetExhausted
+    rows=pool_rows(store,config['pool_check_hours'],clock) if rows is None else rows
+    summary=dict(attempted=0,active=0,gone=0,errors=0,budget_skipped=0,deferred=0,due=len(rows))
+    started=monotonic();gone=[]
+    _ensure_check_events(store)
+    def event(row,outcome,evidence):
+        summary['attempted']+=1
+        summary[outcome if outcome in ('active','gone') else 'errors']+=1
+        _record_check(store,row['item_id'],row['platform'],outcome,evidence)
+        if outcome=='gone':gone.append(row)
+    for platform in POOL_PLATFORMS:
+        todo=[r for r in rows if r['platform']==platform]
+        if not todo:continue
+        if platform=='ebay' and api is None:continue
+        if platform=='etsy' and etsy is None:continue
+        if platform=='kleinanzeigen' and not _ka_usable(store,config,clock):continue
+        share=_pool_share(budget,platform)
+        picks=todo if share is None else todo[:share]
+        if platform=='etsy':
+            from .etsy import judge_listings,BATCH
+            etsy.purpose='check'
+            for start in range(0,len(picks),BATCH):
+                batch=picks[start:start+BATCH]
+                if monotonic()-started>=POOL_SECONDS:
+                    summary['deferred']+=len(picks)-start;break
+                if budget is not None and not budget.available('etsy','check'):
+                    summary['budget_skipped']+=len(picks)-start;break
+                try:verdicts,error=judge_listings(etsy,[r['item_id'] for r in batch])
+                except Exception:
+                    log.exception('商品池检查（Etsy）失败');verdicts,error={r['item_id']:('skipped','',None) for r in batch},'error'
+                for row in batch:
+                    verdict=verdicts.get(row['item_id'])
+                    if verdict is None:
+                        summary['errors']+=1;continue     # 批量结果里漏了这件：不写记录，下轮重试
+                    outcome,evidence,listing=verdict
+                    if outcome=='skipped':
+                        if isinstance(error,BudgetExhausted):summary['budget_skipped']+=1
+                        else:summary['errors']+=1
+                        continue
+                    outcome,evidence=_apply_etsy(store,row,outcome,evidence,listing,config)
+                    event(row,outcome,evidence)
+                if isinstance(error,BudgetExhausted):
+                    summary['budget_skipped']+=len(picks)-start-len(batch);break
+            continue
+        if platform=='ebay':api.purpose='check'
+        for n,row in enumerate(picks):
+            if monotonic()-started>=POOL_SECONDS:
+                summary['deferred']+=len(picks)-n;break
+            try:outcome,evidence=_check_one(store,row,api,config,budget)
+            except BudgetExhausted:
+                summary['budget_skipped']+=len(picks)-n;break
+            event(row,outcome,evidence)
+            if outcome=='paused':        # Kleinanzeigen 拦截：暂停两小时，本轮其余不再查
+                summary['deferred']+=len(picks)-n-1;break
+    if root is not None and gone:
+        archive_started=monotonic()
+        for row in gone:
+            if monotonic()-archive_started>=ARCHIVE_SECONDS:break
+            try:_archive_gone(store,row['item_id'],root,api,config,budget,clock)
+            except Exception:log.exception('下架存档失败：%s',row['item_id'])
+    return summary
+
+def _ensure_archive_table(store):
+    with store.connect() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS pool_archive(item_id TEXT PRIMARY KEY,attempts INTEGER DEFAULT 0,
+          done INTEGER DEFAULT 0,last_at TEXT,last_error TEXT)""")
+
+def _archive_state(c,iid):
+    row=c.execute('SELECT attempts,done FROM pool_archive WHERE item_id=?',(iid,)).fetchone()
+    return (row['attempts'] or 0,row['done'] or 0) if row else (0,0)
+
+def _archive_one(store,item,root,api,budget):
+    """为一件商品池的货做一次商品池存档（vision.snapshot，图片上限 12），记尝试次数。
+    完成返回 True、没完成返回 False；预算用完而没做返回 None（不计尝试）。"""
+    from . import vision
+    from .store import now
+    from .schedule import BudgetExhausted
+    vision.init(store);_ensure_archive_table(store)
+    err=None
+    try:
+        _,data=vision.snapshot(store,item,root,api=api,budget=budget,max_images=vision.POOL_IMAGES,pool=True)
+        if not data.get('images'):err='；'.join(data.get('acquisition_errors') or [])[:200] or '没有可下载的图片'
+        elif (data.get('pool_archive') or {}).get('download_failures'):err='；'.join(data.get('acquisition_errors') or [])[:200]
+    except BudgetExhausted:return None
+    except Exception as e:
+        log.exception('商品池存档失败：%s',item['item_id']);err='存档失败：'+type(e).__name__
+    with store.connect() as c:done=vision.pool_archived(c,item['item_id'],root)
+    if not done and err is None:err='详情未取到，下轮重试'
+    with store.connect() as c:
+        c.execute("""INSERT INTO pool_archive(item_id,attempts,done,last_at,last_error) VALUES(?,1,?,?,?)
+          ON CONFLICT(item_id) DO UPDATE SET attempts=attempts+1,done=excluded.done,last_at=excluded.last_at,last_error=excluded.last_error""",
+                  (item['item_id'],int(done),now(),None if done else err))
+    return done
+
+def _archive_usable(store,platform,api,config,budget,clock=time.time):
+    if platform not in ('ebay','kleinanzeigen'):return False     # Etsy 的货不做存档（Etsy 目前停用）
+    return pool_platform_ok(store,platform,config,budget,clock,ebay=api is not None)
+
+def _archive_gone(store,iid,root,api,config,budget,clock=time.time):
+    """池检查判下架：还没有含本机图片的快照时立即存档一次（拿不到新图时 snapshot 沿用已有照片）；
+    与 archive_pool 同样受尝试次数上限、已完成的不再做。"""
+    from . import vision
+    vision.init(store);_ensure_archive_table(store)
+    with store.connect() as c:
+        attempts,done=_archive_state(c,iid)
+        if done or attempts>=ARCHIVE_ATTEMPTS or vision.has_local_snapshot(c,iid,root):return False
+        item=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
+    if item is None or not _archive_usable(store,item['platform'],api,config,budget,clock):return False
+    if api is not None:api.purpose='check'
+    return _archive_one(store,dict(item),root,api,budget)
+
+def archive_pool(store,root,api,config,budget=None,monotonic=time.monotonic,clock=time.time):
+    """商品池存档（故事 26）：为留下的 eBay / Kleinanzeigen 货（含已下架的）各做一次商品池快照——详情、描述、价格存档、
+    最多 12 张图片下载到 data/porcelain/images（后台与发布随之用本机图，store.item_images 本就优先本机图）。Etsy 的货不存档。
+    最近留下的先做；每轮限时 ARCHIVE_SECONDS，未完成的下轮继续；没成功（含有图片下载失败）的下轮重试，最多 ARCHIVE_ATTEMPTS 轮。
+    详情请求计入在售检查预算；预算用完、平台暂停时跳过、不计尝试。返回 dict(attempted, archived, errors, pending)。"""
+    from . import vision
+    from .store import now
+    vision.init(store);_ensure_archive_table(store)
+    with store.connect() as c:
+        rows=[dict(r) for r in c.execute("""SELECT i.* FROM triage t JOIN items i ON i.item_id=t.item_id
+            LEFT JOIN pool_archive a ON a.item_id=i.item_id
+            WHERE t.state='kept' AND i.platform IN ('ebay','kleinanzeigen') AND COALESCE(a.done,0)=0 AND COALESCE(a.attempts,0)<?
+            ORDER BY t.updated_at DESC,i.item_id""",(ARCHIVE_ATTEMPTS,))]
+    summary=dict(attempted=0,archived=0,errors=0,pending=len(rows))
+    if api is not None:api.purpose='check'
+    started=monotonic()
+    for item in rows:
+        if monotonic()-started>=ARCHIVE_SECONDS:break
+        if not _archive_usable(store,item['platform'],api,config,budget,clock):continue
+        with store.connect() as c:
+            if vision.pool_archived(c,item['item_id'],root):
+                c.execute("INSERT INTO pool_archive(item_id,attempts,done,last_at) VALUES(?,0,1,?) ON CONFLICT(item_id) DO UPDATE SET done=1",
+                          (item['item_id'],now()))
+                summary['pending']-=1;continue
+        done=_archive_one(store,item,root,api,budget)
+        if done is None:continue
+        summary['attempted']+=1
+        if done:summary['archived']+=1;summary['pending']-=1
+        else:summary['errors']+=1
+    return summary
+
 FETCH_OK=('ok','disabled','not_due')
 
 def run(root,clock=time.time):
@@ -542,13 +736,25 @@ def run(root,clock=time.time):
         # 故事 23：当天第一轮（柏林 05:00 之后）封存系统预测；已封存不覆盖，失败只记结果字段、不影响采集。
         # 空闲轮在这里封存；有工作的轮次在抓取入库与打分之后封存（让当天第一批新货进预测）。
         from .agreement import seal_for_run
-        if not do_fetch and not do_check and not do_pub:
+        # 故事 26：商品池里有到期（距上次检查满 pool_check_hours）的货，本轮就要查，不论抓取与普通检查是否到期。
+        # 只算本轮查得了的平台（有客户端、未暂停、还有检查预算）的到期货，免得查不了的货让每轮都不空闲。
+        try:
+            from .config import credentials
+            try:credentials(root);ebay_ok=True
+            except Exception:ebay_ok=False
+            etsy_ok=bool(etsy_credentials(root)) and not auth_backoff_active(store)
+            pool_due=[r for r in pool_rows(store,config['pool_check_hours'],clock)
+                      if pool_platform_ok(store,r['platform'],config,budget,clock,ebay_ok,etsy_ok)]
+        except Exception:
+            log.exception('商品池到期货读取失败');pool_due=[]
+        do_pool=bool(pool_due)
+        if not do_fetch and not do_check and not do_pub and not do_pool:
             # 空闲轮也发心跳（AD-10）：同步模块每轮都把各平台最近成功时间发给服务器。
             from . import sync,learning
             # CAP-8：每轮归纳一次待审规律（只改 05 计数，不打断）。
             predicted=seal_for_run(store,clock())
             return {'status':'idle',**sched.summary(),**learning.run(store,root),**sync.run(store,root),**predicted}
-        result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub}
+        result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub,'pool_check_ran':do_pool}
         with store.connect() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
               id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,status TEXT,result TEXT)''')
@@ -574,6 +780,12 @@ def run(root,clock=time.time):
                 today=berlin_date(clock())
                 if store.get('published_capacity_warned')!=today:
                     store.set('published_capacity_warned',today);log.warning('已发布货检查容量不足：%s','；'.join(warn))
+        if do_pool:
+            # 优先级：复查 > 已发布货检查 > 商品池检查 > 新货抓取 > 普通在售检查（故事 26）。
+            pool_etsy=None if etsy is None or etsy_backoff else etsy
+            try:result['pool_check']=check_pool(store,api,config,budget,pool_etsy,pool_due,clock,root=root)
+            except Exception:
+                log.exception('商品池检查未完成');result['pool_check_error']='商品池检查未完成，将在后续轮次重试'
         if do_fetch:
             sched.mark_fetch_started();fetch_started=now()
             if api is None:
@@ -619,6 +831,10 @@ def run(root,clock=time.time):
             check_etsy=None if etsy is None or auth_backoff_active(store) else etsy
             try:result['status_check_summary']=check_existing(store,api,config,budget,check_etsy)
             except Exception:result['status_checks']='本轮状态检查未完成，将在后续轮次重试'
+        # 故事 26：商品池存档（进池的货做一次快照、图片存到本机），限时，未完成的下轮继续；失败只记结果字段。
+        try:result['pool_archive']=archive_pool(store,root,api,config,budget,clock=clock)
+        except Exception:
+            log.exception('商品池存档未完成');result['pool_archive_error']='商品池存档未完成，将在后续轮次重试'
         # CAP-4：抓取与在售检查之后，在 AI 预算内给新货打分；失败只记 ai_status，不影响其它结果。
         from . import ai
         result.update(ai.run(store,root,config,clock))
@@ -640,6 +856,8 @@ def run(root,clock=time.time):
             summary=result.get('status_check_summary',{})
             pub=result.get('published_check',{})
             pub_ok='published_check_error' not in result and not pub.get('errors')
+            pool=result.get('pool_check',{})
+            pub_ok=pub_ok and 'pool_check_error' not in result and not pool.get('errors')
             status='ok' if ok and pub_ok and 'status_checks' not in result and not summary.get('errors') and not summary.get('etsy_error') else 'partial'
             c.execute('UPDATE collection_runs SET finished_at=?,status=?,result=? WHERE id=?',
                       (now(),status,json.dumps(result,ensure_ascii=False),run_id))

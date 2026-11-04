@@ -6,6 +6,8 @@ cheap_damaged_max: null
 daily_budget: 0
 kleinanzeigen_enabled: true
 status_check_limit: 200
+# 商品池（留下、在售）的货距上次检查满这么多小时，下一轮在普通在售轮转之前优先再查（1–48，故事 26）。
+pool_check_hours: 6
 # 每平台每日外部请求上限（含 OAuth、重试），按柏林日期归零；低于官方上限。
 # 新货抓取最多用 60%，在售检查保底 40%；用完当天跳过该平台。
 api_budget:

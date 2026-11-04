@@ -11,7 +11,7 @@ def load(root=ROOT):
     root = Path(root)
     settings = yaml.safe_load((root/'config/settings.yaml').read_text()) or {}
     defaults = dict(keywords=['Meissen'],auction_fee_rate=0.0,cheap_damaged_max=None,
-                    daily_budget=0,kleinanzeigen_enabled=True,status_check_limit=20)
+                    daily_budget=0,kleinanzeigen_enabled=True,status_check_limit=20,pool_check_hours=6)
     defaults.update(settings)
     # AD-27：每平台每日接口调用预算；缺省项用默认值，未知平台或非法数值直接报错。
     from .schedule import DEFAULT_BUDGET
@@ -41,6 +41,9 @@ def load(root=ROOT):
             raise ValueError(key+' 必须为非负数')
     if type(defaults['status_check_limit']) is not int or not 0<=defaults['status_check_limit']<=300:
         raise ValueError('status_check_limit 必须为 0–300')
+    # 故事 26：商品池（留下、在售）的货距上次检查满这么多小时才在普通轮转之前优先再查。
+    if type(defaults['pool_check_hours']) is not int or not 1<=defaults['pool_check_hours']<=48:
+        raise ValueError('pool_check_hours 必须为 1–48 的整数')
     for name in ('price_rules','slow_sellers'):
         value=yaml.safe_load((root/'config'/f'{name}.yaml').read_text()) or {}
         rules=value.get('rules',[])
