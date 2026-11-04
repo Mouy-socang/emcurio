@@ -15,12 +15,12 @@
     "account_id": {"type": "string", "description": "服务器按会话填写。", "pattern": "^[0-9a-f]{32}$"},
     "type": {
       "type": "string",
-      "description": "v1 事件类型：home_open 打开首页；item_open 点开单件；item_dwell 单件页停留；filter 筛选；currency 币种切换。",
-      "enum": ["home_open", "item_open", "item_dwell", "filter", "currency"]
+      "description": "v1 事件类型：home_open 打开首页；item_open 点开单件；item_dwell 单件页停留；filter 筛选；currency 币种切换；like 喜欢 / 取消喜欢；want 想要 / 取消想要（故事 31）。",
+      "enum": ["home_open", "item_open", "item_dwell", "filter", "currency", "like", "want"]
     },
     "co_code": {
       "type": ["string", "null"],
-      "description": "货号；只有 item_open、item_dwell 有，其它类型为 null。",
+      "description": "货号；item_open、item_dwell、like、want 有，其它类型为 null。",
       "pattern": "^CO-[0-9]{4,8}$"
     },
     "client_ts": {
@@ -107,6 +107,32 @@
           "required": ["currency"],
           "additionalProperties": false,
           "properties": {"currency": {"type": "string", "enum": ["EUR", "CNY"]}}
+        }
+      }
+    },
+    "like": {
+      "description": "喜欢（故事 31）：服务器在 POST /mark 里、该账号对这件的喜欢状态真正变化时记一条。params.on：true 喜欢、false 取消喜欢。客人页公开显示人数（不显示是谁）。",
+      "type": "object",
+      "properties": {
+        "co_code": {"type": "string", "pattern": "^CO-[0-9]{4,8}$"},
+        "params": {
+          "type": "object",
+          "required": ["on"],
+          "additionalProperties": false,
+          "properties": {"on": {"type": "boolean"}}
+        }
+      }
+    },
+    "want": {
+      "description": "想要这件（故事 31）：同 like，状态真正变化时由服务器记一条。params.on：true 想要、false 取消想要。只给墨墨看，客人页不显示计数。",
+      "type": "object",
+      "properties": {
+        "co_code": {"type": "string", "pattern": "^CO-[0-9]{4,8}$"},
+        "params": {
+          "type": "object",
+          "required": ["on"],
+          "additionalProperties": false,
+          "properties": {"on": {"type": "boolean"}}
         }
       }
     }

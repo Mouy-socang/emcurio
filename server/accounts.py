@@ -175,6 +175,24 @@ def ensure(c):
         except sqlite3.OperationalError as e:
             if 'duplicate column' not in str(e):
                 raise
+    # 故事 31：每个账号对每件的喜欢 / 想要当前状态（只存账号、货号、状态与时间），与单件页阅读去重记录（首次打开时间）。
+    # 墨墨同意作为"原始行为不长期留在服务器"的例外（2026-11-04）。
+    c.executescript('''
+    CREATE TABLE IF NOT EXISTS item_marks(
+        account_id TEXT NOT NULL,
+        co_code TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('like','want')),
+        "on" INTEGER NOT NULL CHECK("on" IN (0,1)),
+        at TEXT NOT NULL,
+        PRIMARY KEY(account_id, co_code, kind));
+    CREATE INDEX IF NOT EXISTS item_marks_code ON item_marks(co_code, kind, "on");
+    CREATE TABLE IF NOT EXISTS item_reads(
+        account_id TEXT NOT NULL,
+        co_code TEXT NOT NULL,
+        first_at TEXT NOT NULL,
+        PRIMARY KEY(account_id, co_code));
+    CREATE INDEX IF NOT EXISTS item_reads_code ON item_reads(co_code);
+    ''')
 
 
 def _tx(c):
@@ -437,6 +455,55 @@ def set_currency(c, account_id, currency, now):
         n = c.execute('UPDATE accounts SET currency=?,updated_at=?,account_rev=account_rev+1 '
                       'WHERE account_id=? AND currency!=?', (currency, iso(now), account_id, currency)).rowcount
     return n > 0
+
+
+# ---------- 喜欢 / 想要与阅读数（故事 31） ----------
+
+MARK_KINDS = ('like', 'want')
+READS_MIN = 10          # 阅读不到 10 不显示阅读数（喜欢为 0 不显示人数）
+
+
+def set_mark(c, account_id, code, kind, on, now):
+    """设定该账号对这件的喜欢 / 想要状态（幂等：给的是目标状态，不是切换）。状态真正变化才写，返回是否变化。"""
+    if kind not in MARK_KINDS:
+        raise ValueError('未知动作')
+    on = 1 if on else 0
+    with _tx(c):
+        row = c.execute('SELECT "on" FROM item_marks WHERE account_id=? AND co_code=? AND kind=?',
+                        (account_id, code, kind)).fetchone()
+        if (row[0] if row else 0) == on:
+            return False
+        c.execute('INSERT INTO item_marks(account_id,co_code,kind,"on",at) VALUES(?,?,?,?,?) '
+                  'ON CONFLICT(account_id,co_code,kind) DO UPDATE SET "on"=excluded."on",at=excluded.at',
+                  (account_id, code, kind, on, iso(now)))
+    return True
+
+
+def record_read(c, account_id, code, now):
+    """单件页阅读去重：同一账号同一件只记第一次。"""
+    c.execute('INSERT OR IGNORE INTO item_reads(account_id,co_code,first_at) VALUES(?,?,?)', (account_id, code, iso(now)))
+
+
+def item_stats(c, account_id, codes=None):
+    """货号 → {likes, reads, liked, wanted}：likes = 当前喜欢的账号数，reads = 打开过单件页的不同账号数（都只数未停用的账号）；
+    liked / wanted 为本账号自己的状态。不含想要人数（只给墨墨看）、不含是谁。codes 为 None 时返回全部有记录的货号。"""
+    out = {}
+
+    def at(code):
+        return out.setdefault(code, {'likes': 0, 'reads': 0, 'liked': False, 'wanted': False})
+    active = "account_id IN (SELECT account_id FROM accounts WHERE status='active')"
+    for code, n in c.execute(f'SELECT co_code,count(*) FROM item_marks WHERE kind=\'like\' AND "on"=1 AND {active} '
+                             'GROUP BY co_code'):
+        at(code)['likes'] = n
+    for code, n in c.execute(f'SELECT co_code,count(*) FROM item_reads WHERE {active} GROUP BY co_code'):
+        at(code)['reads'] = n
+    if account_id:
+        for code, kind in c.execute('SELECT co_code,kind FROM item_marks WHERE account_id=? AND "on"=1', (account_id,)):
+            at(code)['liked' if kind == 'like' else 'wanted'] = True
+    if codes is not None:
+        wanted = set(codes)
+        out = {k: v for k, v in out.items() if k in wanted}
+    return out
 
 
 def _revoke_all(c, account_id, now):

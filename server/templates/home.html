@@ -17,7 +17,7 @@
 {% else %}
 {% if rank %}
 <ol class="rank" aria-label="MyR12，{{ rank|length }} 件">
-{% for it in rank %}{{ rank_card(loop.index, it, cur) }}
+{% for it in rank %}{{ rank_card(loop.index, it, cur, stats, here) }}
 {% endfor %}</ol>
 {% endif %}
 {# 故事 30：拍卖中（快照 v2 的拍卖榜）；结束时间已过的服务器端即时不显示，为空时整栏不出现。不显示分数。 #}
@@ -51,7 +51,7 @@
   <div id="pool-list" data-swap>
     {% if cards %}
     <ol class="wf" aria-label="全部藏品" data-query="{{ query }}" data-next="{{ next_offset if next_offset is not none else '' }}" data-pn="{{ view.publish_no }}" data-total="{{ shown_total }}">
-    {% for it in cards %}{{ card(it, cur) }}
+    {% for it in cards %}{{ card(it, cur, stats, here) }}
     {% endfor %}</ol>
     <div class="more" data-more>{% if next_offset is not none %}<a class="lnk lnk-pad" href="{{ more_href }}">加载更多</a>{% endif %}</div>
     {% else %}

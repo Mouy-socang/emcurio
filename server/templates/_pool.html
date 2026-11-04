@@ -1,20 +1,40 @@
-{# 首页卡片（首页首批与 /api/pool 续载共用）。整卡一个链接，链接名取标题，卡内图片 alt=""。 #}
-{% macro card(it, cur=None) -%}
+{# 故事 31：喜欢 / 想要按钮与「♡ N · 阅读 M」。stats 为 None（Mac 预览）时按钮显示但不可点、不发请求、不显示数字；
+   buttons=False（墓碑页）只显示数字。每个按钮是一个普通表单（POST /mark，带目标状态，幂等），guest.js 增强为就地切换。
+   客人页只显示数字：不显示是谁，也不显示想要人数。 #}
+{% macro mark_btn(kind, code, on, live, next) -%}
+{% set label = ('已喜欢' if on else '喜欢') if kind == 'like' else ('已想要' if on else '想要这件') %}
+{% set icon = ('♥' if on else '♡') if kind == 'like' else '' %}
+{%- if live %}<form class="mk-f" method="post" action="/mark"><input type="hidden" name="code" value="{{ code }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="on" value="{{ '0' if on else '1' }}"><input type="hidden" name="next" value="{{ next }}"><button class="mk-b mk-{{ kind }}{% if on %} on{% endif %}" type="submit" aria-pressed="{{ 'true' if on else 'false' }}" data-mark="{{ kind }}">{% if icon %}<span class="mk-i" aria-hidden="true">{{ icon }}</span> {% endif %}<span class="mk-l">{{ label }}</span></button></form>
+{%- else %}<button class="mk-b mk-{{ kind }}" type="button" disabled aria-pressed="false">{% if icon %}<span class="mk-i" aria-hidden="true">{{ icon }}</span> {% endif %}<span class="mk-l">{{ label }}</span></button>
+{%- endif %}
+{%- endmacro %}
+
+{% macro marks(code, stats=None, next='/', buttons=True) -%}
+{% set live = stats is not none %}
+{% set st = (stats or {}).get(code) or {} %}
+<div class="mk" data-marks data-code="{{ code }}" data-likes="{{ st.likes or 0 }}" data-reads="{{ st.reads or 0 }}">
+{%- if buttons %}{{ mark_btn('like', code, st.liked, live, next) }}{{ mark_btn('want', code, st.wanted, live, next) }}{% endif %}
+<span class="mk-n mono" data-mk-count>{% if live %}{{ mark_count_text(st) }}{% endif %}</span>
+</div>
+{%- endmacro %}
+
+{# 首页卡片（首页首批与 /api/pool 续载共用）。按钮（故事 31）在 <a> 之外、同在 <li> 内。整卡一个链接，链接名取标题，卡内图片 alt=""。 #}
+{% macro card(it, cur=None, stats=None, next='/') -%}
 <li class="card"><a class="card-a" href="/item/{{ it.code }}" aria-labelledby="t-{{ it.code }}">
 <span class="code mono" aria-hidden="true">{{ it.code }}</span>
 {%- if it.images %}<span class="ph"><img src="/img/{{ it.images[0].thumb }}" width="{{ it.images[0].tw }}" height="{{ it.images[0].th }}" alt="" loading="lazy" decoding="async"></span>
 {%- else %}<span class="ph ph-none">图片未能加载</span>{% endif %}
 <h3 class="ct" id="t-{{ it.code }}"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</h3>
 <span class="pr mono">{{ money(it.price_eur, cur) }}</span>
-</a></li>
+</a>{{ marks(it.code, stats, next) }}</li>
 {%- endmacro %}
 
-{% macro rank_card(n, it, cur=None) -%}
+{% macro rank_card(n, it, cur=None, stats=None, next='/') -%}
 <li class="rk"><a class="rk-a" href="/item/{{ it.code }}" aria-label="第 {{ n }} 名，{{ it.title }}，{{ money_text(it.price_eur, cur) }}" data-label="第 {{ n }} 名，{{ it.title }}">
 <span class="ph sq">{% if it.images %}<img src="/img/{{ it.images[0].thumb }}" width="{{ it.images[0].tw }}" height="{{ it.images[0].th }}" alt="" decoding="async">{% else %}<span class="ph-none">图片未能加载</span>{% endif %}<span class="rk-n mono" aria-hidden="true">{{ '%02d' % n }}</span></span>
 <span class="rt"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</span>
 <span class="pr mono">{{ money(it.price_eur, cur) }}</span>
-</a></li>
+</a>{{ marks(it.code, stats, next) }}</li>
 {%- endmacro %}
 
 {# 故事 30：拍卖中一栏的卡片——当前出价与结束时间；不带名次、不带分数。 #}

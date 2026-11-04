@@ -8,6 +8,9 @@
 - 交接文件：每个已关联客户一份 `<curio.db 所在目录>/gc_handoff/<GC编号>.json`（正式环境即 `data/gc_handoff/`），
   内容为该客户当前关联的全部账号在账本里的全部事件（按 server_ts、event_id 排序）加按类型的计数；每次整份原子覆盖写，
   不追加；没有任何关联账号时删除。不写入 GoodCustomer 库，也不依赖它是否可用（墨墨 2026-11-03 决定）。
+- 喜欢 / 想要（故事 31）：账本里 like / want 事件按 (server_ts, inbox_seq) 重放到每个账号、每件、每种的最后状态；
+  06 列出当前"想要 / 喜欢"（谁、哪件、何时，`marks_list`），02 / 03 卡片显示每件的喜欢 / 想要人数与阅读数
+  （打开过单件页的不同账号数，按 item_open 去重；`item_counts`）。只记录、显示，不进排序与好卖分。
 - 待重算的客户记在 `handoff_dirty`（与触发它的写入同一事务）：新事件入账、关联、更正（前后两个客户）、解除；
   重算成功才清掉，写文件失败下次（下一轮拉取或下一次关联变化）再算。
 """
@@ -29,7 +32,9 @@ from . import sync
 
 log = logging.getLogger(__name__)
 
-EVENT_TYPES = ('home_open', 'item_open', 'item_dwell', 'filter', 'currency')
+EVENT_TYPES = ('home_open', 'item_open', 'item_dwell', 'filter', 'currency', 'like', 'want')
+MARK_TYPES = ('like', 'want')      # 故事 31：喜欢 / 想要（params.on），服务器在状态真正变化时记
+MARKS_LIST_MAX = 300
 HANDOFF_DIR = 'gc_handoff'
 HANDOFF_VERSION = 1
 PULL_LIMIT = 500
@@ -158,6 +163,73 @@ def ingest(store, items, schema=None):
                 dup += 1
         mark_dirty(c, *_customers_of(c, accounts))
     return {'new': new, 'duplicate': dup, 'unknown': unknown}
+
+
+# ---------- 喜欢 / 想要与阅读数（故事 31） ----------
+
+def _mark_states(c):
+    """(account_id, co_code, type) → (on, server_ts)：账本里 like / want 事件重放后的最后状态。"""
+    out = {}
+    # 服务器上已停用的账号不计、不列（与客人页一致）。
+    for aid, code, kind, params, ts in c.execute(
+            "SELECT account_id,co_code,type,params,server_ts FROM behavior_events WHERE type IN ('like','want') "
+            "AND account_id NOT IN (SELECT account_id FROM guest_accounts WHERE status='disabled') "
+            'ORDER BY server_ts,COALESCE(inbox_seq,0),event_id'):
+        try:
+            on = json.loads(params).get('on') is True
+        except (ValueError, AttributeError):
+            continue
+        out[(aid, code, kind)] = (on, ts)
+    return out
+
+
+def item_counts(c, codes=None):
+    """货号 → {likes, wants, reads}：当前喜欢 / 想要的账号数，阅读数 = 点开过单件页的不同账号数（item_open 去重）。
+    codes 给定时只返回这些货号（没有记录的为 0）。"""
+    out = {}
+
+    def at(code):
+        return out.setdefault(code, {'likes': 0, 'wants': 0, 'reads': 0})
+    for (_, code, kind), (on, _) in _mark_states(c).items():
+        if on:
+            at(code)['likes' if kind == 'like' else 'wants'] += 1
+    for code, n in c.execute("SELECT co_code,count(DISTINCT account_id) FROM behavior_events WHERE type='item_open' "
+                             'AND co_code IS NOT NULL GROUP BY co_code'):
+        at(code)['reads'] = n
+    if codes is not None:
+        return {k: dict(out.get(k) or {'likes': 0, 'wants': 0, 'reads': 0}) for k in codes if k}
+    return out
+
+
+def marks_list(c, names=None, limit=MARKS_LIST_MAX):
+    """06：当前"想要 / 喜欢"（最后状态为 on 的），新到旧。每行：kind、货号、货名、时间（该次点的 server_ts）、账号的
+    昵称与用户名、关联的 GC 编号与名字（names：GC 编号 → 显示名）。只在 Mac 后台（AD-12）。"""
+    links = dict(c.execute('SELECT account_id,customer_id FROM guest_links').fetchall())
+    accts = {r[0]: (r[1], r[2]) for r in c.execute('SELECT account_id,username,nickname FROM guest_accounts')}
+    rows = []
+    for (aid, code, kind), (on, ts) in _mark_states(c).items():
+        if not on:
+            continue
+        username, nickname = accts.get(aid, (None, None))
+        cid = links.get(aid)
+        rows.append({'kind': kind, 'code': code, 'at': ts, 'account_id': aid, 'username': username,
+                     'nickname': nickname, 'customer_id': cid, 'customer_name': (names or {}).get(cid) if cid else None})
+    rows.sort(key=lambda r: (r['at'], r['code'], r['account_id'], r['kind']), reverse=True)
+    rows = rows[:limit]
+    titles = {}
+    for r in rows:
+        if r['code'] not in titles:
+            item = c.execute('SELECT i.item_id,i.title FROM item_codes k JOIN items i ON i.item_id=k.item_id WHERE k.code=?',
+                             (r['code'],)).fetchone()
+            if item is None:
+                titles[r['code']] = (None, None)
+            else:
+                from .store import _std        # 标准名称优先（与 02 / 03 卡片一致），没有时用卖家标题
+                std = _std(c, item[0])
+                named = std is not None and std['status'] == 'named' and bool(std['std_name'])
+                titles[r['code']] = (item[0], std['std_name'] if named else item[1])
+        r['item_id'], r['title'] = titles[r['code']]
+    return rows
 
 
 # ---------- 交接文件 ----------

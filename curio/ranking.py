@@ -13,15 +13,23 @@
 - 拍卖商品池与拍卖榜（故事 30）：kind='auction'。拍卖池 = 留下（kept）且纯拍卖（triage.PURE_AUCTION）的货，
   按结束时间近到远、已结束的在最后；普通池（kind='normal'）去掉纯拍卖。不是新的拣选状态：转为普通货 / 改回拍卖
   后自动换边。拍卖榜存 publish_rank_auction（publish.set_rank_auction 校验）；移出、标记售出同一事务撤下。
+- 喜欢 / 想要与阅读数（故事 31）：02 / 03 每行带 marks = {likes, wants, reads}（behavior.item_counts，来自行为账本）；
+  只显示，不进排序与分数。
 """
 import json
 import subprocess
 import time
 from pathlib import Path
 
-from . import exposure, publish, triage
+from . import behavior, exposure, publish, triage
 from .config import ROOT
 from .store import auction_tag, card, now
+
+NO_MARKS = {'likes': 0, 'wants': 0, 'reads': 0}     # 故事 31
+
+
+def _marks(counts, code):
+    return dict(counts.get(code) or NO_MARKS) if code else dict(NO_MARKS)
 
 SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 RENDER_TIMEOUT = 60
@@ -130,6 +138,9 @@ def pool(store, root=ROOT, kind='normal'):
         exp = exposure.by_item(c, exposure.params_for(root))
         kept = [_pool_row(c, r, ranked, root, exp, auction_ranked) for r in _scored(c, 'kept', exp, kind)]
         out = [_pool_row(c, r, ranked, root, exp, auction_ranked) for r in _scored(c, 'out_of_pool', exp, kind)]
+        counts = behavior.item_counts(c)
+        for row in kept + out:
+            row['marks'] = _marks(counts, row['code'])
     shown = auction_ranked if kind == 'auction' else ranked
     size = publish.RANK_AUCTION_SIZE if kind == 'auction' else publish.RANK_SIZE
     return dict(kind=kind, items=kept, out=out, rank=shown, size=size, normal_rank=len(ranked),
@@ -172,6 +183,7 @@ def rank_state(store, root=ROOT, kind='normal'):
         rows = []
         params = exposure.params_for(root)
         days = exposure.days_by_code(c)
+        counts = behavior.item_counts(c)
         for pos, code in enumerate(publish.rank(c), 1):
             item = c.execute('SELECT i.* FROM item_codes k JOIN items i ON i.item_id=k.item_id WHERE k.code=?',
                              (code,)).fetchone()
@@ -188,7 +200,8 @@ def rank_state(store, root=ROOT, kind='normal'):
             n = days.get(code, 0)
             live = item is not None and item['status'] == 'active' and reason is None    # 缺失、下架、不能发布的不提示
             sold = item is not None and triage.is_sold(c, item['item_id'])
-            row.update(days_on_rank=n, stale_hint=live and n >= params['hint_days'] and not sold)
+            row.update(days_on_rank=n, stale_hint=live and n >= params['hint_days'] and not sold,
+                       marks=_marks(counts, code))
             rows.append(row)
         status = publish_status(c, publish._fees(root), root)
     return dict(rows=rows, count=len(rows), size=publish.RANK_SIZE, status=status)
@@ -199,6 +212,7 @@ def auction_rank_state(store, root=ROOT):
     不能上拍卖榜的行（已结束、下架等）标 off 并写明原因；发布时跳过，从不阻止发布。"""
     with store.connect() as c:
         rows = []
+        counts = behavior.item_counts(c)
         for pos, code in enumerate(publish.rank_auction(c), 1):
             item = c.execute('SELECT i.* FROM item_codes k JOIN items i ON i.item_id=k.item_id WHERE k.code=?',
                              (code,)).fetchone()
@@ -213,7 +227,7 @@ def auction_rank_state(store, root=ROOT):
             row.update(pos=pos, code=code, off=reason is not None, reason=reason, ended=ended,
                        gone=item is not None and item['status'] != 'active',
                        bid=row.get('price', ''), ends=(item['ends'] or None) if item is not None else None,
-                       days_on_rank=0, stale_hint=False)
+                       days_on_rank=0, stale_hint=False, marks=_marks(counts, code))
             rows.append(row)
         status = publish_status(c, publish._fees(root), root)
         normal = len(publish.rank(c))

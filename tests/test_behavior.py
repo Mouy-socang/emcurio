@@ -329,7 +329,7 @@ def test_unlinked_events_stay_in_ledger_until_linked(store, gc):
     h = handoff(store, 'GC000123')
     assert [e['event_id'] for e in h['events']] == [e['event_id'] for e in history]
     assert h['customer_id'] == 'GC000123' and h['accounts'][0]['account_id'] == A
-    assert h['summary']['by_type'] == {'home_open': 0, 'item_open': 1, 'item_dwell': 1, 'filter': 0, 'currency': 1}
+    assert h['summary']['by_type'] == {'home_open': 0, 'item_open': 1, 'item_dwell': 1, 'filter': 0, 'currency': 1, 'like': 0, 'want': 0}
 
 
 def test_relink_rebuilds_both_and_deletes_empty(store, gc):
@@ -511,7 +511,7 @@ def test_end_to_end_guest_behavior_reaches_handoff(tmp_path, store, gc):
         h = handoff(store, 'GC000123')
         assert set(e['event_id'] for e in sent + [dwell]) < set(e['event_id'] for e in h['events'])
         assert [e['params'] for e in h['events'] if e['type'] == 'currency'] == [{'currency': 'CNY'}]
-        assert h['summary']['by_type'] == {'home_open': 1, 'item_open': 1, 'item_dwell': 1, 'filter': 1, 'currency': 1}
+        assert h['summary']['by_type'] == {'home_open': 1, 'item_open': 1, 'item_dwell': 1, 'filter': 1, 'currency': 1, 'like': 0, 'want': 0}
         assert [e for e in h['events'] if e['type'] == 'item_dwell'][0]['params'] == {'seconds': 45}
         inbox = requests.get(url + '/admin/inbox', headers={'Authorization': 'Bearer ' + TOKEN}).json()
         assert inbox['events'] == []                                    # 服务器收件箱为空

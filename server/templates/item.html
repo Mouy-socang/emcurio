@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_macros.html" import site_head, site_foot %}
+{% from "_pool.html" import marks %}
 {# 单件页（CAP-10，故事 12）。顺序：画廊 → 货号 → 名称 → 卖家原价 → 01 品相 → 02 预估费用 → 03 墨墨点评（有才出现）
    → 复制货号 → 浏览全部 → 页脚。已售出 / 已移出（隐藏后 90 天内）：去色、状态牌在名称之前、划线价、无复制栏。
    不跑脚本时：画廊横向滑动、缩略图是页内锚点；上一张/下一张、放大、复制按钮由 guest.js 显示。 #}
@@ -81,6 +82,7 @@
   </section>
   {% endif %}
 
+  {{ marks(it.code, stats, here) }}{# 故事 31：喜欢 / 想要，紧挨复制栏 #}
   <div class="copy-bar" data-copybar data-code="{{ it.code }}">
     <div class="cb-row">
       <p class="cb-code"><span class="muted">货号</span><span class="mono cb-n">{{ it.code }}</span></p>
@@ -104,6 +106,7 @@
   <h1 class="h1s"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</h1>
   <p class="price"><span class="vh">{{ plate }}，原价</span><s class="mono big">{{ money(it.price_eur, cur) }}</s></p>
   <p class="gone">{{ '此件已售出。' if state == 'sold' else '此件已移出。' }}</p>
+  {% if stats is not none and mark_count_text((stats or {}).get(code)) %}{{ marks(code, stats, here, buttons=False) }}{% endif %}
   {% else %}
   <div class="head">
     <p class="plate inline">{{ plate }}</p>

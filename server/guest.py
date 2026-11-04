@@ -16,6 +16,10 @@
 - 千人千面（故事 18，AD-11）：首页"全部藏品"、筛选与续载（`/api/pool`）按当前会话账号在快照 orders 里的顺序排
   （snapshot.View.for_account）；今日榜、单件页不变；没有本人顺序时按墨墨顺序。Mac 预览不带 orders（墨墨顺序）。
 - 快照数据（`/api/pool`）与图片（`/img/<name>`）只经会话鉴权提供（AD-6）：未登录 401、停用或待同意 403。
+- 喜欢 / 想要与阅读数（故事 31）：今日榜卡、商品池卡与单件页带"♡ 喜欢 / 想要"按钮（各自普通表单 POST /mark，带目标状态，
+  幂等；guest.js 增强为就地切换），客人页只显示「♡ N · 阅读 M」（喜欢为 0 不显示人数、阅读不到 10 不显示阅读数），
+  不显示是谁、不显示想要人数。状态存 accounts.item_marks，单件页打开时记 accounts.item_reads（同一账号同一件一次）；
+  状态真正变化才记 like / want 事件。拍卖中一栏不带按钮；墓碑页只显示数字；Mac 预览按钮不可点、不显示数字。
 """
 import html
 import logging
@@ -47,6 +51,7 @@ DEFAULT_TERMS = HERE / 'legal' / 'terms.md'
 COOKIE = 'curio_session'
 MAX_FORM = 16_384
 _ITEM_RE = re.compile(r'/item/CO-[0-9]{4,8}')
+_CODE_RE = re.compile(r'CO-[0-9]{4,8}')
 REG_FIELDS = ('invite', 'username', 'password', 'nickname', 'email', 'consent')
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; form-action 'self'; "
        "frame-ancestors 'none'; base-uri 'none'")
@@ -184,6 +189,17 @@ def money(value, cur=None, approx=False):
     return Markup(f'<span class="m"{attrs}>{inner}</span>')
 
 
+def mark_count_text(st):
+    """「♡ 3 · 阅读 12」：喜欢为 0 不显示人数，阅读不到 10 不显示阅读数（故事 31）；都不显示时为空。"""
+    st = st or {}
+    parts = []
+    if st.get('likes', 0) > 0:
+        parts.append(f'♡ {st["likes"]}')
+    if st.get('reads', 0) >= accounts.READS_MIN:
+        parts.append(f'阅读 {st["reads"]}')
+    return ' · '.join(parts)
+
+
 def updated_text(received_at):
     try:
         t = datetime.fromisoformat(received_at.replace('Z', '+00:00')).astimezone(CN_TZ)
@@ -301,7 +317,8 @@ def make_env():
     """客人页模板环境（server/templates）。Mac 预览经 server/preview.py 用同一个环境渲染。"""
     env = Environment(loader=FileSystemLoader(str(TEMPLATES)), autoescape=select_autoescape(['html']))
     env.globals.update(price_text=price_text, filter_href=filter_href, money=money, money_text=money_text,
-                       fee_labels=FEE_LABELS, auction_end_text=auction_end_text)
+                       fee_labels=FEE_LABELS, auction_end_text=auction_end_text, mark_count_text=mark_count_text,
+                       reads_min=accounts.READS_MIN)
     return env
 
 
@@ -317,10 +334,11 @@ def pool_state(view, params):
     return options, chosen, shown
 
 
-def home_page(env, view, params, cur=None, stale=False, track=False):
+def home_page(env, view, params, cur=None, stale=False, track=False, stats=None):
     """首页：今日榜 + 全部藏品（筛选、首批卡片）。cur：currency_ctx 结果（缺省欧元）。
     stale：已发布货下架检查超过 2 小时未成功（AD-10），页头下方显示状态未更新提示。
     track：行为事件的账号标记（accounts.track_tag，故事 15）；只有服务器上已登录的客人页给出，Mac 预览（AD-28）不带。
+    stats：喜欢 / 阅读数（accounts.item_stats，故事 31）；None 表示预览——按钮显示但不可点、不显示数字。
     返回 (status, html)。"""
     cur = cur or EUR_ONLY
     options, chosen, shown = pool_state(view, params)
@@ -337,30 +355,31 @@ def home_page(env, view, params, cur=None, stale=False, track=False):
                        more_href='/?' + more + '#pool', updated=updated_text(view.received_at),
                        chosen_labels={k: label_of(options, k, v) for k, v in chosen.items()},
                        filter_labels=FILTER_LABELS, cur=cur, here='/?' + filter_query(chosen) if chosen else '/',
-                       stale=stale, track=track)
+                       stale=stale, track=track, stats=stats)
 
 
-def item_view_page(env, view, code, cur=None, now=None, stale=False, track=False):
-    """单件页。now：Unix 秒，用于 90 天保留期（None 时不判）。stale、track 同 home_page。返回 (status, html)。"""
+def item_view_page(env, view, code, cur=None, now=None, stale=False, track=False, stats=None):
+    """单件页。now：Unix 秒，用于 90 天保留期（None 时不判）。stale、track、stats 同 home_page。返回 (status, html)。"""
     cur = cur or EUR_ONLY
     state = view.item_state(code, now)
     it = view.items.get(code)
     here = '/item/' + code
     if state == 'show':
         return render_page(env, 'item.html', it['title'], state=state, it=it, code=code, cur=cur, here=here,
-                           stale=stale, track=track)
+                           stale=stale, track=track, stats=stats)
     if state in ('sold', 'removed'):
         title = it['title'] if it else ('已售出' if state == 'sold' else '已移出')
-        return render_page(env, 'item.html', title, state=state, it=it, code=code, cur=cur, here=here, stale=stale, track=track)
+        return render_page(env, 'item.html', title, state=state, it=it, code=code, cur=cur, here=here, stale=stale,
+                           track=track, stats=stats)
     return render_page(env, 'item.html', '此件已不在展出', 404, state=None, it=None, code=code, cur=cur, here=here,
                        stale=stale)
 
 
-def pool_batch(env, view, params, cur=None):
+def pool_batch(env, view, params, cur=None, stats=None):
     """自动续载的下一批卡片（HTML 片段，与首页同一模板）。返回 JSON 字典。
     params.pn：页面首批所属的发布编号；与当前快照不同时 reset=True，从头给第一批（页面整列替换）。"""
     cur = cur or EUR_ONLY
-    _, _, shown = pool_state(view, params)
+    _, chosen, shown = pool_state(view, params)
     # 最多显示 MAX_SHOWN 件：到上限就停，不再给下一批（否则会反复返回同一批）。
     limit = min(len(shown), MAX_SHOWN)
     offset = _int(params.get('offset'), 0, 0, limit)
@@ -370,7 +389,9 @@ def pool_batch(env, view, params, cur=None):
         offset = 0
     batch = shown[offset:min(offset + PAGE_SIZE, limit)]
     cards = env.get_template('_pool.html').module
-    html_ = ''.join(str(cards.card(it, cur)) for it in batch)
+    q = filter_query(chosen)
+    here = '/?' + q if q else '/'
+    html_ = ''.join(str(cards.card(it, cur, stats, here)) for it in batch)
     end = offset + len(batch)
     return {'ok': True, 'html': html_, 'count': len(batch), 'shown': end, 'total': len(shown),
             'next_offset': end if end < limit else None, 'publish_no': view.publish_no, 'reset': reset}
@@ -378,7 +399,8 @@ def pool_batch(env, view, params, cur=None):
 
 def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie_secure=True,
                           public_url=None, terms_path=None, record_event=None):
-    """record_event(c, account_id, type, params, now)：服务器自己记行为事件（币种切换，故事 15）；None 时不记。"""
+    """record_event(c, account_id, type, params, now, co_code=None)：服务器自己记行为事件（币种切换，故事 15；
+    喜欢 / 想要，故事 31）；None 时不记。"""
     clock = clock or time.time
     terms_version, terms_html = load_terms(terms_path or DEFAULT_TERMS)
     env = make_env()
@@ -724,7 +746,8 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
             return denied
         _, account = current(request)
         view = load_view().for_account(account['account_id'])
-        return JSONResponse(pool_batch(env, view, request.query_params, cur_for(account, view)),
+        return JSONResponse(pool_batch(env, view, request.query_params, cur_for(account, view),
+                                       stats_for(account['account_id'])),
                             headers={'Cache-Control': 'no-store'})
 
     def stale_now():
@@ -735,16 +758,29 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         finally:
             c.close()
 
+    def stats_for(account_id, read=None):
+        """喜欢 / 阅读数与本人状态（故事 31）。read：本次打开的单件页货号，先记一次阅读（同一账号同一件只记第一次）。"""
+        c = db()
+        try:
+            if read:
+                accounts.record_read(c, account_id, read, clock())
+            return accounts.item_stats(c, account_id)
+        finally:
+            c.close()
+
     def home(params, account):
         view = load_view().for_account(account['account_id'])     # 全部藏品按本人顺序（AD-11），榜不变
         status, body = home_page(env, view, params, cur_for(account, view), stale_now(),
-                                 track=accounts.track_tag(account['account_id']))
+                                 track=accounts.track_tag(account['account_id']), stats=stats_for(account['account_id']))
         return HTMLResponse(body, status_code=status)
 
     def item_page(code, account):
         view = load_view()
-        status, body = item_view_page(env, view, code, cur_for(account, view), clock(), stale_now(),
-                                      track=accounts.track_tag(account['account_id']))
+        now = clock()
+        state = view.item_state(code, now)
+        stats = stats_for(account['account_id'], read=code if state in ('show', 'sold', 'removed') else None)
+        status, body = item_view_page(env, view, code, cur_for(account, view), now, stale_now(),
+                                      track=accounts.track_tag(account['account_id']), stats=stats)
         return HTMLResponse(body, status_code=status)
 
     @app.post('/currency')
@@ -785,6 +821,71 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
         await run_in_threadpool(work)
         if wants_json:
             return JSONResponse({'ok': True, 'currency': form['currency']}, headers={'Cache-Control': 'no-store'})
+        return RedirectResponse(next_path, status_code=303)
+
+    @app.post('/mark')
+    async def mark(request: Request):
+        """喜欢 / 想要（故事 31）：表单 code、kind（like / want）、on（1 / 0，目标状态，幂等）、next。同 POST /currency：
+        同源校验、停用 / 待同意拦截；脚本以 Accept: application/json 调用（返回本人状态与喜欢人数），不跑脚本时 303 回原页面。
+        只能对正在展出的货（单件页 state == 'show'）操作。状态真正变化才记一条 like / want 事件。"""
+        wants_json = 'application/json' in request.headers.get('accept', '')
+
+        def fail(status, detail):
+            return (JSONResponse({'ok': False, 'detail': detail}, status_code=status) if wants_json
+                    else HTMLResponse(detail, status_code=status))
+        if not same_origin(request):
+            return fail(403, '来源不符')
+        form = await read_form(request)
+        if (form is None or not _CODE_RE.fullmatch(form.get('code') or '') or form.get('kind') not in accounts.MARK_KINDS
+                or form.get('on') not in ('0', '1')):
+            return fail(400, '请求无效')
+        code, kind, on = form['code'], form['kind'], form['on'] == '1'
+        next_path = safe_next(form.get('next', '/item/' + code))
+        state, account = current(request)
+        if state != 'ok':
+            if wants_json:
+                return JSONResponse({'ok': False, 'detail': '请先登录'}, status_code=401)
+            return RedirectResponse('/login?' + urlencode({'next': next_path}), status_code=303)
+        if account['status'] == 'disabled':
+            if wants_json:
+                return JSONResponse({'ok': False, 'detail': MSG['disabled']}, status_code=403)
+            return page('disabled.html', '账号已停用', 403)
+        if consent_missing(account):
+            if wants_json:
+                return JSONResponse({'ok': False, 'detail': '无权操作'}, status_code=403)
+            return RedirectResponse(next_path, status_code=303)
+        if load_view().item_state(code, clock()) != 'show':
+            if wants_json:
+                return JSONResponse({'ok': False, 'detail': '此件已不在展出'}, status_code=404)
+            return RedirectResponse(next_path, status_code=303)
+
+        def work():
+            c = db()
+            try:
+                now = clock()
+                if accounts.set_mark(c, account['account_id'], code, kind, on, now) and record_event:
+                    # 事件没记上（限频丢弃、拒收或出错）：状态改回去，否则服务器与 Mac 账本永久不一致。
+                    try:
+                        got = record_event(c, account['account_id'], kind, {'on': on}, now, code)
+                        ok = bool(got and (got.get('accepted') or got.get('duplicates')))
+                    except Exception:
+                        log.warning('喜欢 / 想要事件未能记录', exc_info=True)
+                        ok = False
+                    if not ok:
+                        accounts.set_mark(c, account['account_id'], code, kind, not on, now)
+                        return None
+                return accounts.item_stats(c, account['account_id'], [code]).get(code) or {}
+            finally:
+                c.close()
+        st = await run_in_threadpool(work)
+        if st is None:
+            if wants_json:
+                return JSONResponse({'ok': False, 'detail': '未能保存，请稍后再试'}, status_code=503)
+            return RedirectResponse(next_path, status_code=303)
+        if wants_json:
+            return JSONResponse({'ok': True, 'code': code, 'kind': kind, 'on': on, 'likes': st.get('likes', 0),
+                                 'liked': st.get('liked', False), 'wanted': st.get('wanted', False)},
+                                headers={'Cache-Control': 'no-store'})
         return RedirectResponse(next_path, status_code=303)
 
     # ----- 客人路径（须登录）：放在最后，兜住其它所有 GET -----

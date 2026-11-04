@@ -63,6 +63,7 @@ img{display:block}
 .fsc .mono{font-size:12px;color:var(--ink)}
 .fsc.veil{visibility:hidden}
 .vis{font-size:12px;color:var(--muted);line-height:1.4;margin-top:2px;overflow-wrap:anywhere}
+.prow .mk,.rr .mk{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:2px}
 .sc{font-size:12px;color:var(--muted);line-height:1.4;overflow-wrap:anywhere}
 .sc .mono{color:var(--ink)}
 .psort{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
@@ -425,6 +426,10 @@ img{display:block}
   <ul class="glist" id="gLinked" aria-labelledby="gLinkedH"></ul>
   <h2 class="sub" id="gDisH" tabindex="-1">已停用 <span class="mono" id="gDisN"></span></h2>
   <ul class="glist" id="gDisabled" aria-labelledby="gDisH"></ul>
+  <h2 class="sub" id="gMarksH" tabindex="-1">想要 / 喜欢 <span class="mono" id="gMarksN"></span></h2>
+  <p class="gnone">客人在客人页点的「想要这件」与「♡ 喜欢」，新到旧；每轮同步后更新，客人取消后不再列出。客人页只显示喜欢人数，不显示是谁。</p>
+  <ul class="glist" id="gMarks" aria-labelledby="gMarksH"></ul>
+  <div class="empty" id="gMarksEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>还没有客人点想要或喜欢</h2></div>
 </section>
 <section id="agreeView" hidden aria-labelledby="h07">
   <h1 class="vh" id="h07" tabindex="-1">符合度</h1>

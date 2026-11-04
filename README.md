@@ -571,6 +571,7 @@ uv run python scripts/publish.py publish [--flush]            # 生成完整快�
   - 临时密码由 Mac 生成（12 位，去掉 0、1、I、O、l、o），服务器只存 Argon2id 哈希（`events` 表里为 HMAC）。Mac 只把明文放进发件箱等发送，服务器答复后 flush 立即抹掉；`guest_requests` 等表从不写明文；`scripts/outbox.py list` 只显示账号编号前 8 位与序号。后台浏览器只在确认后显示一次临时密码与「复制」，离开 06 或页面即不可再见（同一 request_id 重放不再给出明文，提示再重置一次）。
 - **邀请码**：06 顶部显示当前邀请码（最近一条已送达的 `set_invite_code`）与「更换」；更换需确认，复用 `sync.enqueue_invite`；待确认的新码后跟"待同步"，期间旧码仍有效；不合规的码就地报错。
 - 接口（本机后台，令牌 + Origin 同其它写接口；写请求带 `request_id`，表 `guest_requests` 幂等）：`GET /api/guests[?refresh=1]`、`GET /api/guests/search?q=`、`POST /api/guests/link`（action：link / relink / unlink / create）、`POST /api/guests/command`（action：disable_account / reset_password）、`POST /api/guests/invite`。
+- **想要 / 喜欢**（故事 31）：06 末尾列出客人当前点了「想要这件」或「♡ 喜欢」的货——谁（已关联的显示 GC 名与编号）、哪件、何时，来自行为账本，每轮同步后更新；见"行为数据回流 · 喜欢 / 想要与阅读数"。
 - 不在本故事：按账号排序（故事 16 起）、删除账号与撤回同意、自动匹配建议。关联、更正、解除后重算行为交接文件见下节（故事 15）。
 
 ## 综合评分（故事 27，方案 C；AD-15）
@@ -617,7 +618,7 @@ uv run python scripts/score_compare.py --set momo=50,value=30 --set trend_patter
 
 ## 行为数据回流（故事 15，CAP-15；AD-9、AD-12、AD-18、AD-25、AD-28）
 
-客人的打开、点开、停留、筛选、币种选择按账号记录，经服务器收件箱临时中转回到 Mac，成为该客人在 GoodCustomer 侧的记忆。行为数据原文不推回线上；点开与停留只在 Mac 上用于千人千面排序（故事 18，见下节），线上只收到算好的货号顺序。
+客人的打开、点开、停留、筛选、币种选择、喜欢 / 想要按账号记录，经服务器收件箱临时中转回到 Mac，成为该客人在 GoodCustomer 侧的记忆。行为数据原文不推回线上（例外：服务器为实时显示保存喜欢 / 想要的当前状态与阅读去重，见下文故事 31）；点开与停留只在 Mac 上用于千人千面排序（故事 18，见下节），线上只收到算好的货号顺序。
 
 ### 事件（契约 `contract/schemas/behavior_event.v1.schema.json`）
 
@@ -630,6 +631,8 @@ uv run python scripts/score_compare.py --set momo=50,value=30 --set trend_patter
 | `item_dwell` | 单件页隐藏或离开时（`sendBeacon`） | 货号 | `seconds`：这一段可见时长，1–1800，超过截为 1800 |
 | `filter` | 首页就地筛选改变后 | null | 改变后的所选值（同 `home_open`） |
 | `currency` | 币种切换保存到账号且值确实改变时（服务器在 `POST /currency` 里记录，脚本与无脚本表单提交都记，`event_id` 由服务器生成） | null | `currency`：`EUR` / `CNY` |
+| `like` | 喜欢 / 取消喜欢，状态确实改变时（服务器在 `POST /mark` 里记录，同 `currency`；故事 31） | 货号 | `on`：`true` 喜欢 / `false` 取消 |
+| `want` | 想要这件 / 取消想要，状态确实改变时（同 `like`） | 货号 | `on`：`true` 想要 / `false` 取消 |
 
 各类型的 `co_code` 与 `params` 写在同一文件的 `$defs.<type>`，服务器与 Mac 都先按整份、再按 `$defs.<type>` 校验（Mac 最小校验器为此支持了 `type` 列表与 `$defs`）。
 
@@ -638,6 +641,13 @@ uv run python scripts/score_compare.py --set momo=50,value=30 --set trend_patter
 - 只在服务器上已登录客人的首页与单件页运行：页面带 `data-track-page` 标记与账号标记 `data-who`（账号编号的 HMAC 前 16 位，不是账号编号；`home_page` / `item_view_page` 的 `track` 只由客人路由传入）。Mac 预览（`/preview/…`，AD-28）、停用页、待重新同意页不带标记，不生成也不上报；预览的币种切换本来就只在页内。
 - 事件先进本机队列（`localStorage` 的 `curio-events`，最多 200 条、7 天；每条带账号标记，同一设备换了账号登录时别的账号留下的未发事件直接丢掉；写回前重新读取并按 `event_id` 合并，多个标签页不互相覆盖；存储写不进时改用内存队列；单条超过 2 KB 的不入队），约 1.5 秒后每批最多 50 条 `POST /events`；网络失败或 5xx / 429 留在队列里，30 秒后或下一页再发（同一 `event_id`，服务器去重）。服务器收下、拒收（400）、未登录 / 不记录（401 / 403）的才从队列删掉。页面隐藏或离开时用 `sendBeacon`（`text/plain` 的 JSON）把队列发出——beacon 只表示浏览器接下了，事件仍留在队列里，下次 fetch 得到答复才删（重复的由服务器按 `event_id` 去掉）。
 - 从榜或商品池点开单件时在 `sessionStorage` 记下来源（按链接解析后的路径判断货号），单件页据此填 `item_open.from`；其它情况为 `link`。
+
+### 喜欢 / 想要与阅读数（故事 31）
+
+- 客人页今日榜卡、商品池卡与单件页（正在展出的）各有「♡ 喜欢」与「想要这件」，两者各自可点可取消、互不影响；拍卖中一栏不带按钮。每个按钮是普通表单 `POST /mark`（`code`、`kind` = `like` / `want`、`on` = 目标状态 1 / 0、`next`），同 `POST /currency`：同源校验，未登录 401 / 回登录页，停用 403（脚本时页内提示"此账号已停用…"，无脚本时显示停用页），待重新同意 403 / 回原页，不在展出的货 404 / 回原页；脚本以 `Accept: application/json` 调用、就地切换（先改显示，失败回滚并提示；连点时同一件同一动作只有一个请求在途，回来后与最后一次点的不同再发一次）。给的是目标状态，重复点同一状态不重复计数。
+- 服务器（`server/accounts.py`）存每个账号对每件的当前状态 `item_marks(account_id, co_code, kind, on, at)` 与阅读去重 `item_reads(account_id, co_code, first_at)`（打开单件页时记，同一账号同一件一次）——墨墨 2026-11-04 同意作为"原始行为不长期留在服务器"的例外，只存账号、货号、状态与时间。状态真正改变时才记一条 `like` / `want` 事件。刷新或换设备仍显示已点。
+- 客人页只显示「♡ N · 阅读 M」：N = 当前喜欢的账号数（为 0 不显示）、M = 打开过单件页的不同账号数（不到 10 不显示），都只数未停用的账号；不显示是谁，也不显示想要人数（只给墨墨看）。已售出 / 已移出的单件页不显示按钮，有数字时照常显示。Mac 预览（`/preview`）里按钮显示但不可点（`disabled`、不在表单里、不发请求），不显示数字。
+- Mac 端（`curio/behavior.py`）把账本里的 `like` / `want` 按 `server_ts`、`inbox_seq` 重放到每个账号、每件、每种的最后状态：06 客人页末尾「想要 / 喜欢」列出当前的（谁：已关联的显示 GC 名与编号，否则昵称，另带用户名；哪件：货号与名称；何时），新到旧，最多 300 条，取消后下一轮同步即不再列出；02 商品池与 03 榜（含拍卖榜）每行显示「♡ N · 想要 N · 阅读 N」（阅读 = 账本里点开过该件的不同账号数，按 `item_open` 去重；都为 0 不显示）。这里的阅读只数客人页脚本发出 `item_open` 的账号，客人页上的阅读数是服务器 `item_reads` 记下的单件页打开（只数未停用账号），两者可能略有出入。这一步只记录、显示，不进排序、好卖分与千人千面。
 
 ### 服务器收件箱（`server/inbox.py`，路由在 `server/app.py`）
 
@@ -664,7 +674,8 @@ uv run python scripts/score_compare.py --set momo=50,value=30 --set trend_patter
  "customer_id": "GC000123",
  "source": "curiobject",
  "accounts": [{"account_id": "…32 位…", "username": "wangjie", "nickname": "王姐"}],
- "summary": {"total": 5, "by_type": {"home_open": 1, "item_open": 1, "item_dwell": 1, "filter": 1, "currency": 1},
+ "summary": {"total": 5, "by_type": {"home_open": 1, "item_open": 1, "item_dwell": 1, "filter": 1, "currency": 1,
+                                     "like": 0, "want": 0},
              "first_server_ts": "2026-11-03T08:00:00.000Z", "last_server_ts": "2026-11-03T08:05:12.345Z"},
  "events": [{"event_id": "…", "account_id": "…", "type": "item_open", "co_code": "CO-0012", "client_ts": "…",
              "server_ts": "…", "params": {"from": "rank"}, "event_schema_version": 1}]

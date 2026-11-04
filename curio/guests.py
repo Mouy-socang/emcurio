@@ -420,12 +420,14 @@ def _rows(c, names=None):
 
 
 def view(store, gc):
-    """06 客人整页数据：三个列表、计数、当前邀请码、资料库状态、名单拉取时间与上次错误。"""
+    """06 客人整页数据：三个列表、计数、当前邀请码、资料库状态、名单拉取时间与上次错误，
+    以及当前的"想要 / 喜欢"列表（marks，故事 31）。"""
     available = gc_available(gc)
     names = {c['customer_id']: c['display_name'] for c in gc_customers(gc, include_skipped=True)} if available else {}
     with store.connect() as c:
         rows = _rows(c, names)
+        marks = behavior.marks_list(c, names)       # 故事 31：谁在什么时候想要 / 喜欢了哪件
         invite = invite_state(c)
         kv = dict(c.execute('SELECT k,v FROM kv WHERE k IN (?,?)', (sync.KV_ACCOUNTS_AT, sync.KV_ACCOUNTS_ERROR)).fetchall())
-    return dict(rows, count=len(rows['pending']), invite=invite, gc={'available': available},
+    return dict(rows, count=len(rows['pending']), invite=invite, gc={'available': available}, marks=marks,
                 pulled_at=kv.get(sync.KV_ACCOUNTS_AT), pull_error=kv.get(sync.KV_ACCOUNTS_ERROR))

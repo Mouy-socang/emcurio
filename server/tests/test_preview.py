@@ -58,6 +58,14 @@ def fresh_heartbeat(client, clock):
     assert send(client, 'heartbeat', payload).status_code == 200
 
 
+_MARKS = re.compile(r'<div class="mk" data-marks[^>]*>.*?</div>', re.S)
+
+
+def nomarks(html):
+    """故事 31：喜欢 / 想要区块按设计不同（预览里按钮不可点、无数字；客人页是表单与数字），比较时去掉。"""
+    return _MARKS.sub('', html)
+
+
 def unprefix(html):
     html = html.replace('<form method="get" action="/preview/">', preview.LOGOUT_FORM)
     return re.sub(r'(\s(?:href|src|action))="/preview/', r'\1="/', html)
@@ -72,7 +80,9 @@ def test_preview_html_matches_guest_page(client, published, path, query):
     assert out['type'] == 'html' and out['status'] == live.status_code
     # 唯一的差别：已登录客人页带行为事件标记（故事 15），预览不带（AD-28：预览不记录任何行为）。
     assert 'data-track-page' not in out['body']
-    assert unprefix(out['body']) == re.sub(r'<span hidden data-track-page="[^"]*"[^>]*></span>', '', live.text)
+    assert nomarks(unprefix(out['body'])) == nomarks(re.sub(r'<span hidden data-track-page="[^"]*"[^>]*></span>', '',
+                                                           live.text))
+    assert all('<form' not in m and 'disabled' in m for m in _MARKS.findall(out['body']))
     # 页内地址全部在预览前缀下，没有外部地址。
     assert not re.search(r'(?:href|src|action)="/(?!preview/)', out['body'])
     assert not re.search(r'https?://', out['body'])
@@ -82,7 +92,7 @@ def test_preview_pool_batch_matches_api(client, published):
     payload, received = published
     out = preview.render(payload, '/api/pool', 'offset=20', received)
     live = client.get('/api/pool?offset=20').json()
-    assert out['type'] == 'json' and unprefix(out['body']['html']) == live['html']
+    assert out['type'] == 'json' and nomarks(unprefix(out['body']['html'])) == nomarks(live['html'])
     assert {k: v for k, v in out['body'].items() if k != 'html'} == {k: v for k, v in live.items() if k != 'html'}
 
 
@@ -141,6 +151,7 @@ def test_preview_with_fee_and_fx_matches_live_page_except_local_switch(client, d
         assert '<form class="cur" method="post" action="/currency"' in live
         flat = lambda h: re.sub(r'\s+', ' ', switch.sub('', h))           # 模板分支留下的空行不算差异
         assert 'data-track-page' not in body and 'data-track-page' in live    # 故事 15：只有客人页带行为标记
-        assert flat(unprefix(body)) == flat(re.sub(r'<span hidden data-track-page="[^"]*"[^>]*></span>', '', live))
+        assert flat(nomarks(unprefix(body))) == flat(nomarks(re.sub(r'<span hidden data-track-page="[^"]*"[^>]*></span>', '',
+                                                                    live)))
     item = preview.render(payload, '/item/CO-0001', '', received)['body']
     assert '约 €42' in item and '（B 档：30cm 以下花瓶）' in item and '¥' not in item.replace('>¥<', '')

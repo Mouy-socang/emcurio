@@ -708,3 +708,104 @@
     document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') beacon(); });
   }
 })();
+
+/* 故事 31：喜欢 / 想要。只在服务器上已登录客人的页面运行（页面带 data-track-page 与 data-who）；Mac 预览里按钮是
+   disabled、不在表单里，这里也不运行。每个按钮是普通表单（POST /mark，带目标状态 on=1/0）；这里改为就地切换：
+   先改显示（同一件在页内的所有按钮一起改），再以 JSON 提交，失败回滚并提示。连点时以最后一次为准：同一件同一动作
+   同时只发一个请求，回来后若与最后一次点的不同再发一次（服务器按目标状态写，幂等）。 */
+(function () {
+  'use strict';
+  var page = document.querySelector('[data-track-page]');
+  if (!page || !page.getAttribute('data-who') || /^\/preview(\/|$)/.test(location.pathname) || !window.fetch) return;
+  var READS_MIN = 10;
+  var want = {}, server = {}, busy = {};      // 键 code|kind：最后一次点的目标状态、服务器确认的状态、是否在途
+
+  function boxes(code) {
+    return Array.prototype.filter.call(document.querySelectorAll('[data-marks]'), function (b) {
+      return b.getAttribute('data-code') === code;
+    });
+  }
+  function countText(likes, reads) {
+    var parts = [];
+    if (likes > 0) parts.push('♡ ' + likes);
+    if (reads >= READS_MIN) parts.push('阅读 ' + reads);
+    return parts.join(' · ');
+  }
+  function paint(code, kind, on, likes) {
+    boxes(code).forEach(function (box) {
+      if (likes != null) box.setAttribute('data-likes', String(likes));
+      var n = box.querySelector('[data-mk-count]');
+      if (n) n.textContent = countText(parseInt(box.getAttribute('data-likes'), 10) || 0, parseInt(box.getAttribute('data-reads'), 10) || 0);
+      var b = box.querySelector('[data-mark="' + kind + '"]');
+      if (!b) return;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      var l = b.querySelector('.mk-l'), i = b.querySelector('.mk-i');
+      if (l) l.textContent = kind === 'like' ? (on ? '已喜欢' : '喜欢') : (on ? '已想要' : '想要这件');
+      if (i) i.textContent = on ? '♥' : '♡';
+      var f = b.form;
+      if (f && f.elements.on) f.elements.on.value = on ? '0' : '1';   // 无脚本回退时提交的仍是"另一状态"
+    });
+  }
+  function note(code, text) {
+    boxes(code).forEach(function (box) {
+      var p = box.querySelector('.mk-msg');
+      if (!p) { p = document.createElement('p'); p.className = 'im mk-msg'; p.setAttribute('role', 'alert'); box.appendChild(p); }
+      p.textContent = text;
+      p.hidden = !text;
+    });
+  }
+  function likesNow(code) {
+    var b = boxes(code)[0];
+    return b ? parseInt(b.getAttribute('data-likes'), 10) || 0 : 0;
+  }
+  function send(code, kind, next) {
+    var key = code + '|' + kind;
+    if (busy[key]) return;
+    var target = want[key];
+    busy[key] = true;
+    var body = 'code=' + encodeURIComponent(code) + '&kind=' + kind + '&on=' + (target ? '1' : '0') + '&next=' + encodeURIComponent(next);
+    fetch('/mark', { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body: body
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) { return { r: r, d: d }; });
+    }).then(function (x) {
+      busy[key] = false;
+      if (!x.r.ok || !x.d.ok) {
+        rollback(code, kind);
+        // 停用（403）等：页面提示；喜欢人数回到点之前。
+        note(code, x.r.status === 403 ? (x.d.detail || '无权操作') : x.r.status === 401 ? '登录已过期，请重新登录。'
+          : x.r.status === 404 ? '此件已不在展出。' : '未能保存，请稍后再试。');
+        return;
+      }
+      server[key] = x.d.on;
+      note(code, '');
+      if (want[key] !== x.d.on) { send(code, kind, next); return; }     // 在途时又点了：按最后一次再发
+      paint(code, kind, x.d.on, x.d.likes);
+    }).catch(function () {
+      busy[key] = false;
+      rollback(code, kind);
+      note(code, '未能保存，请稍后再试。');
+    });
+  }
+  function rollback(code, kind) {           // 回到服务器确认的状态；喜欢人数按显示与确认之差改回
+    var key = code + '|' + kind, back = server[key], shown = want[key];
+    want[key] = back;
+    paint(code, kind, back, kind === 'like' && shown !== back ? Math.max(0, likesNow(code) + (back ? 1 : -1)) : null);
+  }
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!f.classList || !f.classList.contains('mk-f')) return;
+    e.preventDefault();
+    e.stopPropagation();          // 不让通用的"防重复提交"拦住下一次点按
+    var code = f.elements.code.value, kind = f.elements.kind.value, key = code + '|' + kind;
+    var b = f.querySelector('[data-mark]');
+    var cur = b ? b.getAttribute('aria-pressed') === 'true' : false;
+    if (!(key in server)) server[key] = cur;
+    var on = !cur;
+    want[key] = on;
+    var likes = kind === 'like' ? Math.max(0, likesNow(code) + (on ? 1 : -1)) : null;
+    paint(code, kind, on, likes);
+    send(code, kind, f.elements.next.value);
+  }, true);
+})();

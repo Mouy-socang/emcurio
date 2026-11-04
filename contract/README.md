@@ -26,7 +26,7 @@ contract/
 | 账号名单（`GET /admin/accounts` 的响应；只有账号编号、用户名、微信名/称呼、状态、注册时间、`account_rev`，不含邮箱与任何哈希；Mac 按 `account_id` 覆盖写，服务器没有的账号不删） | 服务器 → Mac（Mac 拉取） | `accounts_list.v1.schema.json` |
 | 图片查询（`POST /admin/images/check` 的请求 / 响应，AD-13） | Mac ⇄ 服务器 | `image_check.v1.schema.json` / `image_check_result.v1.schema.json` |
 | 图片上传确认（`PUT /admin/images/<name>` 的响应，AD-13） | 服务器 → Mac | `image_ack.v1.schema.json` |
-| 行为事件（AD-25；`event_id`、`account_id`、`type`、`co_code`、`client_ts`、`server_ts`、`params`、`event_schema_version`；v1 类型枚举 `home_open` / `item_open` / `item_dwell` / `filter` / `currency`，各类型的 `co_code` 与 `params` 在 `$defs.<type>`） | 客人页 → 服务器 → Mac | `behavior_event.v1.schema.json` |
+| 行为事件（AD-25；`event_id`、`account_id`、`type`、`co_code`、`client_ts`、`server_ts`、`params`、`event_schema_version`；v1 类型枚举 `home_open` / `item_open` / `item_dwell` / `filter` / `currency` / `like` / `want`（故事 31：喜欢 / 想要，`params.on` 为 true / false，由服务器在 `POST /mark` 状态真正变化时记录），各类型的 `co_code` 与 `params` 在 `$defs.<type>`） | 客人页 → 服务器 → Mac | `behavior_event.v1.schema.json` |
 | 行为事件上报（`POST /events` 的请求体，会话鉴权；每批最多 50 条，每条不含 `account_id`、`server_ts`，由服务器填写） | 客人页 → 服务器 | `behavior_upload.v1.schema.json` |
 | 收件箱批次（`GET /admin/inbox?after=<seq>&limit=500` 的响应；按 `inbox_seq` 升序，`more` 表示之后还有；可选 `stats`：服务器累计的 expired / rate_dropped / rejected 计数） | 服务器 → Mac（Mac 拉取） | `inbox_batch.v1.schema.json` |
 | 收件箱确认（`POST /admin/inbox/ack` 的请求 `{max_seq}`；服务器只删除 `inbox_seq ≤ max_seq` 的事件，幂等） | Mac → 服务器 | `inbox_ack.v1.schema.json` |

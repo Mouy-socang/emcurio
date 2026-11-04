@@ -378,8 +378,8 @@ def create_app(db_path=None, admin_token=None, contract_dir=None, clock=None, ma
     checker = inbox.Checker(contract)
     register_inbox_routes(app, db_path, checker, authorized, clock or time.time)
 
-    def record_event(c, account_id, type_, params, now):
-        return inbox.record(c, checker, account_id, type_, params, now)
+    def record_event(c, account_id, type_, params, now, co_code=None):
+        return inbox.record(c, checker, account_id, type_, params, now, co_code)
     # 客人路由含兜底 GET /{path}，必须最后注册。
     guest.register_guest_routes(app, db_path, connect, clock=clock, mailer=mailer, cookie_secure=cookie_secure,
                                 public_url=public_url, terms_path=terms_path, record_event=record_event)
@@ -417,7 +417,7 @@ def register_inbox_routes(app, db_path, checker, authorized, clock):
             # 停用账号（其会话已失效，这里再拦一次）与待重新同意的账号不记录。条款版本由客人路由注册时读入。
             if account['status'] != 'active' or accounts.needs_consent(c, account['account_id'], app.state.terms_version):
                 return 403, {'ok': False, 'detail': '不记录'}
-            result = inbox.receive(c, checker, account['account_id'], items, now)
+            result = inbox.receive(c, checker, account['account_id'], items, now, client=True)
         finally:
             c.close()
         status = 400 if result['rejected'] and not (result['accepted'] or result['duplicates'] or result['dropped']) else 200

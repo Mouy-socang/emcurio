@@ -187,6 +187,17 @@
     loadPool(); loadRank();
   }
 
+  // 故事 31：客人的喜欢 / 想要人数与阅读数（打开过单件页的不同账号数）；都为 0 时不显示。只看，不进排序。
+  function marksEl(c) {
+    const m = c.marks || {};
+    const parts = [];
+    if (m.likes) parts.push('♡ ' + m.likes);
+    if (m.wants) parts.push('想要 ' + m.wants);
+    if (m.reads) parts.push('阅读 ' + m.reads);
+    if (!parts.length) return null;
+    return el('p', 'mk', parts.join(' · '));
+  }
+
   /* ---------- 02 商品池 ---------- */
   function rankReason(c) {
     if (order.includes(c.code)) return null;
@@ -263,6 +274,7 @@
     body.append(code, t, p, st);
     if (when) body.append(when);
     const sc = scoreEl(c, true); if (sc) body.append(sc);
+    const mk = marksEl(c); if (mk) body.append(mk);
     // 故事 21：看图识别的功能 · 器型 · 图案。
     if (c.vision_line) body.append(el('p', 'vis', c.vision_line));
     body.append(acts);
@@ -519,6 +531,7 @@
       sel.append(w);
     }
     const sc = scoreEl(c); if (sc) sel.append(sc);
+    const mk = marksEl(c); if (mk) sel.append(mk);
     if (st.off && st.reason && !st.gone) sel.append(el('p', 'why', st.reason));
     // 故事 28：已在已发布 R12 上累计挂了几天；挂满提示天数且未售出时提示可考虑换下（不自动移出）。
     if (st.days > 0) {

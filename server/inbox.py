@@ -29,6 +29,7 @@ PULL_MAX = 500
 DWELL_MAX = 1800
 STAT_KEYS = ('expired', 'rate_dropped', 'rejected')    # 累计计数，随拉取返回给 Mac
 SERVER_KEYS = ('account_id', 'server_ts')      # 服务器填写，客户端带了也覆盖
+SERVER_ONLY_TYPES = ('like', 'want')           # 故事 31：只由 POST /mark 经 record() 记，客户端上报的拒收
 _TS_RE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z')
 _CODE_RE = re.compile(r'CO-[0-9]{4,8}')
 _ACCOUNT_RE = re.compile(r'[0-9a-f]{32}')
@@ -124,12 +125,15 @@ def purge(c, now):
     return n
 
 
-def receive(c, checker, account_id, items, now):
-    """一批上报入箱。返回 dict(accepted, duplicates, dropped, rejected=[event_id…])。"""
+def receive(c, checker, account_id, items, now, client=False):
+    """一批上报入箱。返回 dict(accepted, duplicates, dropped, rejected=[event_id…])。
+    client：客人页上报（POST /events）——like / want 只能由服务器记，客户端带来的按不合格拒收。"""
     server_ts = iso(now)
     valid, rejected = [], []
     for item in items:
         try:
+            if client and isinstance(item, dict) and item.get('type') in SERVER_ONLY_TYPES:
+                raise BadEvent('此类型只由服务器记录')
             valid.append(checker.complete(item, account_id, server_ts))
         except BadEvent:
             eid = item.get('event_id') if isinstance(item, dict) else None
@@ -173,9 +177,10 @@ def receive(c, checker, account_id, items, now):
     return {'accepted': accepted, 'duplicates': duplicates, 'dropped': dropped, 'rejected': rejected}
 
 
-def record(c, checker, account_id, type_, params, now):
-    """服务器自己记一条事件（如 POST /currency 的币种切换：不跑脚本的表单提交也要记）。event_id 由服务器生成。"""
-    item = {'event_id': str(uuid.uuid4()), 'type': type_, 'co_code': None, 'client_ts': iso(now),
+def record(c, checker, account_id, type_, params, now, co_code=None):
+    """服务器自己记一条事件（如 POST /currency 的币种切换、POST /mark 的喜欢 / 想要：不跑脚本的表单提交也要记）。
+    event_id 由服务器生成；co_code 只给带货号的类型（like / want）。"""
+    item = {'event_id': str(uuid.uuid4()), 'type': type_, 'co_code': co_code, 'client_ts': iso(now),
             'params': params, 'event_schema_version': 1}
     return receive(c, checker, account_id, [item], now)
 

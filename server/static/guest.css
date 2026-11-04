@@ -225,3 +225,17 @@ body.zl-open{overflow:hidden}
 
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 .im.stale{margin:12px 0 20px}
+
+/* 故事 31：喜欢 / 想要与「♡ N · 阅读 M」（卡片里在链接之外；单件页紧挨复制栏）。 */
+.mk{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:6px}
+.mk-f{display:contents}
+.mk-b{display:inline-flex;align-items:center;gap:2px;min-height:var(--tap);padding:0 8px;font:inherit;font-size:14px;color:var(--ink);background:none;border:1px solid var(--hair);border-radius:0;cursor:pointer;-webkit-appearance:none;appearance:none}
+.mk-b.on{background:var(--inv);color:var(--inv-ink);border-color:var(--inv)}
+.mk-b:disabled{color:var(--muted);cursor:default}
+.mk-b:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.mk-i{font-size:14px;line-height:1}
+.mk-n{font-size:14px;color:var(--muted)}
+.mk-n:empty{display:none}
+.obj>.mk{margin:0 0 14px}
+.obj>.mk .mk-b{padding:0 16px}
+.mk-msg{flex-basis:100%;margin:4px 0 0}

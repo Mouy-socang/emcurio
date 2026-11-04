@@ -1354,6 +1354,10 @@ window.curioGuests = (function () {
     filterLinked();
     fill($('gDisabled'), data.disabled, 'disabled');
     $('gDisN').textContent = data.disabled.length;
+    const marks = data.marks || [];
+    $('gMarks').replaceChildren(...marks.map(markRow));
+    $('gMarksN').textContent = marks.length;
+    $('gMarksEmpty').hidden = marks.length > 0;
     if (typing) { const q = $('gPickQ'); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
     else refocus(k);
   }
@@ -1364,6 +1368,22 @@ window.curioGuests = (function () {
     $('gFilterNone').textContent = q && !rows.length && data.linked.length ? '没有找到 ' + $('gFilter').value.trim() : '';
   }
   function fill(list, rows, kind) { list.replaceChildren(...rows.map(r => row(r, kind))); }
+  // 故事 31：谁（已关联的显示 GC 名）、想要 / 喜欢、哪件（货号 + 名称）、何时。
+  function markRow(m) {
+    const li = el('li', 'grow');
+    const n = el('p', 'gn');
+    n.append(tag(m.kind === 'want' ? '想要' : '喜欢'), ' ');
+    if (m.customer_name) n.append(m.customer_name, ' · ', el('span', 'mono', m.customer_id));
+    else {
+      n.append(m.nickname || '（名单里还没有这个账号）');
+      if (m.customer_id) n.append(' · ', el('span', 'mono', m.customer_id));
+    }
+    if (m.username) n.append(' · ', el('span', 'mono', m.username));
+    li.append(n);
+    const g = el('p', 'gm'); g.append(el('span', 'mono', m.code), m.title ? ' ' + m.title : '', ' · ' + when(m.at));
+    li.append(g);
+    return li;
+  }
   function tag(text) { return el('span', 'tag', text); }
   function row(r, kind) {
     const li = el('li', 'grow'); li.dataset.id = r.account_id;
