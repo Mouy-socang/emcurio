@@ -39,10 +39,11 @@
   }
   // 重绘后把焦点放回同一个控件（data-k = 货号:用途）。
   function keyOf() { const a = document.activeElement; return a && a.dataset ? a.dataset.k : null; }
-  function refocus(k, fallback) {
+  function refocus(k, fallback, keep) {
     if (!k) return;
     const t = document.querySelector('[data-k="' + CSS.escape(k) + '"]');
-    if (t && t.offsetParent !== null) t.focus(); else if (fallback) fallback.focus();
+    const o = keep ? {preventScroll: true} : undefined;     // keep：02 原位更新，不因移焦点滚动页面
+    if (t && t.offsetParent !== null) t.focus(o); else if (fallback) fallback.focus(o);
   }
   function disable(btn, reason, whyEl) {
     if (reason) {
@@ -89,7 +90,7 @@
   }
 
   /* ---------- 读取 ---------- */
-  async function loadPool() {
+  async function loadPool(anchor, top) {
     try {
       const d = await get('/api/pool');
       pool = d;
@@ -99,7 +100,7 @@
     } catch (e) {
       if (view === 'pool') { $('poolErr').hidden = false; shout('未能读取商品池'); }
     }
-    renderPool(); counts();
+    renderPool(anchor, top); counts();
   }
   function absorb(d) {
     d.rows.forEach(r => { cards.set(r.code, Object.assign({}, cards.get(r.code) || {}, r)); info.set(r.code, {off: r.off, gone: r.gone, reason: r.reason}); });
@@ -187,9 +188,19 @@
     t.onclick = () => openDetail(c.item_id, out ? 'new' : 'pool', t);
     return li;
   }
-  function renderPool() {
+  // 02 保持原位（故事 26）：重画前记下一行（anchor 货号，缺省为视口里第一行）离视口顶的距离（或给定的 top），
+  // 重画后把它滚回那里；处理掉一件时以下一件为锚、top 取被处理那件原来的位置，下一件就落在原处、可接着处理。
+  function anchorRow(id) {
+    const rows = document.querySelectorAll('#poolList > li, #outList > li');
+    if (id) { for (const li of rows) if (li.dataset.id === id) return li; }
+    for (const li of rows) { const r = li.getBoundingClientRect(); if (r.bottom > 0 && r.height) return li; }
+    return null;
+  }
+  function renderPool(anchor, top) {
     if (!pool) return;
     const k = keyOf();
+    const a = view === 'pool' ? anchorRow(anchor) : null;
+    const aId = a && a.dataset.id, aTop = a && (top != null && a.dataset.id === anchor ? top : a.getBoundingClientRect().top);
     $('poolN').textContent = pool.counts.kept;
     $('poolRankN').textContent = order.length;
     const list = $('poolList'); list.textContent = '';
@@ -200,7 +211,28 @@
     pool.out.forEach(c => outList.append(poolRow(c, true)));
     outList.hidden = $('outH').hidden = !pool.out.length;
     $('outN').textContent = pool.out.length;
-    refocus(k, $('h02'));
+    if (aId) {
+      const b = anchorRow(aId);
+      if (b && b.dataset.id === aId) window.scrollBy(0, b.getBoundingClientRect().top - aTop);
+    }
+    refocus(k, $('h02'), true);
+  }
+  // 操作成功后先在本地挪动这一件（移出 / 售出到下方列表，放回 / 撤销售出到商品池），读取失败时页面也不会把它放回原处。
+  function moveLocal(action, c, d) {
+    if (!pool) return;
+    const fromKept = action === 'out_of_pool' || action === 'mark_sold';
+    const src = fromKept ? pool.items : pool.out, dst = fromKept ? pool.out : pool.items;
+    const i = src.findIndex(x => x.item_id === c.item_id);
+    const row = Object.assign({}, i >= 0 ? src[i] : c, {sold: !!d.sold});
+    if (i >= 0) src.splice(i, 1);
+    if (!dst.some(x => x.item_id === c.item_id)) dst.unshift(row);
+    pool.counts.kept = pool.items.length; pool.counts.out = pool.out.length;
+  }
+  const calm = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function fadeOut(li) {
+    if (!li || calm()) return Promise.resolve();
+    li.classList.add('leaving');
+    return new Promise(r => setTimeout(r, 220));
   }
   async function poolAct(action, c, msg, btn) {
     if (btn.getAttribute('aria-busy') === 'true') return;
@@ -224,14 +256,18 @@
     const rankNote = d.left_rank ? '，并已移出榜' : '';
     const next = {out_of_pool: '已移出商品池' + rankNote, mark_sold: '已标记售出' + rankNote,
                   undo_sold: '已撤销售出', back_to_pool: '已放回商品池'}[action];
-    // 焦点：移到下一行的同一个按钮，没有则到列表标题。
+    // 原位：这一件淡出，页面以下一行为锚不跳动；焦点移到下一行的同一个按钮（不滚动），没有则到列表标题。
     const li = btn.closest('li'), sib = li && (li.nextElementSibling || li.previousElementSibling);
     const part = {out_of_pool: ':out', mark_sold: ':sold'}[action] || ':back';
     const k = sib ? sib.dataset.id + part : null;
-    await loadPool();
-    loadRank();
-    refocus(k, $('h02'));
+    const sid = sib ? sib.dataset.id : null, top = li && sib === li.nextElementSibling ? li.getBoundingClientRect().top : null;
+    await fadeOut(li);
+    moveLocal(action, c, d);
+    renderPool(sid, top); counts();
+    refocus(k, $('h02'), true);
     say(next);
+    loadPool(sid).then(() => refocus(k, $('h02'), true));
+    loadRank();
   }
 
   /* ---------- 03 榜 ---------- */
@@ -336,11 +372,11 @@
       li.append(mv);
     }
     line.addEventListener('click', e => {
-      if (e.target.closest('.hd')) return;
+      if (e.target.closest('.hd') || line.dataset.dragged) return;
       selected = selected === code ? null : code;
       renderRank(code + ':sel');
     });
-    bindDrag(hd, li, code);
+    bindDrag(hd, li, code, line);
     hd.addEventListener('keydown', e => {
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
@@ -387,9 +423,9 @@
     if (!previewing) $('btnPreview').textContent = '预览';
   }
 
-  /* ---------- 拖动：只在把手上长按（触摸与鼠标一致） ---------- */
-  function bindDrag(hd, li, code) {
-    let timer = null, start = null, pid = null, active = false, from = 0, lastY = 0, raf = 0;
+  /* ---------- 拖动：鼠标按住整行即可拖（移动超过 4px 拿起）；触摸只在把手上长按（不挡住滚动） ---------- */
+  function bindDrag(hd, li, code, line) {
+    let timer = null, start = null, pid = null, active = false, from = 0, lastY = 0, raf = 0, mouse = false;
     const mid = n => { const r = n.getBoundingClientRect(); return r.top + r.height / 2; };
     function renumber() {
       [...$('rankList').children].forEach((n, i) => { const ix = n.querySelector('.ix'); if (ix) ix.textContent = two(i + 1); });
@@ -420,40 +456,46 @@
       renderRank(code + ':hd');               // 按 order 重画：回到拿起前的位置
       say('已取消拖动，仍在第 ' + (from + 1) + ' 名');
     }
-    hd.addEventListener('pointerdown', e => {
+    function pickUp() {
+      if (!li.isConnected || pid === null) return;      // 期间列表重画过：放弃
+      active = true; dragging = true; cancelDrag = cancel; from = order.indexOf(code);
+      li.classList.add('drag');
+      say('已拿起，第 ' + (from + 1) + ' 名');
+      raf = requestAnimationFrame(tick);
+    }
+    line.addEventListener('pointerdown', e => {
       if (e.button > 0 || dragging) return;
+      mouse = e.pointerType === 'mouse';
+      const onHandle = !!e.target.closest('.hd');
+      if (!mouse && !onHandle) return;                  // 触摸在行上：留给页面滚动
       start = {x: e.clientX, y: e.clientY}; pid = e.pointerId; lastY = e.clientY;
-      try { hd.setPointerCapture(pid); } catch (err) { /* 合成事件 */ }
-      timer = setTimeout(() => {
-        timer = null;
-        if (!li.isConnected || pid === null) return;      // 期间列表重画过：放弃
-        active = true; dragging = true; cancelDrag = cancel; from = order.indexOf(code);
-        li.classList.add('drag');
-        say('已拿起，第 ' + (from + 1) + ' 名');
-        raf = requestAnimationFrame(tick);
-      }, LONG_PRESS);
+      try { line.setPointerCapture(pid); } catch (err) { /* 合成事件 */ }
+      if (!mouse) timer = setTimeout(() => { timer = null; pickUp(); }, LONG_PRESS);
     });
-    hd.addEventListener('pointermove', e => {
+    line.addEventListener('pointermove', e => {
       if (e.pointerId !== pid) return;
       if (timer) {
         if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) { clearTimeout(timer); timer = null; }
         return;
       }
+      if (!active && mouse && start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) pickUp();
       if (!active) return;
       e.preventDefault();
       lastY = e.clientY;
       reorder(lastY);
     });
-    hd.addEventListener('pointerup', e => {
+    line.addEventListener('pointerup', e => {
       if (e.pointerId !== pid || !stop()) return;
+      line.dataset.dragged = '1';                       // 吞掉拖动结束后的那次点击（不切换选中）
+      setTimeout(() => { delete line.dataset.dragged; }, 0);
       const now = [...$('rankList').children].map(n => n.dataset.code);
       if (!same(now, order)) {
         order = now; changed(code + ':hd');
         say('已放到第 ' + (now.indexOf(code) + 1) + ' 名');
       } else renderRank(code + ':hd');
     });
-    hd.addEventListener('pointercancel', e => { if (e.pointerId === pid) { if (active) cancel(); else stop(); } });
-    hd.addEventListener('lostpointercapture', e => { if (pid !== null && e.pointerId === pid) { if (active) cancel(); else stop(); } });
+    line.addEventListener('pointercancel', e => { if (e.pointerId === pid) { if (active) cancel(); else stop(); } });
+    line.addEventListener('lostpointercapture', e => { if (pid !== null && e.pointerId === pid) { if (active) cancel(); else stop(); } });
   }
 
   /* ---------- 预览 ---------- */

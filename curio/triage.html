@@ -162,6 +162,7 @@ img{display:block}
 .prow .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
 .prow.gone .th img{filter:grayscale(1);opacity:.45}
 .prow.gone .t,.prow.gone .p{color:var(--muted)}
+.prow.leaving{opacity:0;transition:opacity .2s ease-out}
 @media (min-width:768px){.scr.wide{max-width:960px}.plist.grid{display:grid;grid-template-columns:1fr 1fr;column-gap:24px}}
 
 /* 03 榜（DESIGN.md rank-row）：名次 + 缩略图 + 标题 + 右侧 44px 拖动把手；选中行展开上移 / 下移 / 移出榜 */
@@ -179,6 +180,7 @@ img{display:block}
 .hd{width:var(--tap);height:var(--tap);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:20px;background:none;border:0;color:var(--ink);cursor:grab;touch-action:none;-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
 .rr.drag{outline:2px solid var(--ink);outline-offset:-2px;position:relative;z-index:2}
 .rr.drag .hd{cursor:grabbing}
+@media (hover:hover) and (pointer:fine){.rr .line{cursor:grab;user-select:none;-webkit-user-select:none}.rr.drag .line{cursor:grabbing}}
 .mv{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 0 12px 38px}
 .mv .lnk{grid-column:1/-1;justify-self:start}
 .plate{position:absolute;left:0;top:0;background:var(--inv);color:var(--inv-ink);font-size:12px;line-height:18px;padding:0 4px;z-index:1}
