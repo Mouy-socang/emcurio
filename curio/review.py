@@ -218,6 +218,23 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                     except Exception:log.exception('发布后同步失败（下一轮采集会重试）')
                 threading.Thread(target=run_flush,daemon=True).start()
             return 200,result
+        def owner_events(self):
+            """POST /api/owner-events：墨墨在 01 的行为事件（≤100 条/批）。坏的单条丢弃并计数，不整批失败。"""
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<=150000:raise ValueError('请求过大或为空')
+                data=json.loads(self.rfile.read(length))
+                if not isinstance(data,dict):raise ValueError('请求格式无效')
+            except (ValueError,TypeError,RecursionError):      # RecursionError：嵌套过深的 JSON
+                data=None
+            sent=self.headers.get('X-Curio-Token') or (data or {}).get('token')
+            if not isinstance(sent,str) or not secrets.compare_digest(sent.encode(),token.encode()):return self.reply(403,{'error':'请刷新本机审核页后重试'})
+            if data is None:return self.reply(400,{'error':'请求格式无效'})
+            try:return self.reply(200,store.record_owner_events(data.get('events')))
+            except ValueError as e:return self.reply(400,{'error':str(e)})
+            except Exception:
+                log.exception('行为事件写入失败')
+                return self.reply(500,{'error':'未保存，请重试'})
         def _words(self):
             with store.connect() as c:return c.execute("SELECT word FROM blocked_words ORDER BY created_at").fetchall()
         def do_GET(self):
@@ -278,6 +295,12 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                     q=parse_qs(url.query)
                     num=lambda k,d:int(q.get(k,[str(d)])[0])
                     if url.path=='/api/triage':return self.reply(200,store.triage_state(num('limit',50),num('offset',0)))
+                    # 故事 22：01 瀑布流（捞回的最前，其余按上架时间；游标续载，卡片不带分数）。
+                    sess=q.get('session',[''])[0] or None
+                    if url.path=='/api/triage/feed':return self.reply(200,store.triage_feed(num('limit',40),q.get('cursor',[''])[0] or None,sess))
+                    # 「看过未选」：别的打开里看过、没留下也没放回的货；页头计数（今日已留下 · 商品池共）。
+                    if url.path=='/api/triage/seen':return self.reply(200,store.seen_unpicked(num('limit',40),q.get('cursor',[''])[0] or None,sess))
+                    if url.path=='/api/triage/header':return self.reply(200,store.feed_header())
                     if url.path=='/api/triage/auto-removed':return self.reply(200,store.auto_removed_list(num('limit',50),num('offset',0)))
                     if url.path=='/api/triage/item':
                         iid=q.get('id',[''])[0];d=store.item_detail(iid,root)
@@ -312,8 +335,10 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
             origin=self.headers.get('Origin')
             # tailscale serve 反代时浏览器的 Host 可能出现在 X-Forwarded-Host（只信本机对端给的 *.ts.net）。
             hosts={h.lower() for h in (self.headers.get('Host'),self._forwarded_host()) if h}
-            if self.headers.get('X-Curio-Token')!=token or (origin and urlparse(origin).netloc.lower() not in hosts):
-                return self.reply(403,{'error':'请刷新本机审核页后重试'})
+            if origin and urlparse(origin).netloc.lower() not in hosts:return self.reply(403,{'error':'请刷新本机审核页后重试'})
+            # 故事 22：行为上报在页面离开时用 sendBeacon 补发（不能带自定义请求头），令牌也可放在请求体的 token 字段。
+            if self.path=='/api/owner-events':return self.owner_events()
+            if self.headers.get('X-Curio-Token')!=token:return self.reply(403,{'error':'请刷新本机审核页后重试'})
             if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/guests/link','/api/guests/command','/api/guests/invite','/api/match/decide','/api/rules/decide','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
             try:
                 length=int(self.headers.get('Content-Length','0'))

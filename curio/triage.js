@@ -1,16 +1,19 @@
-/* 后台 01 新货（故事 7，CAP-6）：拣选卡、手势与键盘、乐观写入与重试、撤销、已自动移出、货详情与放大层。
+/* 后台 01 新货（故事 7，CAP-6；故事 22 改为瀑布流）：多列大图卡片、往下滑续载（游标）、卡上留下 / 去掉、
+   乐观写入与行内重试、撤销、已自动移出、货详情与放大层；以及墨墨的行为记录（看到、停留、点开详情及详情停留）。
    原生 JS，无构建、无外部库。所有写请求带 X-Curio-Token；留下 / 去掉 / 捞回 / 撤销带 request_id（服务端幂等）。 */
 'use strict';
 const $ = id => document.getElementById(id);
 const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const rid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2);
 const LABEL = {keep: '留下', remove: '去掉'};
+const FEED_BATCH = 40;
 
-let queue = [];            // 本地新货队列，queue[0] 为当前卡片
-const handled = new Set(); // 本地已留下 / 去掉（含未确认）的货，补货时排除
-const failed = new Map();  // request_id -> {action, item}：写入失败、待重试
+const cards = new Map();   // item_id -> {card, li}：瀑布流里的卡片（含正在淡出、尚未确认的）
+const handled = new Set(); // 本地已留下 / 去掉（含未确认）的货，续载时排除
+const failed = new Map();  // request_id -> {action, id}：写入失败、待重试
 let newCount = null, arCount = null, inflight = 0, chain = Promise.resolve();
-let flying = false, undoRetryRid = null, loadingMore = false, writes = 0, undoBusy = false;
+let undoRetryRid = null, undoBusy = false;
+let cursor = null, more = true, feedLoading = false, feedGen = 0, feedLoaded = false;
 
 /* ---------- 网络 ---------- */
 async function post(path, body) {
@@ -30,7 +33,7 @@ async function get(path) {
 }
 // 写请求按顺序发出：撤销总是作用于之前已发出的动作。
 function send(body) {
-  inflight++; writes++;
+  inflight++;
   const p = chain.then(() => post('/api/triage/action', body));
   chain = p.catch(() => {});
   return p.finally(() => { inflight--; });
@@ -45,11 +48,11 @@ function setNet(on) { $('net').hidden = !on; }
 function updateFail() {
   $('failN').textContent = failed.size;
   const hide = failed.size === 0;
-  if (hide && document.activeElement === $('retry')) $('btnKeep').focus();
+  if (hide && document.activeElement === $('retry')) $('undo').focus();
   $('fail').hidden = hide;
 }
 
-/* ---------- 刷货卡 ---------- */
+/* ---------- 瀑布流卡片 ---------- */
 function setLang(el, lang) { if (lang) el.setAttribute('lang', lang); else el.removeAttribute('lang'); }
 function tagEl(text) {
   const s = document.createElement('span'); s.className = 'tag';
@@ -57,125 +60,226 @@ function tagEl(text) {
   else s.textContent = text;
   return s;
 }
-function scoreText(c) { return c.score == null ? '暂无分数' : '分数 ' + c.score + (c.score_reason ? ' · ' + c.score_reason : ''); }
 function counts() {
   $('cNew').textContent = newCount == null ? '—' : newCount;
   $('arN').textContent = arCount == null ? '—' : arCount;
   $('arN2').textContent = arCount == null ? '' : arCount;
+  $('seenN').textContent = seenCount == null ? '—' : seenCount;
+  $('seenN2').textContent = seenCount == null ? '' : seenCount;
+  $('emptySeenN').textContent = seenCount == null ? '' : seenCount;
+  $('emptySeen').hidden = !(seenCount > 0);
 }
-function render() {
-  counts();
-  const c = queue[0], empty = !c;
-  $('card').hidden = empty; $('under').hidden = empty || queue.length < 2; $('empty').hidden = !empty || newCount == null;
-  for (const b of [$('btnKeep'), $('btnRemove')]) { if (empty) b.setAttribute('aria-disabled', 'true'); else b.removeAttribute('aria-disabled'); }
-  if (empty) return;
-  const name = $('name'); name.textContent = '';
-  const t = document.createElement('span'); t.textContent = c.name; setLang(t, c.name_lang); name.append(t);
-  (c.tags || []).forEach(x => name.append(tagEl(x)));
-  $('price').textContent = c.price;
-  $('src').textContent = '来源 ' + c.platform;
-  $('score').textContent = scoreText(c);
-  $('ph').setAttribute('aria-label', c.name + '，打开货详情');
-  const img = $('img');
-  if (c.image) { img.src = c.image; img.hidden = false; } else { img.removeAttribute('src'); img.hidden = true; }
-  $('card').style.transform = '';
+function cardEl(c) {
+  const li = document.createElement('li'); li.className = 'fc'; li.dataset.id = c.item_id;
+  const ph = document.createElement('button'); ph.type = 'button'; ph.className = 'fph'; ph.setAttribute('aria-label', c.name + '，打开货详情');
+  if (c.image) {
+    const im = document.createElement('img'); im.alt = ''; im.loading = 'lazy'; im.decoding = 'async';
+    // 图片按原比例显示（夹在 3:5–5:3 之间，避免极端长图）；加载前用 4:5 占位，加载后重新排版。
+    im.onload = () => { const r = im.naturalWidth / im.naturalHeight; if (r > 0) ph.style.aspectRatio = String(Math.min(5 / 3, Math.max(0.6, r))); layoutSoon(); };
+    im.onerror = () => { im.remove(); ph.classList.add('noimg'); ph.textContent = '图片未能加载'; layoutSoon(); };
+    im.src = c.image; ph.append(im);
+  } else { ph.classList.add('noimg'); ph.textContent = '暂无图片'; }
+  const meta = document.createElement('div'); meta.className = 'fmeta';
+  const h = document.createElement('h2'); const t = document.createElement('span'); t.textContent = c.name; setLang(t, c.name_lang); h.append(t);
+  (c.tags || []).forEach(x => h.append(tagEl(x)));
+  const pr = document.createElement('p'); pr.className = 'fpr'; const pm = document.createElement('span'); pm.className = 'mono'; pm.textContent = c.price; pr.append(pm);
+  const src = document.createElement('p'); src.className = 'fsrc'; src.textContent = c.platform;
+  if (c.code) { src.append(' · '); const cd = document.createElement('span'); cd.className = 'mono'; cd.textContent = c.code; src.append(cd); }
+  meta.append(h, pr, src);
+  const acts = document.createElement('div'); acts.className = 'facts';
+  const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn'; rm.dataset.act = 'remove'; rm.textContent = '去掉';
+  const kp = document.createElement('button'); kp.type = 'button'; kp.className = 'btn primary'; kp.dataset.act = 'keep'; kp.textContent = '留下';
+  rm.setAttribute('aria-label', '去掉 ' + c.name); kp.setAttribute('aria-label', '留下 ' + c.name);
+  acts.append(rm, kp);
+  const msg = document.createElement('p'); msg.className = 'im fmsg'; msg.hidden = true;
+  li.append(ph, meta, acts, msg);
+  ph.onclick = () => openDetail(c.item_id, 'new', ph);
+  rm.onclick = () => act('remove', c.item_id);
+  kp.onclick = () => act('keep', c.item_id);
+  return li;
+}
+// 放进瀑布流：front=true 放最前（捞回、撤销回来的货），否则接在末尾（续载）。
+function addCard(c, front) {
+  const old = cards.get(c.item_id);
+  if (old) { old.li.remove(); beh.unwatch(old.li); }
+  const li = cardEl(c);
+  cards.set(c.item_id, {card: c, li});
+  if (front) $('feed').prepend(li); else $('feed').append(li);
+  beh.watch(li);
+  layoutSoon();
+  return li;
+}
+function dropCard(id) {
+  const e = cards.get(id); if (!e) return;
+  cards.delete(id); beh.unwatch(e.li); e.li.remove(); layoutSoon();
+}
+// 卡片淡出（留下 / 去掉后），淡出后不占位；写入确认前仍留在 DOM，失败时原位放回。
+function fadeOut(li) {
+  li.classList.add('out');
+  const done = () => { if (li.classList.contains('out')) { li.hidden = true; layoutSoon(); } };
+  if (reduced()) done(); else setTimeout(done, 240);
+}
+function fadeIn(li) { li.classList.remove('out'); li.hidden = false; layoutSoon(); }
+function visibleCards() { return [...$('feed').children].filter(li => !li.hidden && !li.classList.contains('out')); }
+function updateEmpty() {
+  $('empty').hidden = !(feedLoaded && !more && !visibleCards().length && $('loadErr').hidden);
+  $('emptySeen').hidden = !(seenCount > 0);      // 还有看过未选的货：空状态里给入口
 }
 
-async function load() {
+/* 排版：DOM 顺序 = 阅读顺序 = Tab 顺序；按顺序依次放入当前较短的一列（不用 CSS columns，免得打乱顺序）。 */
+let layoutPending = false;
+function layoutSoon() {
+  if (layoutPending) return;
+  layoutPending = true;
+  requestAnimationFrame(() => { layoutPending = false; layout(); });
+}
+function layout() {
+  const feed = $('feed'), w = feed.clientWidth;
+  if (!w) return;
+  const n = w >= 900 ? 4 : w >= 600 ? 3 : 2, gap = w >= 600 ? 20 : 12, cw = (w - gap * (n - 1)) / n;
+  const hs = new Array(n).fill(0);
+  for (const li of feed.children) {
+    if (li.hidden) continue;
+    li.style.width = cw + 'px';
+    const k = hs.indexOf(Math.min(...hs));
+    li.style.left = k * (cw + gap) + 'px'; li.style.top = hs[k] + 'px';
+    hs[k] += li.offsetHeight + gap + 8;
+  }
+  feed.style.height = Math.max(0, ...hs) + 'px';
+  updateEmpty();
+  nearEnd();
+}
+// 末尾已接近可视区时续载（含删掉卡片后页面变短的情况）。
+function nearEnd() {
+  if (!more || feedLoading || $('triageView').hidden || !$('loadErr').hidden) return;
+  if ($('feedEnd').getBoundingClientRect().top < window.innerHeight + 800) loadMore();
+}
+
+async function loadMore() {
+  if (feedLoading || !more) return false;
+  feedLoading = true;
+  const gen = feedGen;
+  $('feedMore').hidden = false; $('loadErr').hidden = true;
   try {
-    const d = await get('/api/triage?limit=50');
-    queue = d.queue.filter(c => !handled.has(c.item_id));
-    newCount = d.counts.new; arCount = d.counts.auto_removed;
-    $('loadErr').hidden = true;
-    render();
+    const d = await get('/api/triage/feed?limit=' + FEED_BATCH + '&session=' + encodeURIComponent(beh.session() || '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+    if (gen !== feedGen) return false;
+    showHeader(d.header); seenCount = d.counts.seen; counts();
+    d.items.forEach(c => { if (!cards.has(c.item_id) && !handled.has(c.item_id)) addCard(c, false); });
+    cursor = d.next_cursor; more = !!cursor; feedLoaded = true;
+    // 有写入在路上或未保存时，这份计数可能已过时，不采用。
+    if (!inflight && !failed.size) { newCount = d.counts.new; arCount = d.counts.auto_removed; }
+    counts();
     return true;
   } catch (e) {
-    $('loadErr').hidden = false; shout('未能读取新货');
+    if (gen === feedGen) { $('loadErr').hidden = false; shout('未能加载新货'); }
     return false;
+  } finally {
+    if (gen === feedGen) { feedLoading = false; $('feedMore').hidden = true; layoutSoon(); }
   }
 }
-async function topUp() {
-  if (loadingMore || queue.length >= 5) return;
-  loadingMore = true;
-  const w = writes, idle = !inflight;
-  try {
-    const d = await get('/api/triage?limit=50');
-    const have = new Set(queue.map(c => c.item_id));
-    const wasEmpty = !queue.length;
-    d.queue.forEach(c => { if (!handled.has(c.item_id) && !have.has(c.item_id)) queue.push(c); });
-    // 读取期间有写入发出时，这份计数可能已过时，不采用。
-    if (idle && !inflight && !failed.size && w === writes) { newCount = d.counts.new; arCount = d.counts.auto_removed; }
-    if (wasEmpty) render(); else counts();
-  } catch (e) {
-    if (!queue.length && newCount > 0) { $('loadErr').hidden = false; render(); shout('未能读取新货'); }
-  } finally { loadingMore = false; }
+// 从头重新读取瀑布流（重试、网络恢复）。
+function load() {
+  feedGen++; feedLoading = false; cursor = null; more = true;
+  for (const id of [...cards.keys()]) if (!handled.has(id)) dropCard(id);
+  return loadMore();
+}
+function reloadFeed() { return feedLoaded || cards.size ? loadMore() : load(); }
+
+/* 页头"今日已留下 N 件 · 商品池共 M 件"（故事 22）：读瀑布流时带回；留下 / 去掉 / 撤销 / 捞回写入后稍等再读一次。 */
+let seenCount = null, headerTimer = null;
+function showHeader(h) { if (!h) return; $('kToday').textContent = h.kept_today; $('kPool').textContent = h.pool; }
+function refreshHeader() {
+  clearTimeout(headerTimer);
+  headerTimer = setTimeout(async () => { try { showHeader(await get('/api/triage/header')); } catch (e) { /* 下次再读 */ } }, 400);
 }
 function sync(d) {
-  if (!inflight && !failed.size && d.remaining != null) { newCount = d.remaining; arCount = d.auto_removed; counts(); }
+  refreshHeader();
+  // 01 计数 = 瀑布流能看到的件数：服务端的新货件数减去「看过即不要」排除的。
+  if (!inflight && !failed.size && d.remaining != null) { newCount = Math.max(0, d.remaining - (seenCount || 0)); arCount = d.auto_removed; counts(); }
+}
+function cardMsg(id, text, retryRid) {
+  const e = cards.get(id); if (!e) return;
+  const m = e.li.querySelector('.fmsg'); m.textContent = text;
+  if (retryRid) {
+    m.append(' · ');
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'lnk lnk-pad'; b.textContent = '重试';
+    b.onclick = () => retryOne(retryRid); m.append(b);
+  }
+  m.hidden = false; layoutSoon();
+}
+function clearCardMsg(id) { const e = cards.get(id); if (e) { e.li.querySelector('.fmsg').hidden = true; } }
+// 处理后焦点去处：原卡片之后那张卡的同一个按钮；没有则"撤销上一步"。
+function nextFocus(li, which) {
+  let n = li.nextElementSibling;
+  while (n && (n.hidden || n.classList.contains('out'))) n = n.nextElementSibling;
+  if (!n) { n = li.previousElementSibling; while (n && (n.hidden || n.classList.contains('out'))) n = n.previousElementSibling; }
+  return n ? n.querySelector('[data-act="' + which + '"]') : $('undo');
 }
 
-function act(action, expectId) {
-  if (!queue.length || flying) return;
-  if (expectId && queue[0].item_id !== expectId) return;
+function act(action, id) {
+  const e = cards.get(id);
+  if (!e || e.li.classList.contains('out')) return;
   hideMsg();
-  const item = queue.shift();
-  handled.add(item.item_id);
-  for (const [k, f] of failed) if (f.item.item_id === item.item_id) failed.delete(k);  // 重新处理：旧的未保存动作作废
-  updateFail();
-  newCount = Math.max(0, (newCount || 0) - 1);
-  render();
+  for (const [k, f] of failed) if (f.id === id) failed.delete(k);  // 重新处理：旧的未保存动作作废
+  updateFail(); clearCardMsg(id);
+  const hadFocus = e.li.contains(document.activeElement);
+  const target = hadFocus ? nextFocus(e.li, action) : null;
+  handled.add(id);
+  fadeOut(e.li);
+  if (target) target.focus();
+  newCount = Math.max(0, (newCount || 0) - 1); counts();
   say('已' + LABEL[action] + '，剩余 ' + newCount + ' 件');
-  dispatch(action, item, rid());
-  if (queue.length < 5) topUp();
+  dispatch(action, id, rid());
 }
-function markFailed(action, item, r, network) {
-  failed.set(r, {action, item});
-  if (!queue.some(c => c.item_id === item.item_id)) { queue.unshift(item); newCount = (newCount || 0) + 1; }
-  handled.delete(item.item_id);
-  render(); updateFail();
+function markFailed(action, id, r, network) {
+  failed.set(r, {action, id});
+  const e = cards.get(id);
+  if (e && handled.has(id)) { handled.delete(id); fadeIn(e.li); newCount = (newCount || 0) + 1; counts(); }
+  cardMsg(id, '未保存', r);
+  updateFail();
   if (network) setNet(true);
   shout(failed.size + ' 件未保存');
 }
-// 服务端拒绝（4xx）：该件没有被处理，放回队首、计数加回。
-function restore(item) {
-  handled.delete(item.item_id);
-  if (!queue.some(c => c.item_id === item.item_id)) { queue.unshift(item); newCount = (newCount || 0) + 1; }
-  render();
+// 服务端拒绝（4xx）：该件没有被处理，原位放回、计数加回。
+function restore(id, text) {
+  const e = cards.get(id);
+  if (e && handled.has(id)) { fadeIn(e.li); newCount = (newCount || 0) + 1; counts(); }
+  handled.delete(id);
+  cardMsg(id, text);
 }
-async function dispatch(action, item, r) {
+async function dispatch(action, id, r) {
   try {
-    const res = await send({action, item_id: item.item_id, request_id: r});
-    if (res.ok) { failed.delete(r); updateFail(); setNet(false); sync(res.data); return true; }
-    if (res.status >= 500) { markFailed(action, item, r, false); return false; }
+    const res = await send({action, item_id: id, request_id: r});
+    if (res.ok) {
+      failed.delete(r); updateFail(); setNet(false);
+      if (handled.has(id)) dropCard(id);
+      sync(res.data); return true;
+    }
+    if (res.status >= 500) { markFailed(action, id, r, false); return false; }
     failed.delete(r); updateFail();
-    restore(item);
-    showMsg('未保存：' + (res.data.error || '请刷新本页后重试')); shout('未保存');
+    restore(id, '未保存：' + (res.data.error || '请刷新本页后重试')); shout('未保存');
     return false;
-  } catch (e) { markFailed(action, item, r, true); return false; }
+  } catch (e) { markFailed(action, id, r, true); return false; }
+}
+// 重试一件：同一 request_id 重发（服务端幂等），卡片先淡出。
+function retryOne(r) {
+  const f = failed.get(r); if (!f) return Promise.resolve(true);
+  const e = cards.get(f.id);
+  if (e && !handled.has(f.id)) {
+    const hadFocus = e.li.contains(document.activeElement), target = hadFocus ? nextFocus(e.li, f.action) : null;
+    handled.add(f.id); clearCardMsg(f.id); fadeOut(e.li); if (target) target.focus();
+    newCount = Math.max(0, (newCount || 0) - 1); counts();
+  }
+  failed.delete(r); updateFail();
+  return dispatch(f.action, f.id, r);
 }
 async function retry() {
-  const entries = [...failed.entries()];
-  let net = false;
-  for (const [r, f] of entries) {
-    if (!failed.has(r)) continue;  // 期间已重新处理这件：旧动作作废，不覆盖新动作
-    try {
-      const res = await send({action: f.action, item_id: f.item.item_id, request_id: r});
-      if (res.ok || res.status < 500) {
-        failed.delete(r);
-        const i = queue.findIndex(c => c.item_id === f.item.item_id);
-        if (i >= 0 && res.ok) { queue.splice(i, 1); handled.add(f.item.item_id); newCount = Math.max(0, newCount - 1); }
-        if (!res.ok) { restore(f.item); showMsg('未保存：' + (res.data.error || '请刷新本页后重试')); }
-        else sync(res.data);
-      }
-    } catch (e) { net = true; }
-  }
-  render(); updateFail();
-  if (!failed.size && !net) { setNet(false); say('已保存'); }
-  else { if (net) setNet(true); shout(failed.size + ' 件未保存'); }
+  const results = await Promise.all([...failed.keys()].map(retryOne));
+  if (results.every(Boolean)) { setNet(false); say('已保存'); }
 }
 async function netRetry() {
   if (failed.size) return retry();
-  if (await load()) setNet(false);
+  if (await reloadFeed()) setNet(false);
 }
 
 async function undo() {
@@ -195,68 +299,161 @@ async function undoOnce() {
   undoRetryRid = null;
   if (!res.ok) { showMsg(res.data.error || '没有可撤销的操作'); say(res.data.error || '没有可撤销的操作'); return; }
   const d = res.data, c = d.card;
-  const id = c ? c.item_id : d.item_id, had = queue.some(x => x.item_id === id);
-  queue = queue.filter(x => x.item_id !== id);
+  const id = c ? c.item_id : d.item_id, e = cards.get(id);
+  const had = !!e && !handled.has(id);
   if (d.state === 'new' && c) {
-    queue.unshift(c); handled.delete(id);
+    // 回到新货：放在瀑布流最前。
+    handled.delete(id);
+    addCard(c, true);
     if (!had) newCount = (newCount || 0) + 1;
   } else {
-    // 撤销后不在新货（如撤销捞回 → 自动移出、撤销去掉 → 留下）：从本地队列拿掉
+    // 撤销后不在新货（如撤销捞回 → 自动移出、撤销去掉 → 留下）：从瀑布流拿掉
     if (had) newCount = Math.max(0, (newCount || 0) - 1);
+    if (e) dropCard(id);
     if (d.state === 'auto_removed') arCount = (arCount || 0) + 1;
   }
-  sync(d);
-  render();
+  sync(d); counts(); updateEmpty();
   const text = '已撤销，回到 ' + (c ? c.name : '上一步');
   showMsg(text); say(text);
 }
 
-/* ---------- 手势：右滑留下、左滑去掉 ---------- */
-(function swipe() {
-  const card = $('card');
-  let start = null, dragging = false, suppress = false, samples = [];
-  card.addEventListener('pointerdown', e => {
-    if (!e.isPrimary || e.button > 0 || flying || !queue.length) return;
-    start = {x: e.clientX, y: e.clientY, id: e.pointerId}; dragging = false;
-    samples = [{x: e.clientX, t: e.timeStamp}];
-  });
-  card.addEventListener('pointermove', e => {
-    if (!start || e.pointerId !== start.id) return;
-    const dx = e.clientX - start.x, dy = e.clientY - start.y;
-    if (!dragging) {
-      if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) { dragging = true; try { card.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件无活动指针 */ } }
-      else if (Math.abs(dy) > 8) { start = null; return; }
-      else return;
-    }
-    samples.push({x: e.clientX, t: e.timeStamp}); if (samples.length > 20) samples.shift();
-    if (!reduced()) card.style.transform = 'translateX(' + dx + 'px) rotate(' + (dx * 0.03) + 'deg)';
-  });
-  function end(e, cancel) {
-    if (!start || e.pointerId !== start.id) return;
-    const dx = e.clientX - start.x; start = null;
-    if (!dragging) return;
-    dragging = false; suppress = true; setTimeout(() => { suppress = false; }, 0);
-    const w = card.offsetWidth || 1;
-    // 甩动速度：取最近 100ms 内的位移（至少按 16ms 计），避免单个采样的抖动。
-    const last = samples[samples.length - 1], old = samples.find(p => p.t >= last.t - 100) || last;
-    const v = (last.x - old.x) / Math.max(16, last.t - old.t);  // px/ms
-    const fling = Math.abs(v) > 0.6 && Math.abs(dx) > 40 && Math.sign(v) === Math.sign(dx);
-    if (!cancel && (Math.abs(dx) > w * 0.35 || fling)) {
-      const action = dx > 0 ? 'keep' : 'remove', target = queue[0] && queue[0].item_id;
-      if (reduced()) { card.style.transform = ''; act(action, target); return; }
-      flying = true; card.classList.add('fly');
-      card.style.transform = 'translateX(' + (dx > 0 ? 1.3 : -1.3) * w + 'px) rotate(' + (dx > 0 ? 8 : -8) + 'deg)';
-      setTimeout(() => { card.classList.remove('fly'); card.style.transform = ''; flying = false; act(action, target); }, 180);
-    } else if (reduced()) card.style.transform = '';
-    else {
-      card.classList.add('back'); card.style.transform = '';
-      setTimeout(() => card.classList.remove('back'), 220);
+/* ---------- 行为记录（故事 22）：只在本机 curio.db（owner_events），不上线、不进 GoodCustomer ----------
+   seen：卡片 ≥50% 进入视口且持续 ≥0.6 秒，每件每次打开 01 记一次；
+   dwell：卡片 ≥50% 在视口内的一段停留秒数，离开视口、页面隐藏或打开详情时上报（短于 0.6 秒的不报；服务端截到 1–600）；
+   open：从瀑布流打开详情；detail_dwell：详情停留秒数，关闭时上报（页面隐藏时先报已停留的部分；服务端截到 1–1800）。
+   留下 / 去掉不在这里记（以 triage_events 为准）。每批 ≤100 条；失败的留在页内队列下次重发；页面离开时 sendBeacon 补发。 */
+const beh = (function () {
+  const MAX_Q = 2000, BATCH = 100, SEEN_MS = 600, MIN_DWELL = 0.6;
+  const q = [];
+  let session = null, seen = new Set(), sending = null, stopped = false, flushTimer = null, paused = false, detailOpen = null;
+  const since = new Map(), timers = new Map();
+  const io = 'IntersectionObserver' in window ? new IntersectionObserver(onIo, {threshold: [0, 0.5]}) : null;
+  function push(type, id, params) {
+    if (!session) return;
+    q.push({event_id: rid(), type, item_id: id, client_ts: new Date().toISOString(), session_id: session, params: params || null});
+    if (q.length > MAX_Q) q.splice(0, q.length - MAX_Q);
+    if (q.length >= 20) flush(); else schedule();
+  }
+  function schedule(ms) { if (!flushTimer) flushTimer = setTimeout(() => { flushTimer = null; flush(); }, ms || 5000); }
+  function take(batch) { const s = new Set(batch); for (let i = q.length - 1; i >= 0; i--) if (s.has(q[i])) q.splice(i, 1); }
+  // 发一批；已有一批在路上时返回那一批的 promise（flushAll 可等它）。结果 true = 这批已入库或已丢弃。
+  function flush() {
+    if (sending) return sending;
+    if (!q.length || stopped) return Promise.resolve(!q.length);
+    sending = (async () => {
+      const batch = q.slice(0, BATCH);
+      try {
+        const res = await post('/api/owner-events', {events: batch});
+        // 400：整批格式不对，重发也不会好，丢掉；403：令牌已失效（后台重启过），停止重发并提示刷新；5xx：稍后重发。
+        if (res.ok || res.status === 400) { take(batch); return true; }
+        if (res.status === 403) { stopped = true; showMsg(res.data.error || '请刷新本机审核页后重试'); return false; }
+      } catch (e) { /* 网络失败：留在队列里 */ }
+      return false;
+    })();
+    sending.then(ok => {
+      sending = null;
+      if (ok && q.length) schedule(0); else if (!ok && !stopped) schedule(30000);
+    });
+    return sending;
+  }
+  function beacon() {
+    if (!navigator.sendBeacon) return;
+    while (q.length) {
+      const batch = q.slice(0, BATCH);
+      // sendBeacon 不能带自定义请求头：令牌放在请求体（服务端同样校验令牌与 Origin）。
+      if (!navigator.sendBeacon('/api/owner-events', JSON.stringify({token, events: batch}))) break;
+      take(batch);
     }
   }
-  card.addEventListener('pointerup', e => end(e, false));
-  card.addEventListener('pointercancel', e => end(e, true));
-  $('ph').addEventListener('click', e => { if (suppress) { e.preventDefault(); return; } if (queue[0]) openDetail(queue[0].item_id, 'new', $('ph')); });
+  function onIo(entries) {
+    const t = performance.now();
+    for (const en of entries) {
+      const id = en.target.dataset.id; if (!id) continue;
+      // 比视口高两倍以上的卡片到不了 50%：可见部分占视口一半以上也算。
+      const big = en.intersectionRect.height >= 0.5 * window.innerHeight;
+      if (en.isIntersecting && (en.intersectionRatio >= 0.5 || big) && !en.target.hidden) enter(id, t); else leave(id, t);
+    }
+  }
+  function enter(id, t) {
+    if (paused || document.hidden || since.has(id)) return;
+    since.set(id, t);
+    if (!seen.has(id) && !timers.has(id)) {
+      timers.set(id, setTimeout(() => {
+        timers.delete(id);
+        if (since.has(id) && !seen.has(id)) { seen.add(id); push('seen', id); }
+      }, SEEN_MS));
+    }
+  }
+  function leave(id, t) {
+    clearTimeout(timers.get(id)); timers.delete(id);
+    const s = since.get(id); if (s == null) return;
+    since.delete(id);
+    const sec = (t - s) / 1000;
+    if (sec >= MIN_DWELL) push('dwell', id, {seconds: Math.round(sec * 10) / 10});
+  }
+  function leaveAll() { const t = performance.now(); for (const id of [...since.keys()]) leave(id, t); for (const [id, h] of timers) { clearTimeout(h); timers.delete(id); } }
+  // 重新观察所有卡片：IntersectionObserver 对新观察的元素立即回报一次当前可见情况。
+  function rewatch() { if (!io) return; for (const li of $('feed').children) { io.unobserve(li); io.observe(li); } }
+  function pause() { leaveAll(); paused = true; }
+  function resume() { paused = false; if (!document.hidden) rewatch(); }
+  function detailSecs() { return detailOpen && detailOpen.t != null ? (performance.now() - detailOpen.t) / 1000 : null; }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      leaveAll();
+      const s = detailSecs(); if (s != null) { push('detail_dwell', detailOpen.id, {seconds: Math.round(s * 10) / 10}); detailOpen.t = null; }
+      beacon();
+    } else {
+      if (detailOpen) detailOpen.t = performance.now();
+      if (!paused) rewatch();
+      if (q.length) schedule(1000);
+    }
+  });
+  window.addEventListener('pagehide', () => {
+    leaveAll();
+    const s = detailSecs(); if (s != null) { push('detail_dwell', detailOpen.id, {seconds: Math.round(s * 10) / 10}); detailOpen.t = null; }
+    beacon();
+  });
+  // 从往返缓存（bfcache）恢复：详情开着则重新计时（关闭时照常恢复记录），否则恢复记录并重新观察卡片。
+  window.addEventListener('pageshow', e => {
+    if (!e.persisted) return;
+    if (detailOpen) detailOpen.t = performance.now();
+    else { paused = false; rewatch(); }
+  });
+  return {
+    // 每次打开 01 生成新的 session_id；"看到"按本次打开去重。
+    start() { leaveAll(); session = rid(); seen = new Set(); rewatch(); },
+    watch(li) { if (io) io.observe(li); },
+    unwatch(li) { if (io) { io.unobserve(li); leave(li.dataset.id, performance.now()); } },
+    open(id) { pause(); push('open', id); detailOpen = {id, t: performance.now()}; },
+    close() {
+      if (!detailOpen) return;
+      const s = detailSecs(); if (s != null) push('detail_dwell', detailOpen.id, {seconds: Math.round(s * 10) / 10});
+      detailOpen = null; resume();
+    },
+    session() { return session; },
+    // 换打开（离开 01 再回来）前把排队的事件尽量发出，服务端才知道哪些货"上次看过"。
+    // 等在路上的那批，再把队列发完；某批确实失败（网络、5xx、403）就停下。
+    async flushAll() { while (q.length && !stopped) { if (!(await flush())) return false; } return true; },
+    flush, beacon, _queue: q
+  };
 })();
+// 01 是否为当前分区（与 ranking.js 的分区切换同一口径）。
+const onNewTab = () => !['#pool', '#rank', '#match', '#rules', '#guests'].includes(location.hash);
+let wasNew = onNewTab();
+window.addEventListener('hashchange', () => {
+  const now = onNewTab();
+  if (now && !wasNew) {
+    // 重新打开 01：新的 session；上次看过没留下的货不再出现，所以从头重读瀑布流。
+    beh.start(); hideMsg();
+    beh.flushAll().then(() => { if (feedLoaded) load(); else layoutSoon(); });
+  }
+  if (!now && wasNew) beh.flush();
+  wasNew = now;
+});
+window.addEventListener('resize', layoutSoon);
+if ('IntersectionObserver' in window) {
+  new IntersectionObserver(es => { if (es.some(e => e.isIntersecting) && $('loadErr').hidden) loadMore(); }, {rootMargin: '0px 0px 800px 0px'}).observe($('feedEnd'));
+}
 
 /* ---------- 已自动移出 ---------- */
 let arOffset = 0;
@@ -307,16 +504,17 @@ function openAr() {
 function closeAr() {
   $('arView').hidden = true; $('triageView').hidden = false;
   document.title = '新货 · 后台';
+  layoutSoon();
   $('openAr').focus();
 }
-// 捞回成功：在售的货放回本地队首，计数随之更新。
+// 捞回成功：在售的货放到瀑布流最前，计数随之更新。
 function applyRescued(d, fallback) {
   const card = d.card || fallback;
-  queue = queue.filter(x => x.item_id !== card.item_id);
   handled.delete(card.item_id);
-  if (card.status === 'active') { queue.unshift(card); newCount = (newCount || 0) + 1; }
+  if (cards.has(card.item_id)) dropCard(card.item_id);
+  if (card.status === 'active') { addCard(Object.assign({}, card, {score: undefined, score_reason: undefined}), true); newCount = (newCount || 0) + 1; }
   arCount = Math.max(0, (arCount || 0) - 1);
-  setNet(false); sync(d); render();
+  setNet(false); sync(d); counts(); updateEmpty();
   return card;
 }
 async function rescueRow(li) {
@@ -345,6 +543,116 @@ async function rescueRow(li) {
   if (next) next.querySelector('.rescue').focus(); else $('arTitle').focus();
 }
 
+/* ---------- 看过未选（故事 22） ----------
+   之前的打开里看过、没留下的货（不改拣选状态，只是不再进瀑布流）。按最近看到时间新到旧，游标续载。
+   「放回」记一条 restore 行为事件（event_id 固定，重试幂等），该件回到瀑布流最前；也可直接「留下」。 */
+let seenCursor = null, seenGen = 0;
+function seenRow(c) {
+  const li = document.createElement('li'); li.dataset.id = c.item_id; li._card = c;
+  const th = document.createElement('button'); th.type = 'button'; th.className = 'th'; th.setAttribute('aria-label', c.name + '，打开货详情');
+  if (c.image) { const im = document.createElement('img'); im.src = c.image; im.alt = ''; im.loading = 'lazy'; th.append(im); }
+  const body = document.createElement('div');
+  const t = document.createElement('button'); t.type = 'button'; t.className = 't'; t.textContent = c.name; setLang(t, c.name_lang);
+  (c.tags || []).forEach(x => t.append(tagEl(x)));
+  const p = document.createElement('p'); p.className = 'p';
+  const pm = document.createElement('span'); pm.className = 'mono'; pm.textContent = c.price; p.append(pm, ' · ' + c.platform);
+  if (c.code) { p.append(' · '); const cd = document.createElement('span'); cd.className = 'mono'; cd.textContent = c.code; p.append(cd); }
+  const when = document.createElement('p'); when.className = 'when'; when.textContent = '看到于 ' + fmtTime(c.seen_at);
+  const acts = document.createElement('div'); acts.className = 'acts2';
+  const back = document.createElement('button'); back.type = 'button'; back.className = 'btn'; back.dataset.k = 'restore'; back.textContent = '放回';
+  const keep = document.createElement('button'); keep.type = 'button'; keep.className = 'btn primary'; keep.dataset.k = 'keep'; keep.textContent = '留下';
+  back.setAttribute('aria-label', '放回 ' + c.name); keep.setAttribute('aria-label', '留下 ' + c.name);
+  acts.append(back, keep);
+  const msg = document.createElement('p'); msg.className = 'im'; msg.hidden = true;
+  body.append(t, p, when, acts, msg); li.append(th, body);
+  th.onclick = () => openDetail(c.item_id, 'seen', th);
+  t.onclick = () => openDetail(c.item_id, 'seen', t);
+  back.onclick = () => seenRestore(li);
+  keep.onclick = () => seenKeep(li);
+  return li;
+}
+async function loadSeen(reset) {
+  if (reset) { seenGen++; seenCursor = null; $('seenList').textContent = ''; }
+  const gen = seenGen;
+  $('seenErr').hidden = true;
+  try {
+    const d = await get('/api/triage/seen?limit=' + FEED_BATCH + '&session=' + encodeURIComponent(beh.session() || '') + (seenCursor ? '&cursor=' + encodeURIComponent(seenCursor) : ''));
+    if (gen !== seenGen) return;
+    const shown = new Set([...$('seenList').children].map(li => li.dataset.id));
+    d.items.forEach(c => { if (!shown.has(c.item_id)) $('seenList').append(seenRow(c)); });
+    seenCursor = d.next_cursor; seenCount = d.total; counts();
+    $('seenMore').hidden = !seenCursor;
+    $('seenEmpty').hidden = $('seenList').children.length > 0;
+  } catch (e) { if (gen === seenGen) { $('seenErr').hidden = false; shout('未能加载看过未选'); } }
+}
+function openSeen() {
+  hideMsg();
+  $('triageView').hidden = true; $('seenView').hidden = false;
+  document.title = '看过未选 · 后台';
+  loadSeen(true); $('seenTitle').focus();
+}
+function closeSeen() {
+  $('seenView').hidden = true; $('triageView').hidden = false;
+  document.title = '新货 · 后台';
+  layoutSoon();
+  $('openSeen').focus();
+}
+function seenRowMsg(li, text, retryFn) {
+  const msg = li.querySelector('.im'); msg.textContent = text;
+  if (retryFn) { msg.append(' · '); const b = document.createElement('button'); b.type = 'button'; b.className = 'lnk lnk-pad'; b.textContent = '重试'; b.onclick = retryFn; msg.append(b); }
+  msg.hidden = false;
+}
+// 行离开列表：焦点到下一行的同一按钮，没有则列表标题。
+function seenRemoveRow(li, k) {
+  const next = li.nextElementSibling || li.previousElementSibling;
+  li.remove();
+  seenCount = Math.max(0, (seenCount || 0) - 1); counts();
+  $('seenEmpty').hidden = $('seenList').children.length > 0;
+  (next ? next.querySelector('[data-k="' + k + '"]') : $('seenTitle')).focus();
+}
+async function seenRestore(li) {
+  if (li.dataset.busy) return;
+  const c = li._card;
+  li.dataset.eid = li.dataset.eid || rid();
+  li.dataset.busy = '1'; li.querySelector('.im').hidden = true;
+  let res = null;
+  try {
+    res = await post('/api/owner-events', {events: [{event_id: li.dataset.eid, type: 'restore', item_id: c.item_id,
+      client_ts: new Date().toISOString(), session_id: beh.session() || rid(), params: null}]});
+  } catch (e) { setNet(true); }
+  delete li.dataset.busy;
+  if (!res || !res.ok || res.data.dropped) {
+    seenRowMsg(li, res && res.data && res.data.dropped ? '未能放回：这件货已不在新货里' : '未能放回', res && res.data && res.data.dropped ? null : () => seenRestore(li));
+    shout('未能放回，请重试'); return;
+  }
+  setNet(false);
+  // 先放到瀑布流最前（只是本页的即时反馈；之后重读时按上架时间排在原位）。
+  const card = Object.assign({}, c); delete card.seen_at;
+  if (!cards.has(c.item_id)) addCard(card, true);
+  newCount = (newCount || 0) + 1;
+  seenRemoveRow(li, 'restore');
+  updateEmpty();
+  say('已放回 ' + c.name);
+}
+async function seenKeep(li) {
+  if (li.dataset.busy) return;
+  const c = li._card;
+  li.dataset.rid = li.dataset.rid || rid();
+  li.dataset.busy = '1'; li.querySelector('.im').hidden = true;
+  let res = null;
+  try { res = await send({action: 'keep', item_id: c.item_id, request_id: li.dataset.rid}); } catch (e) { setNet(true); }
+  delete li.dataset.busy;
+  if (!res || res.status >= 500) { seenRowMsg(li, '未保存', () => seenKeep(li)); shout('未保存，请重试'); return; }
+  if (!res.ok) { delete li.dataset.rid; seenRowMsg(li, '未保存：' + (res.data.error || '请刷新本页后重试')); shout('未保存'); return; }
+  setNet(false);
+  // 看过未选里的货不计入 01 计数；瀑布流里若也有这张卡（如刚放回），一并拿掉。
+  const fe = cards.get(c.item_id);
+  if (fe) { if (!handled.has(c.item_id)) newCount = Math.max(0, (newCount || 0) - 1); dropCard(c.item_id); }
+  seenRemoveRow(li, 'keep');
+  sync(res.data); counts();
+  say('已留下 ' + c.name);
+}
+
 /* ---------- 货详情 ---------- */
 let detail = null, detailMode = 'new', detailOpener = null, gi = 0, savedComment = '', savedAlts = [];
 function focusables(root) {
@@ -360,6 +668,8 @@ async function openDetail(id, mode, opener) {
   }
   $('arMsg').hidden = true;
   detail = d; detailMode = mode; detailOpener = opener;
+  beh.close();
+  if (mode === 'new' && cards.has(id)) beh.open(id);      // 行为记录：从瀑布流打开详情
   $('dCode').textContent = d.code || '';
   const nm = $('dName'); nm.textContent = d.name; setLang(nm, d.name_lang);
   const tags = $('dTags'); tags.textContent = '';
@@ -438,6 +748,7 @@ function viewTitle() {
   if (!$('guestsView').hidden) return '客人 · 后台';
   if (!$('poolView').hidden) return '商品池 · 后台';
   if (!$('rankView').hidden) return '榜 · 后台';
+  if (!$('seenView').hidden) return '看过未选 · 后台';
   return $('arView').hidden ? '新货 · 后台' : '已自动移出 · 后台';
 }
 function viewFocus() {
@@ -446,7 +757,8 @@ function viewFocus() {
   if (!$('guestsView').hidden) return $('h06');
   if (!$('poolView').hidden) return $('h02');
   if (!$('rankView').hidden) return $('h03');
-  return $('arView').hidden ? $('btnKeep') : $('arTitle');
+  if (!$('seenView').hidden) return $('seenTitle');
+  return $('arView').hidden ? $('h01') : $('arTitle');
 }
 // 关闭前等未保存的点评 / 替代文字写完；任一失败则不关闭，字段下保留"未保存 · 重试"。
 async function closeDetail(refocus = true) {
@@ -457,6 +769,7 @@ async function closeDetail(refocus = true) {
   const ok = (await Promise.all(saves)).every(Boolean);
   if (!ok || $('detail').hidden) return false;
   $('detail').hidden = true; $('app').inert = false;
+  beh.close();                                            // 行为记录：详情停留秒数
   document.title = viewTitle();
   if (refocus) {
     const o = detailOpener;
@@ -567,7 +880,7 @@ async function recheck() {
     else if (res.ok && res.data.outcome === 'gone') {
       text = '已下架';
       // 已下架的货不再留在新货队列
-      if (queue.some(x => x.item_id === id)) { queue = queue.filter(x => x.item_id !== id); newCount = Math.max(0, (newCount || 0) - 1); render(); }
+      if (cards.has(id) && !handled.has(id)) { dropCard(id); newCount = Math.max(0, (newCount || 0) - 1); counts(); }
     }
   } catch (e) { /* 保持“暂时无法确认” */ }
   b.textContent = '复查'; b.removeAttribute('aria-disabled');
@@ -612,6 +925,10 @@ async function primary() {
     }
     return;
   }
+  if (detailMode === 'seen') {
+    const li = [...$('seenList').children].find(x => x.dataset.id === id);
+    if (li) { if (await closeDetail(false)) { li.querySelector('[data-k="keep"]').focus(); seenKeep(li); } return; }
+  }
   if (detailMode === 'rescue') {
     const li = [...$('arList').children].find(x => x.dataset.id === id);
     if (li) { if (await closeDetail(false)) { li.querySelector('.rescue').focus(); rescueRow(li); } return; }
@@ -624,18 +941,20 @@ async function primary() {
     } catch (e) { setNet(true); primaryMsg('未能捞回，请重试'); }
     return;
   }
-  if (queue[0] && queue[0].item_id === id) {
-    if (await closeDetail(false)) { act('keep', id); $('btnKeep').focus(); }
+  const fe = cards.get(id);
+  if (fe && !handled.has(id)) {
+    // 瀑布流里的卡片：关闭详情后按卡上「留下」处理（淡出、可撤销、失败行内重试）。
+    if (await closeDetail(false)) { const target = nextFocus(fe.li, 'keep'); act('keep', id); (target || $('undo')).focus(); }
     return;
   }
   // 不是当前卡片（如已在别处处理过）：直接按货号留下，结果写在详情里
   try {
     const res = await send({action: 'keep', item_id: id, request_id: rid()});
     if (!res.ok) return primaryMsg(res.status < 500 && res.data.error ? '未能留下：' + res.data.error : '未能留下，请重试');
-    const had = queue.some(x => x.item_id === id);
-    queue = queue.filter(x => x.item_id !== id); handled.add(id);
+    const had = cards.has(id) && !handled.has(id);
+    if (cards.has(id)) dropCard(id);
     if (had) newCount = Math.max(0, (newCount || 0) - 1);
-    setNet(false); sync(res.data); render();
+    setNet(false); sync(res.data); counts(); updateEmpty();
     if (await closeDetail()) say('已留下，剩余 ' + newCount + ' 件');
   } catch (e) { setNet(true); primaryMsg('未能留下，请重试'); }
 }
@@ -694,21 +1013,19 @@ document.addEventListener('keydown', e => {
     }
     return;
   }
-  if ($('triageView').hidden || e.altKey || e.ctrlKey || e.metaKey) return;
-  const t = e.target;
-  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-  if (e.key === 'ArrowLeft') { e.preventDefault(); act('remove'); }
-  else if (e.key === 'ArrowRight') { e.preventDefault(); act('keep'); }
 });
 
 /* ---------- 绑定 ---------- */
-$('btnKeep').onclick = () => act('keep');
-$('btnRemove').onclick = () => act('remove');
 $('undo').onclick = undo;
 $('retry').onclick = retry;
 $('netRetry').onclick = netRetry;
-$('reload').onclick = load;
+$('reload').onclick = reloadFeed;
 $('openAr').onclick = openAr;
+$('openSeen').onclick = openSeen;
+$('emptySeenOpen').onclick = openSeen;
+$('seenBack').onclick = closeSeen;
+$('seenMore').onclick = () => loadSeen(false);
+$('seenReload').onclick = () => loadSeen(false);
 $('back').onclick = closeAr;
 $('arMore').onclick = () => loadAr(false);
 $('arReload').onclick = () => loadAr(false);
@@ -732,6 +1049,7 @@ $('zPrev').onclick = () => setGi(gi - 1);
 $('zNext').onclick = () => setGi(gi + 1);
 window.addEventListener('offline', () => { setNet(true); shout('网络已断开，操作未保存'); });
 window.addEventListener('online', () => setNet(false));
+if (onNewTab()) beh.start();
 load();
 
 /* ---------- 06 客人（故事 14，CAP-14） ----------

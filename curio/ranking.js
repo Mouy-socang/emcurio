@@ -63,6 +63,7 @@
     view = v;
     // 回到 01 时显示刷货卡（已自动移出子视图收起）。
     $('arView').hidden = true;
+    if ($('seenView')) $('seenView').hidden = true;      // 01 的「看过未选」子视图同样收起
     $('triageView').hidden = v !== 'new';
     $('poolView').hidden = v !== 'pool';
     $('rankView').hidden = v !== 'rank';
@@ -72,7 +73,7 @@
     [['new', 'tab01'], ['pool', 'tab02'], ['rank', 'tab03'], ['match', 'tab04'], ['rules', 'tab05'], ['guests', 'tab06']].forEach(([k, id]) => {
       if (k === v) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
     });
-    document.querySelector('main.scr').classList.toggle('wide', v === 'pool');
+    document.querySelector('main.scr').classList.toggle('wide', v === 'pool' || v === 'new');   // 01 瀑布流与 02 商品池用宽版
     document.title = viewTitle();
     if (v === 'pool') loadPool();
     if (v === 'rank') { loadRank(); if (!pool) loadPool(); }

@@ -391,6 +391,84 @@ def queue(c, limit=100, offset=0):
         LIMIT ? OFFSET ?''', (limit, offset))]
 
 
+# 故事 22「看过即不要」：这件货在**别的**打开（session）里被记为 seen 的最近时间——只算捞回之后、最近一次「放回」之后的；
+# eff_at 为实际看到的时间（min(client_ts, at)，见 store._owner_event），晚到的补发不会盖过之后的放回 / 捞回。
+# 为 NULL 即不排除。只是瀑布流层面的排除，不改拣选状态（仍为新货）；本次打开里看到的保持原位。
+SEEN_ELSEWHERE = '''(SELECT max(e.eff_at) FROM owner_events e WHERE e.item_id=i.item_id AND e.type='seen' AND e.session_id<>?
+        AND e.eff_at > COALESCE(t.rescued_at,'')
+        AND e.eff_at > COALESCE((SELECT max(r.at) FROM owner_events r WHERE r.item_id=i.item_id AND r.type='restore'),''))'''
+FEED_BASE = "t.state='new' AND t.backlog=0 AND i.status='active'"
+FEED_SQL = '''SELECT i.*,t.state triage_state,t.rescued_at,
+        t.rescued_at IS NULL k1, COALESCE(t.rescued_at,'') k2, COALESCE(i.first_seen,'') k3
+        FROM triage t JOIN items i ON i.item_id=t.item_id
+        WHERE ''' + FEED_BASE + ' AND ' + SEEN_ELSEWHERE + ''' IS NULL %s
+        ORDER BY k1, k2 DESC, k3 DESC, i.item_id
+        LIMIT ?'''
+SEEN_SQL = '''SELECT * FROM (SELECT i.*,t.state triage_state,t.rescued_at,''' + SEEN_ELSEWHERE + ''' seen_at
+        FROM triage t JOIN items i ON i.item_id=t.item_id WHERE ''' + FEED_BASE + ''')
+        WHERE seen_at IS NOT NULL %s ORDER BY seen_at DESC, item_id LIMIT ?'''
+
+
+def _session(session):
+    if session is not None and (not isinstance(session, str) or len(session) > 100):
+        raise ValueError('session 无效')
+    return session or ''
+
+
+def feed(c, limit=40, cursor=None, session=None):
+    """01 新货瀑布流（故事 22）：与 queue() 同一集合（新货、非 backlog、在售），但**不按分数排**——
+    捞回的最前（最近捞回优先），其余按 first_seen 新到旧，同时间按 item_id。
+    「看过即不要」：排除在别的打开（session ≠ 本次）里已记为 seen、之后没被放回的货（见 SEEN_ELSEWHERE）。
+    游标为上一批最后一件的排序键 [k1, k2, k3, item_id]（k1=未捞回、k2=捞回时间、k3=first_seen）；
+    浏览中新入库的货 first_seen 更新、排在游标之前，不会让后面的批次重复或漏件。
+    返回 (rows, next_cursor)；没有下一批时 next_cursor 为 None。"""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('分页参数无效：limit 须为 1–100')
+    where, args = '', [_session(session)]
+    if cursor is not None:
+        if (not isinstance(cursor, list) or len(cursor) != 4 or type(cursor[0]) is not int or cursor[0] not in (0, 1)
+                or not all(isinstance(x, str) for x in cursor[1:])):
+            raise ValueError('游标无效')
+        k1, k2, k3, iid = cursor
+        where = '''AND ((t.rescued_at IS NULL) > ? OR ((t.rescued_at IS NULL) = ? AND (COALESCE(t.rescued_at,'') < ?
+            OR (COALESCE(t.rescued_at,'') = ? AND (COALESCE(i.first_seen,'') < ?
+            OR (COALESCE(i.first_seen,'') = ? AND i.item_id > ?))))))'''
+        args += [k1, k1, k2, k2, k3, k3, iid]
+    rows = [dict(r) for r in c.execute(FEED_SQL % where, args + [limit + 1])]
+    more = len(rows) > limit
+    rows = rows[:limit]
+    nxt = None
+    if more and rows:
+        last = rows[-1]
+        nxt = [last['k1'], last['k2'], last['k3'], last['item_id']]
+    for r in rows:
+        for k in ('k1', 'k2', 'k3'):
+            r.pop(k)
+    return rows, nxt
+
+
+def seen_unpicked(c, limit=40, cursor=None, session=None):
+    """「看过未选」（故事 22）：被「看过即不要」排除在瀑布流外的货，按最近看到时间新到旧，同时间按 item_id。
+    游标为 [seen_at, item_id]。返回 (rows, next_cursor)，每行带 seen_at。"""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('分页参数无效：limit 须为 1–100')
+    where, args = '', [_session(session)]
+    if cursor is not None:
+        if not isinstance(cursor, list) or len(cursor) != 2 or not all(isinstance(x, str) for x in cursor):
+            raise ValueError('游标无效')
+        where = 'AND (seen_at < ? OR (seen_at = ? AND item_id > ?))'
+        args += [cursor[0], cursor[0], cursor[1]]
+    rows = [dict(r) for r in c.execute(SEEN_SQL % where, args + [limit + 1])]
+    more = len(rows) > limit
+    rows = rows[:limit]
+    return rows, ([rows[-1]['seen_at'], rows[-1]['item_id']] if more and rows else None)
+
+
+def seen_unpicked_count(c, session=None):
+    return c.execute('SELECT count(*) FROM triage t JOIN items i ON i.item_id=t.item_id WHERE ' + FEED_BASE + ' AND '
+                     + SEEN_ELSEWHERE + ' IS NOT NULL', (_session(session),)).fetchone()[0]
+
+
 def auto_removed(c, limit=100, offset=0):
     """「已自动移出」列表：当前状态为 auto_removed 的货，按移出时间新到旧。
     每件含 item_id、title、platform、价格（price=标价、total_price、currency）、url、status、reason、removed_at：

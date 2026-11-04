@@ -41,30 +41,35 @@ img{display:block}
 .lnk-pad{display:inline-flex;align-items:center;min-height:var(--tap);padding:0 2px}
 .autoline{display:flex;align-items:center;gap:4px;min-height:var(--tap);border-bottom:1px solid var(--hair);flex-wrap:wrap}
 
-/* triage-card */
-.stage{position:relative;margin-top:16px}
-.under{position:absolute;left:0;right:0;top:0;aspect-ratio:4/5;background:var(--inset)}
-.tcard{position:relative;background:var(--surface);touch-action:pan-y;user-select:none;-webkit-user-select:none}
-.tcard.fly{transition:transform .18s ease-in}
-.tcard.back{transition:transform .2s ease-out}
-.ph{display:block;position:relative;width:100%;aspect-ratio:4/5;overflow:hidden;background:var(--inset);border:0;padding:0;cursor:pointer;-webkit-touch-callout:none}
-.ph:focus-visible{outline-offset:-4px}
-.ph img{width:100%;height:100%;object-fit:cover;pointer-events:none;-webkit-user-drag:none}
-.meta{padding:12px 0 0}
-.meta h2{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35;overflow-wrap:anywhere}
+/* 01 新货瀑布流（故事 22，waterfall-card）：一个 <ol>，DOM 顺序 = 阅读顺序；脚本按顺序放入当前较短的一列
+   （绝对定位，不用 CSS columns）。卡上无分数；「去掉」「留下」两颗等宽按钮；处理后淡出。 */
+.fbar{position:sticky;top:0;z-index:2;background:var(--surface);border-bottom:1px solid var(--hair);padding-bottom:4px}
+.fbar .im{margin-top:4px}
+.feed{list-style:none;position:relative;margin-top:16px}
+.fc{position:absolute;left:0;top:0;width:50%;background:var(--surface);transition:opacity .22s ease-out}
+.fc.out{opacity:0;pointer-events:none}
+.fph{display:block;position:relative;width:100%;aspect-ratio:4/5;overflow:hidden;background:var(--inset);border:0;padding:0;cursor:pointer;-webkit-touch-callout:none}
+.fph:focus-visible{outline-offset:-4px}
+.fph img{width:100%;height:100%;object-fit:cover;pointer-events:none;-webkit-user-drag:none}
+.fph.noimg{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px}
+.fmeta{padding:8px 0 0}
+.fmeta h2{font-family:var(--serif);font-weight:600;font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+.fpr{margin-top:4px}
+.fpr .mono{font-size:17px;font-weight:500;line-height:1.3}
+.fsrc{font-size:14px;color:var(--muted);overflow-wrap:anywhere}
+.fsrc .mono{font-size:14px}
+.facts{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.facts .btn{padding:0 4px}
+.fmsg{margin-top:8px}
+.feedmore{color:var(--muted);font-size:14px;min-height:var(--tap);display:flex;align-items:center}
+.feedend{height:1px}
 .tag{display:inline-block;font-family:var(--sans);font-weight:400;font-size:12px;line-height:18px;border:1px solid var(--ink);padding:0 5px;margin-left:6px;vertical-align:2px;white-space:nowrap}
-.pr{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-top:4px}
-.pr .mono{font-size:20px;font-weight:500;line-height:1.2}
-.pr .src{font-size:14px;color:var(--muted)}
-.score{font-size:14px;color:var(--muted);margin-top:4px}
-.acts{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
 .btn{display:flex;align-items:center;justify-content:center;min-height:var(--tap);padding:0 12px;font-family:var(--sans);font-size:14px;border:1px solid var(--ink);background:var(--surface);color:var(--ink);cursor:pointer;text-decoration:none}
 .btn:active{background:var(--inset)}
 .btn.primary{background:var(--inv);color:var(--inv-ink)}
 .btn.primary:active{background:var(--inv);padding-top:1px}
 .btn[aria-disabled="true"]{background:var(--inset);color:var(--muted);border:1px dashed var(--muted);cursor:default;padding-top:0}
 .undo{display:flex;align-items:center;min-height:var(--tap);margin-top:4px}
-.keys{font-size:14px;color:var(--muted)}
 .empty{padding:32px 0 24px}
 .empty .big{font-family:var(--mono);font-size:32px;font-weight:500;line-height:1}
 .empty h2{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35;margin-top:12px}
@@ -81,6 +86,8 @@ img{display:block}
 .arlist .r{color:var(--muted);overflow-wrap:anywhere}
 .arlist .when{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .arlist .btn{margin-top:8px;width:100%}
+.arlist .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kline{font-size:14px;min-height:var(--tap);display:flex;align-items:center;flex-wrap:wrap;gap:0 4px}
 
 /* item-detail overlay */
 .ov{position:fixed;inset:0;background:var(--surface);overflow-y:auto;overflow-x:hidden;z-index:10;border-top:2px solid var(--ink)}
@@ -248,24 +255,21 @@ img{display:block}
 <p class="im net" id="net" role="alert" hidden>网络已断开，操作未保存 · <button class="lnk lnk-pad" id="netRetry">重试</button></p>
 <main class="scr">
 <section id="triageView" aria-labelledby="h01">
-  <h1 class="vh" id="h01">新货</h1>
+  <h1 class="vh" id="h01" tabindex="-1">新货</h1>
   <p class="autoline">已自动移出 <span class="mono" id="arN">—</span> 件 · <button class="lnk lnk-pad" id="openAr">查看</button></p>
-  <p class="im" id="fail" role="alert" hidden><span class="mono" id="failN">0</span> 件未保存 · <button class="lnk lnk-pad" id="retry">重试</button></p>
-  <p class="im" id="loadErr" role="alert" hidden>未能读取新货 · <button class="lnk lnk-pad" id="reload">重试</button></p>
-  <div class="stage" id="stage">
-    <div class="under" id="under" aria-hidden="true"></div>
-    <article class="tcard" id="card" hidden>
-      <button class="ph" id="ph" type="button"><img id="img" alt=""></button>
-      <div class="meta"><h2 id="name"></h2>
-      <p class="pr"><span class="mono" id="price"></span><span class="src" id="src"></span></p>
-      <p class="score" id="score"></p></div>
-    </article>
-    <div class="empty" id="empty" hidden><p class="big" aria-hidden="true">0</p><h2>今天的新货已处理完</h2></div>
+  <p class="autoline">看过未选 <span class="mono" id="seenN">—</span> 件 · <button class="lnk lnk-pad" id="openSeen">查看</button></p>
+  <div class="fbar">
+    <p class="kline" aria-live="off">今日已留下 <span class="mono" id="kToday">—</span> 件 · 商品池共 <span class="mono" id="kPool">—</span> 件</p>
+    <p class="undo"><button class="lnk lnk-pad" id="undo" type="button">撤销上一步</button></p>
+    <p class="im" id="fail" role="alert" hidden><span class="mono" id="failN">0</span> 件未保存 · <button class="lnk lnk-pad" id="retry">重试</button></p>
+    <p class="im" id="msg" hidden></p>
   </div>
-  <div class="acts"><button class="btn" id="btnRemove" type="button">去掉</button><button class="btn primary" id="btnKeep" type="button">留下</button></div>
-  <p class="undo"><button class="lnk lnk-pad" id="undo" type="button">撤销上一步</button></p>
-  <p class="im" id="msg" hidden></p>
-  <p class="keys"><span class="mono">←</span> 去掉 · <span class="mono">→</span> 留下</p>
+  <ol class="feed" id="feed" aria-label="新货，捞回的在前，其余按上架时间新到旧"></ol>
+  <p class="feedmore" id="feedMore" hidden>正在加载…</p>
+  <p class="im" id="loadErr" role="alert" hidden>未能加载 · <button class="lnk lnk-pad" id="reload">重试</button></p>
+  <div class="empty" id="empty" hidden><p class="big" aria-hidden="true">0</p><h2>今天的新货已处理完</h2>
+    <p id="emptySeen" hidden>看过未选 <span class="mono" id="emptySeenN"></span> 件 · <button class="lnk lnk-pad" id="emptySeenOpen" type="button">查看</button></p></div>
+  <div class="feedend" id="feedEnd" aria-hidden="true"></div>
 </section>
 <section id="arView" hidden aria-labelledby="arTitle">
   <div class="arhead"><button class="lnk lnk-pad" id="back" type="button">返回</button><h1 id="arTitle" tabindex="-1">已自动移出 <span class="mono" id="arN2"></span></h1></div>
@@ -274,6 +278,14 @@ img{display:block}
   <div class="empty" id="arEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>今天没有自动移出的货</h2></div>
   <p class="im" id="arErr" role="alert" hidden>未能读取列表 · <button class="lnk lnk-pad" id="arReload">重试</button></p>
   <p><button class="btn" id="arMore" type="button" hidden>加载更多</button></p>
+</section>
+<section id="seenView" hidden aria-labelledby="seenTitle">
+  <div class="arhead"><button class="lnk lnk-pad" id="seenBack" type="button">返回</button><h1 id="seenTitle" tabindex="-1">看过未选 <span class="mono" id="seenN2"></span></h1></div>
+  <p class="reason muted">之前打开 01 时看过、没有留下的新货，不再出现在瀑布流；「放回」后重新出现。</p>
+  <ul class="arlist" id="seenList" aria-label="看过未选，最近看到的在前"></ul>
+  <div class="empty" id="seenEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>没有看过未选的货</h2></div>
+  <p class="im" id="seenErr" role="alert" hidden>未能加载 · <button class="lnk lnk-pad" id="seenReload" type="button">重试</button></p>
+  <p><button class="btn" id="seenMore" type="button" hidden>加载更多</button></p>
 </section>
 <section id="poolView" hidden aria-labelledby="h02">
   <h1 class="vh" id="h02" tabindex="-1">商品池</h1>

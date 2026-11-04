@@ -45,15 +45,20 @@ uv run python -m curio.review
 
 不要用 `tailscale funnel`（那会公开到互联网）。写接口仍校验页面令牌（`X-Curio-Token`，每次启动重新生成，重启服务后刷新页面）与 Origin；经 tailscale serve 反代时，Origin 与 `Host` 或 `X-Forwarded-Host` 一致即认可。
 
-### 后台 01 新货（CAP-6，故事 7）
+### 后台 01 新货（CAP-6，故事 7；故事 22 瀑布流与行为记录）
 
 - 顶部分区 01–06：01 新货显示待处理件数；02 商品池、03 榜见下节；04 匹配见"后台 04 匹配"一节；05 待审核见"后台 05 待审核"一节；06 客人见"后台 06 客人"一节。
-- 拣选卡一次一件（分数高到低，捞回的在最前）：右滑留下、左滑去掉（拖过卡宽 35% 或快速甩动才生效，否则回弹），或按「去掉」「留下」，电脑上焦点不在输入框时 ← 去掉、→ 留下。界面先切到下一件再保存；保存失败时显示「N 件未保存 · 重试」、该件回到队首；断网显示「网络已断开，操作未保存 · 重试」。每个动作带 `request_id`（表 `triage_requests`），重放返回同一结果、不产生第二个事件。
+- **瀑布流**（故事 22，`GET /api/triage/feed?limit=&cursor=&session=`，`triage.feed`）：多列大图卡片（手机 2 列，≥600px 3 列，≥900px 4 列；一个 `<ol>`，DOM 顺序 = 阅读顺序，脚本按顺序放进当前较短的一列，不用 CSS columns）。集合与旧队列相同（新货、非 backlog、在售），但**不按分数排**：捞回的最前（最近捞回优先），其余按 `first_seen` 新到旧、同时间按 `item_id`；卡上**不显示分数**（货详情里照旧）。每批 40 件，滑到底按游标（上一批最后一件的排序键，不用 offset）续载，浏览中新入库的货排在游标之前，不会让后面的批次重复或漏件；加载失败显示「未能加载 · 重试」。旧接口 `GET /api/triage`（分数排序的 `triage.queue`）保留给其他调用方。
+- 卡片：主图（`store.card` 的图片来源，按原比例）、名称与标签、价格、平台、货号（已留下才有）；「去掉」「留下」两颗按钮；点图打开货详情。界面先让卡片淡出再保存（`POST /api/triage/action`，`request_id` 幂等）；保存失败时该卡原位放回并在卡内显示「未保存 · 重试」，顶部同时显示「N 件未保存 · 重试」；断网显示「网络已断开，操作未保存 · 重试」。旧版的滑动手势与 ←/→ 键已随单卡界面移除。
+- **看过即不要**（墨墨 2026-11-04）：某件货在一次打开 01（`session_id`）里被记为 `seen`、且没被留下，之后的打开里不再进瀑布流（本次打开内保持原位）。不改拣选状态（仍为新货），只是瀑布流排除；01 计数为瀑布流实际能看到的件数（新货减去被排除的）。比较用实际看到的时间 min(`client_ts`, `at`)（列 `eff_at`；`client_ts` 无效或在未来时取 `at`），只算捞回之后、最近一次「放回」之后的 seen，晚到的补发不会把已放回的货又藏起来；一闪而过（未到 seen）的下次照常出现。离开 01 再回来算一次新的打开（先补发排队的事件，再从头重读瀑布流）。
+- **看过未选**（`GET /api/triage/seen?limit=&cursor=&session=`）：01 顶部"看过未选 N 件 · 查看"进入子视图，按最近看到时间新到旧、游标续载；每件可「放回」（记一条 `restore` 行为事件，event_id 固定、重试幂等；只对仍在新货、在售的货有效，否则丢弃并提示「未能放回」）——该件重新出现在瀑布流（按上架时间的位置）——或直接「留下」。瀑布流读完、只剩看过未选的货时，空状态里有「看过未选 N 件 · 查看」。
+- 页头（随瀑布流吸顶）："今日已留下 N 件 · 商品池共 M 件"：今日按柏林日期，N 为今天未撤销的人工留下（按件去重），M 为当前留下状态的件数（与 02 计数同口径）；写入后读 `GET /api/triage/header` 刷新。
+- **行为记录**（表 `owner_events`，只在本机 `curio.db`，不上线、不进 GoodCustomer、不给客人页）：`seen`（卡片 ≥50% 在视口且持续 ≥0.6 秒，每件每次打开记一次）、`dwell`（卡片 ≥50% 在视口的一段停留秒数，离开视口、页面隐藏或打开详情时上报；短于 0.6 秒的不报，服务端截到 1–600）、`open`（从瀑布流打开详情）、`detail_dwell`（详情停留秒数，关闭时上报；页面隐藏时先报已停留的部分；截到 1–1800）、`restore`（看过未选里放回）。字段 `event_id`（客户端 UUID，主键，`INSERT OR IGNORE` 去重）、`type`、`item_id`、`client_ts`、`at`（服务器写入时间，权威）、`session_id`（每次打开 01 生成）、`params`（JSON，秒数在 `params.seconds`）。留下 / 去掉不在这里重复记（以 `triage_events` 为准）。上报 `POST /api/owner-events`（`{events:[…]}`，每批 ≤100 条，超过 400；令牌与 Origin 校验同其他写接口，令牌也可放在请求体 `token` 字段，供页面离开时 `sendBeacon` 补发）；未知类型、不存在的 `item_id`、字段不合规的单条丢弃，返回 `{stored, duplicate, dropped}`。页内每 5 秒或攒满 20 条发一批，失败的留在页内队列稍后重发；令牌失效（403）时停止重发并提示「请刷新本机审核页后重试」。
 - 「撤销上一步」无时限、可连续多步（`triage.undo`，撤最近一次人工事件；货号保留不复用）。
-- 「已自动移出 N 件 · 查看」：列表附理由与移出时间，「捞回」后该件回到新货队首。
+- 「已自动移出 N 件 · 查看」：列表附理由与移出时间，「捞回」后该件回到瀑布流最前。
 - 点图进入货详情：货号（已留下才有）、名称与标签（外画、仅后台 · Kleinanzeigen）、图库与放大层（图片取 `product_snapshots` 已下载的图，否则 `items.image`）、卖家原文（照录、标 `lang`）、来源与判断、费用档位（故事 12，可改，见下文"单件页、预估费用与币种"）、墨墨点评（表 `comments`）、图片替代文字（表 `alt_texts`，默认「标准名称 · 第 N 张 / 共 M 张」），点评与替代文字失焦自动保存。
 - 「复查」按平台即时确认这一件是否在售（`curio_monitor.recheck_item`，与批量在售检查共用单件判定，计入当日在售检查预算，写 `status_check_events`，下架即 `items.status='gone'`；已发布的货同一事务入队隐藏，后台随即在后台线程触发一次限时 `sync.flush`，失败的下一轮采集重试）；预算用完、平台暂停或查询失败时显示「暂时无法确认，请稍后再试」。
-- 接口：`GET /api/triage`、`/api/triage/auto-removed`、`/api/triage/item?id=`；`POST /api/triage/action`（keep / remove / rescue / undo）、`/api/triage/comment`、`/api/triage/alt`、`/api/triage/fee`、`/api/triage/recheck`。
+- 接口：`GET /api/triage`、`/api/triage/feed`、`/api/triage/seen`、`/api/triage/header`、`/api/triage/auto-removed`、`/api/triage/item?id=`；`POST /api/owner-events`、`/api/triage/action`（keep / remove / rescue / undo）、`/api/triage/comment`、`/api/triage/alt`、`/api/triage/fee`、`/api/triage/recheck`。
 
 ### 后台 02 商品池、03 榜、预览与发布（CAP-7，故事 11；AD-5、AD-22、AD-28）
 

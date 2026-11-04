@@ -1,10 +1,11 @@
 """One SQLite for items, rules, screening, collection state and owner reviews."""
+import base64
 import json
 import logging
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from .price import prices, money
 from .rules import evaluate, standard_name, kb_fingerprint, kb_status, baseline_score
@@ -20,6 +21,11 @@ from screening.pipeline import process
 
 
 def now():return datetime.now(timezone.utc).isoformat(timespec='seconds')
+# 故事 22：01 瀑布流每批件数；行为事件每批上限、类型与停留秒数上限。
+FEED_BATCH=40
+OWNER_EVENT_BATCH=100
+OWNER_EVENT_TYPES=('seen','dwell','open','detail_dwell','restore')   # restore：「看过未选」里放回
+OWNER_DWELL_MAX=dict(dwell=600,detail_dwell=1800)
 
 log=logging.getLogger(__name__)
 _STD_WARNED=[]
@@ -241,7 +247,23 @@ class Store:
             CREATE TABLE IF NOT EXISTS match_decisions(customer_id TEXT NOT NULL, item_id TEXT NOT NULL,
                 decision TEXT NOT NULL CHECK(decision IN ('confirmed','rejected')), at TEXT NOT NULL,
                 PRIMARY KEY(customer_id,item_id));
+            -- 故事 22：墨墨在 01 瀑布流里的行为路径（seen / dwell / open / detail_dwell）。只在本机，不上线、
+            -- 不进 GoodCustomer；留下 / 去掉不在此重复记录（以 triage_events 为准）。event_id 为客户端 UUID，
+            -- INSERT OR IGNORE 去重；at 为服务器写入时间（权威），client_ts 仅作参考。
+            CREATE TABLE IF NOT EXISTS owner_events(event_id TEXT PRIMARY KEY, type TEXT NOT NULL,
+                item_id TEXT NOT NULL, client_ts TEXT, at TEXT NOT NULL, session_id TEXT NOT NULL, params TEXT);
+            CREATE INDEX IF NOT EXISTS owner_events_item ON owner_events(item_id,at);
+            CREATE INDEX IF NOT EXISTS owner_events_session ON owner_events(session_id,at);
             ''')
+            # 故事 22：eff_at = 实际发生时间 min(client_ts, at)（client_ts 无效或在未来时取 at）；「看过即不要」按它比较。
+            if 'eff_at' not in {r[1] for r in c.execute('PRAGMA table_info(owner_events)')}:
+                try:
+                    c.execute('ALTER TABLE owner_events ADD COLUMN eff_at TEXT')
+                    c.execute('UPDATE owner_events SET eff_at=at WHERE eff_at IS NULL')
+                except sqlite3.OperationalError as e:
+                    if 'duplicate column' not in str(e):raise
+            c.execute('CREATE INDEX IF NOT EXISTS owner_events_item_type ON owner_events(item_id,type,eff_at)')
+            c.execute('CREATE INDEX IF NOT EXISTS owner_events_item_type_at ON owner_events(item_id,type,at)')   # 放回时间
             # 替代文字按图片身份（本机图文件名或图片地址）保存，图片增减时不串位；image_index 只作显示参考。
             cols={r[1] for r in c.execute('PRAGMA table_info(alt_texts)')}
             if cols and 'image_key' not in cols:
@@ -472,6 +494,42 @@ class Store:
         if type(limit) is not int or not 1<=limit<=200 or type(offset) is not int or offset<0:raise ValueError('分页参数无效')
         with self.connect() as c:
             return dict(counts=backoffice_counts(c),queue=[card(c,r,root) for r in triage.queue(c,limit,offset)])
+    def triage_feed(self,limit=FEED_BATCH,cursor=None,session=None,root=ROOT):
+        """01 新货瀑布流（故事 22）：捞回的最前，其余按上架时间新到旧；卡片不带分数（详情里照旧显示）。
+        session 为本次打开 01 的 session_id：别的打开里看过、没留下也没放回的货不再出现（「看过即不要」）。
+        cursor 为上一批返回的 next_cursor（不透明字符串）；返回 dict(items, next_cursor, counts, header)。"""
+        if type(limit) is not int or not 1<=limit<=100:raise ValueError('分页参数无效')
+        with self.connect() as c:
+            rows,nxt=triage.feed(c,limit,_decode_cursor(cursor),session)
+            return dict(items=[_feed_card(c,r,root) for r in rows],next_cursor=_encode_cursor(nxt),
+                        counts=_feed_counts(c,session),header=feed_header(c))
+    def seen_unpicked(self,limit=FEED_BATCH,cursor=None,session=None,root=ROOT):
+        """「看过未选」（故事 22）：按最近看到时间新到旧，游标续载；每件带 seen_at。"""
+        if type(limit) is not int or not 1<=limit<=100:raise ValueError('分页参数无效')
+        with self.connect() as c:
+            rows,nxt=triage.seen_unpicked(c,limit,_decode_cursor(cursor),session)
+            return dict(items=[dict(_feed_card(c,r,root),seen_at=r['seen_at']) for r in rows],next_cursor=_encode_cursor(nxt),
+                        total=triage.seen_unpicked_count(c,session))
+    def feed_header(self):
+        with self.connect() as c:return feed_header(c)
+    def record_owner_events(self,events):
+        """故事 22：写入一批墨墨行为事件（≤100 条）。按 event_id INSERT OR IGNORE 去重；未知类型、
+        不存在的 item_id、字段不合规的单条丢弃并计数，不整批失败。dwell 秒数截到 1–600，detail_dwell 截到 1–1800。
+        返回 dict(stored, duplicate, dropped)。"""
+        if not isinstance(events,list):raise ValueError('events 须为列表')
+        if len(events)>OWNER_EVENT_BATCH:raise ValueError('每批最多 %d 条'%OWNER_EVENT_BATCH)
+        stored=duplicate=dropped=0
+        at=now()
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            for ev in events:
+                row=_owner_event(c,ev)
+                if row is None:dropped+=1;continue
+                cur=c.execute('INSERT OR IGNORE INTO owner_events(event_id,type,item_id,client_ts,at,session_id,params,eff_at) VALUES(?,?,?,?,?,?,?,?)',
+                              (row['event_id'],row['type'],row['item_id'],row['client_ts'],at,row['session_id'],row['params'],_eff_at(row['client_ts'],at)))
+                if cur.rowcount:stored+=1
+                else:duplicate+=1
+        return dict(stored=stored,duplicate=duplicate,dropped=dropped)
     def auto_removed_list(self,limit=50,offset=0,root=ROOT):
         if type(limit) is not int or not 1<=limit<=200 or type(offset) is not int or offset<0:raise ValueError('分页参数无效')
         with self.connect() as c:
@@ -587,6 +645,76 @@ def guess_lang(text):
     if not text.strip() or _CJK.search(text):return None
     if _DE.search(text):return 'de'
     return 'en' if _EN.search(text) else None
+
+# ---- 故事 22：01 瀑布流与行为记录 ----
+
+def _encode_cursor(key):
+    return base64.urlsafe_b64encode(json.dumps(key,ensure_ascii=False).encode()).decode().rstrip('=') if key else None
+
+def _decode_cursor(cursor):
+    if not cursor:return None
+    try:return json.loads(base64.urlsafe_b64decode(cursor.encode()+b'='*(-len(cursor)%4)))
+    except (ValueError,TypeError,UnicodeError):raise ValueError('游标无效')
+
+def _feed_card(c,row,root):
+    d=card(c,row,root);d.pop('score',None);d.pop('score_reason',None);return d
+
+def _feed_counts(c,session):
+    """瀑布流计数：new 为本次打开实际能看到的件数（新货减去「看过即不要」排除的），seen 为被排除的件数。
+    backoffice_counts 不变（其他调用方仍用）。"""
+    out=backoffice_counts(c);seen=triage.seen_unpicked_count(c,session)
+    return dict(out,new=max(0,out['new']-seen),seen=seen)
+
+def feed_header(c,today=None):
+    """瀑布流页头（故事 22）："今日已留下 N 件 · 商品池共 M 件"。今日按柏林日期；N 为今天未撤销的人工留下（按件去重），
+    M 为当前留下状态的件数（与 02 商品池计数同一口径）。"""
+    from zoneinfo import ZoneInfo
+    berlin=ZoneInfo('Europe/Berlin')
+    day=today or datetime.now(berlin).date()
+    start=datetime(day.year,day.month,day.day,tzinfo=berlin)
+    lo=start.astimezone(timezone.utc).isoformat(timespec='seconds')
+    hi=(start+timedelta(days=1)).astimezone(timezone.utc).isoformat(timespec='seconds')   # 带时区的加法按当地钟面，跨夏令时也是次日零点
+    kept_today=c.execute("""SELECT count(DISTINCT item_id) FROM triage_events WHERE actor='human' AND action='keep'
+        AND undone_by IS NULL AND at>=? AND at<?""",(lo,hi)).fetchone()[0]
+    pool=c.execute("SELECT count(*) FROM triage WHERE state='kept'").fetchone()[0]
+    return dict(kept_today=kept_today,pool=pool)
+
+def _eff_at(client_ts,at):
+    """min(client_ts, at)，与 at 同一格式（UTC、秒、+00:00）；client_ts 无法解析、无时区或在 at 之后时取 at。"""
+    if not client_ts:return at
+    try:ts=datetime.fromisoformat(client_ts.replace('Z','+00:00'))
+    except ValueError:return at
+    if ts.tzinfo is None:return at
+    ts=ts.astimezone(timezone.utc).replace(microsecond=0).isoformat(timespec='seconds')
+    return ts if ts<at else at
+
+def _short_str(v,n):
+    return isinstance(v,str) and 1<=len(v)<=n
+
+def _owner_event(c,ev):
+    """校验一条行为事件，合规返回待写入的行，否则 None（调用方计入丢弃数）。"""
+    if not isinstance(ev,dict):return None
+    kind=ev.get('type');iid=ev.get('item_id')
+    if kind not in OWNER_EVENT_TYPES:return None
+    if not _short_str(ev.get('event_id'),100) or not _short_str(ev.get('session_id'),100) or not _short_str(iid,200):return None
+    ts=ev.get('client_ts')
+    if ts is not None and not _short_str(ts,64):return None
+    params=ev.get('params')
+    if params is not None and not isinstance(params,dict):return None
+    params=dict(params) if params else {}
+    if kind in OWNER_DWELL_MAX:
+        sec=params.get('seconds')
+        if isinstance(sec,bool) or not isinstance(sec,(int,float)) or sec!=sec:return None
+        try:params['seconds']=round(min(max(float(sec),1.0),float(OWNER_DWELL_MAX[kind])),1)
+        except OverflowError:return None      # 超大整数
+    try:text=json.dumps(params,ensure_ascii=False,allow_nan=False) if params else None
+    except (ValueError,TypeError):return None
+    if text is not None and len(text)>2000:return None
+    if not c.execute('SELECT 1 FROM items WHERE item_id=?',(iid,)).fetchone():return None
+    # 放回只对仍在新货、在售的货有效；已留下 / 去掉 / 下架的丢弃（界面据此提示"未能放回"）。
+    if kind=='restore' and not c.execute("""SELECT 1 FROM triage t JOIN items i ON i.item_id=t.item_id
+            WHERE t.item_id=? AND t.state='new' AND i.status='active'""",(iid,)).fetchone():return None
+    return dict(event_id=ev['event_id'],type=kind,item_id=iid,client_ts=ts,session_id=ev['session_id'],params=text)
 
 def backoffice_counts(c):
     """01 计数与队列口径一致（不含 backlog 与已下架）；自动移出计全部当前处于该状态的货。"""
