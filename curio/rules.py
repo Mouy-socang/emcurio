@@ -319,3 +319,17 @@ def rules_overlap(a,b):
             if his and lo>=min(his):return False
         elif a[key]!=b[key]:return False
     return True
+
+# ---- 故事 27 综合评分（方案 C，AD-15）：成分与合成在 judge.composite_scores，参数在 config/scoring.yaml，
+# 读库与写 composite_scores 在 curio/scoring.py。不调用 AI。
+def composite_scores(items,demand,names,params):
+    """每件货的综合分、四个成分与一句中文理由（见 judge.composite_scores）。"""
+    return judge.composite_scores(items,demand,names,params)
+
+def gc_demand(orders,aliases,patterns,functions,today,params):
+    """GoodCustomer 订单 → 客群成交量（见 judge.gc_demand）。"""
+    return judge.gc_demand(orders,aliases,patterns,functions,today,params)
+
+def customer_weights(n,params):
+    """客人喜好按数据量加权：(口味权重, 客人权重)（见 judge.customer_weights；本故事无调用方）。"""
+    return judge.customer_weights(n,params)

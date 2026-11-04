@@ -327,3 +327,71 @@ def anthropic_key(root=ROOT):
     """AI 打分只在 .env 填了 ANTHROPIC_API_KEY 时启用；未填返回 None（ai_status: disabled）。"""
     values=_env(root,('ANTHROPIC_API_KEY',)) or {}
     return values.get('ANTHROPIC_API_KEY') or None
+
+# ---- 故事 27：综合评分参数（config/scoring.yaml，方案 C）----
+_SCORING_CACHE={}
+SCORING_WEIGHTS=('momo','value','trend','customer')
+SCORING_TREND=('brand','pattern','function')
+# 可用 scripts/score_compare.py --set 覆盖的参数名（扁平）：四个权重、trend_brand / trend_pattern / trend_function 与下列标量。
+SCORING_SCALARS=('customer_k','customer_max','smoothing','ai_share','min_peers','half_life_days')
+
+def scoring_rules_for(root=ROOT):
+    """按调用方的 root 读综合评分参数：root 下有 config/scoring.yaml 就用它，否则用仓库里的那份。"""
+    return scoring_rules(root if (Path(root)/'config/scoring.yaml').is_file() else ROOT)
+
+def _nonneg(value,where,integer=False,positive=False):
+    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:
+        raise ValueError(where+' 必须为非负数')
+    if integer and type(value) is not int:raise ValueError(where+' 必须为整数')
+    if positive and value<=0:raise ValueError(where+' 必须大于 0')
+    return value
+
+def scoring_validate(raw):
+    """校验综合评分参数（dict，同 scoring.yaml 的结构），返回规范化的副本。格式不对时报错（中文）。"""
+    if not isinstance(raw,dict):raise ValueError('scoring.yaml 必须为映射')
+    unknown=set(raw)-{'weights','trend_weights','price_edges',*SCORING_SCALARS}
+    if unknown:raise ValueError('scoring.yaml 含未知键：'+','.join(sorted(map(str,unknown))))
+    w=raw.get('weights')
+    if not isinstance(w,dict) or set(w)!=set(SCORING_WEIGHTS):raise ValueError('scoring.weights 必须恰好有 momo、value、trend、customer')
+    weights={k:float(_nonneg(w[k],'scoring.weights.'+k)) for k in SCORING_WEIGHTS}
+    if sum(weights.values())<=0:raise ValueError('scoring.weights 之和必须大于 0')
+    t=raw.get('trend_weights')
+    if not isinstance(t,dict) or set(t)!=set(SCORING_TREND):raise ValueError('scoring.trend_weights 必须恰好有 brand、pattern、function')
+    edges=raw.get('price_edges')
+    if not isinstance(edges,list) or not edges or any(isinstance(x,bool) or not isinstance(x,(int,float)) or x<=0 for x in edges) \
+            or any(b<=a for a,b in zip(edges,edges[1:])):
+        raise ValueError('scoring.price_edges 必须为递增的正数列表')
+    out=dict(weights=weights,trend_weights={k:float(_nonneg(t[k],'scoring.trend_weights.'+k)) for k in SCORING_TREND},
+             price_edges=[float(x) for x in edges])
+    out['customer_k']=float(_nonneg(raw.get('customer_k'),'scoring.customer_k',positive=True))
+    out['customer_max']=float(_nonneg(raw.get('customer_max'),'scoring.customer_max'))
+    if out['customer_max']>weights['momo']:raise ValueError('scoring.customer_max 不能大于口味权重')
+    out['smoothing']=float(_nonneg(raw.get('smoothing'),'scoring.smoothing'))
+    share=_nonneg(raw.get('ai_share'),'scoring.ai_share')
+    if share>1:raise ValueError('scoring.ai_share 必须为 0–1')
+    out['ai_share']=float(share)
+    out['min_peers']=_nonneg(raw.get('min_peers'),'scoring.min_peers',integer=True,positive=True)
+    out['half_life_days']=float(_nonneg(raw.get('half_life_days'),'scoring.half_life_days',positive=True))
+    return out
+
+def scoring_rules(root=ROOT):
+    """读取并校验 config/scoring.yaml（故事 27，按文件修改时间缓存）。返回 scoring_validate 的结果。"""
+    path=Path(root)/'config/scoring.yaml'
+    st=path.stat()
+    key=(str(path),st.st_mtime_ns,st.st_size)
+    if key in _SCORING_CACHE:return _SCORING_CACHE[key]
+    out=scoring_validate(yaml.safe_load(path.read_text()) or {})
+    _SCORING_CACHE.clear();_SCORING_CACHE[key]=out
+    return out
+
+def scoring_override(params,sets):
+    """在已校验的参数上套用扁平覆盖 {名: 数}（名见 SCORING_WEIGHTS、trend_*、SCORING_SCALARS），返回新的已校验参数。
+    未知参数名报错。"""
+    import copy
+    raw=copy.deepcopy(params)
+    for name,value in sets.items():
+        if name in SCORING_WEIGHTS:raw['weights'][name]=value
+        elif name.startswith('trend_') and name[6:] in SCORING_TREND:raw['trend_weights'][name[6:]]=value
+        elif name in SCORING_SCALARS:raw[name]=int(value) if name=='min_peers' and float(value).is_integer() else value
+        else:raise ValueError('未知参数：'+name)
+    return scoring_validate(raw)

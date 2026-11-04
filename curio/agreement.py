@@ -1,7 +1,8 @@
 """每日封存预测与符合度（故事 23）。只在本机：不上线、不进 GoodCustomer；不改打分、不改 01 排序与拣选。
 
 - 封存（`daily_predictions`）：每个柏林日期每种类型一条、写入后不可改（只用 INSERT OR IGNORE；触发器禁止 UPDATE / DELETE）。
-  pool = 01 候选（口径同 triage.feed：新货、非 backlog、在售、未被「看过即不要」排除）按当前 `scores` 分数高到低的完整排序，
+  pool = 01 候选（口径同 triage.feed：新货、非 backlog、在售、未被「看过即不要」排除）按当前综合分（`composite_scores`，
+  故事 27、METHOD=2；没有综合分的退回 `scores`）高到低的完整排序，
   前 100 件为"系统进池"；rank = 商品池（口径同 publish.eligible / 02）按分数高到低的完整排序，前 12 件为"系统 MyR12"。
   同分按 first_seen 新到旧、再按 item_id；无分的排最后。两种触发都只在柏林 05:00 之后：采集调度当天第一轮
   （有工作的轮次在抓取入库与打分之后），或墨墨先打开 01 时的首个（不带游标的）feed 请求——后者带本次打开的
@@ -26,7 +27,7 @@ from .schedule import BERLIN
 
 POOL_TOP = 100
 RANK_TOP = publish.RANK_SIZE
-METHOD = 1                  # 预测口径版本（排序规则变了再加 1）
+METHOD = 2                  # 预测口径版本（排序规则变了再加 1；2 = 综合分，故事 27）
 SEAL_HOUR = 5               # 柏林 05:00 起才封存（采集与 feed 两种触发相同）
 FREEZE_AFTER = 2            # 今天 − 2 天及更早的结果写入 daily_agreement
 HISTORY_MAX = 90
@@ -91,12 +92,15 @@ def bounds_z(day):
 
 # ---------- 封存 ----------
 
-ORDER = "ORDER BY s.score IS NULL, s.score DESC, COALESCE(x.first_seen,'') DESC, x.item_id"
-POOL_SQL = ('''SELECT x.item_id, x.rule_version, s.score, s.source FROM (SELECT i.* FROM triage t JOIN items i ON i.item_id=t.item_id
-    WHERE ''' + triage.FEED_BASE + ' AND ' + triage.SEEN_ELSEWHERE + ''' IS NULL) x
-    LEFT JOIN scores s ON s.item_id=x.item_id ''' + ORDER)
-RANK_SQL = ('SELECT x.item_id, x.rule_version, s.score, s.source FROM (' + publish.ELIGIBLE_SQL + ''') x
-    LEFT JOIN scores s ON s.item_id=x.item_id ''' + ORDER)
+# 故事 27（METHOD=2）：按综合分（composite_scores）排，没有综合分的货退回旧分数（scores）。
+SCORE_COLS = ("COALESCE(cs.score, s.score) score, CASE WHEN cs.score IS NOT NULL THEN 'composite' ELSE s.source END source, "
+              "cs.version composite_version")
+SCORE_JOIN = ' LEFT JOIN composite_scores cs ON cs.item_id=x.item_id LEFT JOIN scores s ON s.item_id=x.item_id '
+ORDER = ("ORDER BY COALESCE(cs.score, s.score) IS NULL, COALESCE(cs.score, s.score) DESC, COALESCE(x.first_seen,'') DESC, "
+         "x.item_id")
+POOL_SQL = ('SELECT x.item_id, x.rule_version, ' + SCORE_COLS + ''' FROM (SELECT i.* FROM triage t JOIN items i ON i.item_id=t.item_id
+    WHERE ''' + triage.FEED_BASE + ' AND ' + triage.SEEN_ELSEWHERE + ' IS NULL) x' + SCORE_JOIN + ORDER)
+RANK_SQL = ('SELECT x.item_id, x.rule_version, ' + SCORE_COLS + ' FROM (' + publish.ELIGIBLE_SQL + ') x' + SCORE_JOIN + ORDER)
 
 
 def prediction_rows(c, kind, session=None):
@@ -121,11 +125,12 @@ def seal(c, day=None, trigger=None, session=None):
             k = r['source'] or 'none'
             sources[k] = sources.get(k, 0) + 1
         versions = sorted({r['rule_version'] for r in rows if r['rule_version'] is not None})
+        composite = sorted({r['composite_version'] for r in rows if r['composite_version'] is not None})
         cur = c.execute('INSERT OR IGNORE INTO daily_predictions(day,kind,items,scores,source,version,sealed_at,trigger) '
                         'VALUES(?,?,?,?,?,?,?,?)',
                         (day, kind, json.dumps([r['item_id'] for r in rows], ensure_ascii=False),
-                         json.dumps([r['score'] for r in rows]), json.dumps(dict(table='scores', counts=sources), sort_keys=True),
-                         json.dumps(dict(method=METHOD, rule_versions=versions)), _now(), trigger))
+                         json.dumps([r['score'] for r in rows]), json.dumps(dict(table='composite_scores', fallback='scores', counts=sources), sort_keys=True),
+                         json.dumps(dict(method=METHOD, rule_versions=versions, composite_versions=composite)), _now(), trigger))
         if cur.rowcount:
             wrote.append(kind)
     return wrote

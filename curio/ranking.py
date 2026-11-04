@@ -43,9 +43,11 @@ def rank_reason(c, item, code):
 
 
 def _scored(c, state):
-    return c.execute('''SELECT i.*, s.score sort_score, t.updated_at state_at FROM triage t
-        JOIN items i ON i.item_id=t.item_id LEFT JOIN scores s ON s.item_id=i.item_id
-        WHERE t.state=? ORDER BY s.score IS NULL, s.score DESC, t.updated_at DESC, i.item_id''', (state,)).fetchall()
+    # 故事 27：按综合分高到低，没有综合分的退回旧分数，都没有的在后。
+    return c.execute('''SELECT i.*, COALESCE(cs.score, s.score) sort_score, t.updated_at state_at FROM triage t
+        JOIN items i ON i.item_id=t.item_id LEFT JOIN composite_scores cs ON cs.item_id=i.item_id
+        LEFT JOIN scores s ON s.item_id=i.item_id
+        WHERE t.state=? ORDER BY sort_score IS NULL, sort_score DESC, t.updated_at DESC, i.item_id''', (state,)).fetchall()
 
 
 def _pool_row(c, item, ranked, root):
@@ -55,6 +57,7 @@ def _pool_row(c, item, ranked, root):
     out['rank_pos'] = ranked.index(code) + 1 if code in ranked else None
     out['rank_reason'] = rank_reason(c, item, code)
     out['sold'] = triage.is_sold(c, item['item_id'])
+    out['pool_at'] = item['state_at']           # 进池（最近一次进入该状态）的时间，02 可按它排序
     return out
 
 

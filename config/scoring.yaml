@@ -1,0 +1,34 @@
+# 综合评分（故事 27，方案 C，墨墨 2026-11-04 定；AD-15）：每件货本地算四个成分（各 0–100 百分位），按权重合成综合分。
+# 本文件只是数据；成分与合成的计算只在 curio/judge.py（经 curio/rules.py 调用），重算与存储在 curio/scoring.py。
+# 不调用 AI；改任何参数前先用 scripts/score_compare.py --set 名=值 只读对比排序差异与符合度变化。
+
+# 合成权重（相加为 100）。客人喜好现在一律 0（共享的 R12、商品池、新货三处都不按单个客人排）。
+weights:
+  momo: 55        # 墨墨口味
+  value: 25       # 性价比（计入值 = 性价比 ×（口味/100）²，口味差的便宜货不靠便宜上位）
+  trend: 20       # 客群趋势（GoodCustomer 成交）
+  customer: 0     # 客人喜好
+
+# 客人喜好的权重随数据量增长：w = 数据量 ÷（数据量 + customer_k）；客人占 customer_max × w，口味占 momo − customer_max × w。
+customer_k: 5
+customer_max: 35
+
+# 墨墨口味：墨墨人工留下 = 1、去掉或「看过没选」= 0 的分层平滑留下率（品牌 → 品牌+器型 → 品牌+器型+图案），
+# 每层向上一层收缩，平滑强度 smoothing；再按"品牌 + 价位"的留下率开方修正。一件货自己的标签不计入自己（留一）。
+# 有 AI 分（source=ai）时，口味 = 本项百分位 × (1 − ai_share) + AI 分百分位 × ai_share。
+smoothing: 8
+ai_share: 0.5
+# 价位分档（欧元标价的上界，最后一档为"以上"）。
+price_edges: [30, 60, 120, 250, 500]
+
+# 性价比：欧元标价 ÷ 同类挂牌价中位数（品牌+器型+图案 ≥ min_peers 件，否则品牌+器型 ≥ min_peers 件），越便宜越高；
+# 无同类、非欧元、无标价为 50。
+min_peers: 5
+
+# 客群趋势：GoodCustomer 订单（不含退款），按成交日期衰减，每过 half_life_days 天减半；
+# 趋势 = ln(1+同品牌) + pattern × ln(1+同品牌+图案) + function × ln(1+同品牌+器型)。读不了订单时全为 50。
+half_life_days: 180
+trend_weights:
+  brand: 1.0
+  pattern: 1.5
+  function: 1.5

@@ -560,12 +560,33 @@ uv run python scripts/publish.py publish [--flush]            # 生成完整快�
 - 接口（本机后台，令牌 + Origin 同其它写接口；写请求带 `request_id`，表 `guest_requests` 幂等）：`GET /api/guests[?refresh=1]`、`GET /api/guests/search?q=`、`POST /api/guests/link`（action：link / relink / unlink / create）、`POST /api/guests/command`（action：disable_account / reset_password）、`POST /api/guests/invite`。
 - 不在本故事：按账号排序（故事 16 起）、删除账号与撤回同意、自动匹配建议。关联、更正、解除后重算行为交接文件见下节（故事 15）。
 
+## 综合评分（故事 27，方案 C；AD-15）
+
+每件货（含 backlog、自动移出、已处理）在表 `composite_scores` 里一行：`score`（综合分）与四个成分 `momo`、`value`、`trend`、`customer`（都是 0–100，成分是在**当次全部货**上算的百分位，没有原始值的为 50）、一句中文理由 `reason`、参数版本 `version`（`C:` + 参数指纹）、`scored_at`。参数全在 `config/scoring.yaml`（墨墨 2026-11-04 定）；计算只在 `curio/judge.py`（`composite_scores` 等纯函数，经 `curio/rules.py`），读库与写表在 `curio/scoring.py`。不调用 AI，不改 `ai.py` 的预算与请求，不改拣选状态、不自动移出也不上榜（AD-26）。
+
+- **墨墨口味**：标签 = 墨墨留下（`kept` / `out_of_pool`）1、去掉（`removed`）或「看过没选」（新货且有 `owner_events.seen`）0。分层平滑留下率：从全局留下率起，依次向品牌 → 品牌+器型 → 品牌+器型+图案收缩（`rate = (留下 + m·上一层) ÷ (件数 + m)`，m = `smoothing` = 8；下一层没有记录就停），再乘以 √(品牌+价位留下率 ÷ 全局留下率)（价位档 `price_edges`，同样平滑）。**一件货自己的标签不计入自己**（留一），理由里的"你留下 6/20"也不含自己。有 AI 分（`scores.source='ai'`）时口味 = 本项百分位与 AI 分百分位各半（`ai_share`）。
+- **性价比**：欧元标价 ÷ 同类挂牌价中位数（品牌+器型+图案 ≥ 5 件，否则品牌+器型 ≥ 5 件，`min_peers`），越便宜越高；无同类、无品牌、非欧元、无标价为 50。**门控**：合成时计入值 = 性价比 ×（口味/100）²（口味差的便宜货不靠便宜上位）。
+- **客群趋势**：GoodCustomer `orders/order_items.jsonl`（路径取 `config/settings.yaml` 的 `goodcustomer.db`；不含退款；按成交日期衰减，半衰期 180 天）里同品牌、同品牌+图案、同品牌+器型的成交量：`ln(1+品牌) + 1.5·ln(1+品牌+图案) + 1.5·ln(1+品牌+器型)`。品牌按中文品名包含 `config/matching.yaml` 的品牌别名识别（没有再用 `maker_guess`），图案 / 器型按中文品名包含知识库图案 / 功能的中文名（长的优先）。无品牌为 0（最低）。订单读不了时趋势全为 50，理由末尾注明"（客群数据缺）"，记警告。
+- **客人喜好**：共享的三处（01、02、03）一律 0。按数据量加权的函数 `rules.customer_weights(n)`：w = n ÷（n + 5），客人占 35w、口味占 55 − 35w（已测试，本故事无调用方）。
+- **合成**：(55·口味 + 25·性价比·(口味/100)² + 20·趋势 + 0·客人) ÷ 权重和。理由如「口味 82（梅森·洋葱·盘：你留下 6/20）· 性价比 40（同类中位 €80）· 客群 75」（分组写到用上的最深一层，品牌·图案·器型；有 AI 分时口味括号里加"AI 分 N"）。
+- **何时重算**：采集每轮（空闲轮与有工作的轮次都算；有工作的轮次在 AI 打分之后）、在封存预测之前，重算全部货，读在事务外、清空后整表写入为一次事务（真实库约 2.3 万件、约 1.3 秒）。结果字段 `composite_status`（`ok` / `error`）、`composite_count`、`composite_trend`（`ok` / `missing`）、`composite_version`、`composite_seconds`；失败只记 `composite_status: error` 与 `composite_error`，不影响采集。
+- **显示**：`store.card()` 优先给综合分（四舍五入）与理由，没有综合分时用旧 `scores`。02 商品池每张卡、03 R12 每行显示"分数 N · 理由"；02 可在「按分数 / 按进池时间」之间切换（按分数为服务端顺序：综合分高到低，无综合分退回旧分；按进池时间为最近进入商品池的在前）。01 瀑布流卡片与从瀑布流打开的详情**在墨墨对这张卡点过留下或去掉、或这张卡在本次打开里已记为看到（seen）之后**才显示分数与理由（之前卡上占位不显示、详情写"看到这件货之后显示"），其余入口（02、03、看过未选、已自动移出）照常显示。
+- **07 封存**：`METHOD=2`，pool / rank 预测按综合分排，无综合分的退回旧分数（`source` 记 `composite_scores` 与各来源件数，`version` 另记 `composite_versions`）；已封存的历史不动。
+- **调参前先对比**（只读，`immutable=1` 打开真实库，不写库；注意 immutable 不读 WAL 里还没并回主文件的最新改动）：
+
+```sh
+uv run python scripts/score_compare.py --set value=35
+uv run python scripts/score_compare.py --set momo=50,value=30 --set trend_pattern=2
+```
+
+  可改：`momo`、`value`、`trend`、`customer`、`trend_brand`、`trend_pattern`、`trend_function`、`customer_k`、`customer_max`、`smoothing`、`ai_share`、`min_peers`、`half_life_days`（未知参数名报错退出）。输出当前参数与对比参数的：回测（有标签的货里综合分前 100 的留下数与随机基线）、当前 R12 候选前 12 与商品池前 20 的名次变化、各已封存日按两组参数重排后的 07 进池符合度（同一份封存列表与 K、V）。2026-11-04 真实库：当前参数前 100 命中 34 件、随机基线 8.6 件（4.0 倍）；`value=35` 为 32 件。
+
 ## 后台 07 符合度：系统选的和墨墨选的有多一致（故事 23）
 
 只在本机（`curio/agreement.py`），不上线、不进 GoodCustomer；只读，不改打分、不改 01 排序与拣选。
 
 - **封存**（表 `daily_predictions`，每个柏林日期 pool / rank 各一条，写入后不可改：`INSERT OR IGNORE`，另有禁止 UPDATE 的触发器）：
-  `pool` = 01 候选（口径同瀑布流：新货、非 backlog、在售、未被"看过即不要"排除）按当前 `scores` 分数高到低的完整有序 `item_id` 列表，前 100 件为"系统进池"；
+  `pool` = 01 候选（口径同瀑布流：新货、非 backlog、在售、未被"看过即不要"排除）按当前综合分（`composite_scores`，故事 27，`METHOD=2`；无综合分的退回 `scores`）高到低的完整有序 `item_id` 列表，前 100 件为"系统进池"；
   `rank` = 商品池（口径同 02 / `publish.eligible`）按分数高到低的完整排序，前 12 件为"系统 MyR12"。同分按 `first_seen` 新到旧、再按 `item_id`，无分的排最后；与 01 显示顺序无关。
   每条另记封存时的分数列表、分数来源计数（`source`）、口径版本与 `rule_version`（`version`）、封存时间与触发方式（`collect` / `feed`）。
   两种触发都只在**柏林 05:00 之后**：采集调度当天第一轮（`seal_for_run`；空闲轮在调度判断后，有工作的轮次在抓取入库与 AI 打分之后，让当天第一批新货进预测；结果字段 `prediction_status`，失败不影响采集），或墨墨先打开 01 时的首个不带游标的 `GET /api/triage/feed`（`seal_for_feed`，带本次打开的 `session`，本次里刚看到的货不被"看过即不要"排除）。表上有禁止 UPDATE / DELETE 的触发器，代码只用 `INSERT OR IGNORE`。

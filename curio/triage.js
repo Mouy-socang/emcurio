@@ -86,6 +86,14 @@ function cardEl(c) {
   const src = document.createElement('p'); src.className = 'fsrc'; src.textContent = c.platform;
   if (c.code) { src.append(' · '); const cd = document.createElement('span'); cd.className = 'mono'; cd.textContent = c.code; src.append(cd); }
   meta.append(h, pr, src);
+  // 故事 27：分数与理由先占位不显示（不让分数先入为主），墨墨点要或这张卡记为看到之后才显示（revealScore）。
+  if (c.score != null) {
+    const sc = document.createElement('p'); sc.className = 'fsc';
+    const sm = document.createElement('span'); sm.className = 'mono'; sm.textContent = c.score; sc.append('分数 ', sm);
+    if (c.score_reason) sc.append(' · ' + c.score_reason);
+    if (!scoreOpen(c.item_id)) sc.classList.add('veil');
+    meta.append(sc);
+  }
   const acts = document.createElement('div'); acts.className = 'facts';
   const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn'; rm.dataset.act = 'remove'; rm.textContent = '去掉';
   const kp = document.createElement('button'); kp.type = 'button'; kp.className = 'btn primary'; kp.dataset.act = 'keep'; kp.textContent = '留下';
@@ -97,6 +105,12 @@ function cardEl(c) {
   rm.onclick = () => act('remove', c.item_id);
   kp.onclick = () => act('keep', c.item_id);
   return li;
+}
+// 01 分数「先选后显示」：墨墨对这张卡点过要或去掉（含未确认），或本次打开里已记为看到，才显示分数与理由。
+function scoreOpen(id) { return handled.has(id) || beh.isSeen(id); }
+function revealScore(id) {
+  const e = cards.get(id); if (!e) return;
+  const sc = e.li.querySelector('.fsc'); if (sc) sc.classList.remove('veil');
 }
 // 放进瀑布流：front=true 放最前（捞回、撤销回来的货），否则接在末尾（续载）。
 function addCard(c, front) {
@@ -228,6 +242,7 @@ function act(action, id) {
   const hadFocus = e.li.contains(document.activeElement);
   const target = hadFocus ? nextFocus(e.li, action) : null;
   handled.add(id);
+  if (action === 'keep') revealScore(id);
   fadeOut(e.li);
   if (target) target.focus();
   newCount = Math.max(0, (newCount || 0) - 1); counts();
@@ -383,7 +398,7 @@ const beh = (function () {
     if (!seen.has(id) && !timers.has(id)) {
       timers.set(id, setTimeout(() => {
         timers.delete(id);
-        if (since.has(id) && !seen.has(id)) { seen.add(id); push('seen', id); }
+        if (since.has(id) && !seen.has(id)) { seen.add(id); push('seen', id); revealScore(id); }
       }, SEEN_MS));
     }
   }
@@ -434,6 +449,7 @@ const beh = (function () {
       detailOpen = null; resume();
     },
     session() { return session; },
+    isSeen(id) { return seen.has(id); },
     // 换打开（离开 01 再回来）前把排队的事件尽量发出，服务端才知道哪些货"上次看过"。
     // 等在路上的那批，再把队列发完；某批确实失败（网络、5xx、403）就停下。
     async flushAll() { while (q.length && !stopped) { if (!(await flush())) return false; } return true; },
@@ -515,7 +531,7 @@ function applyRescued(d, fallback) {
   const card = d.card || fallback;
   handled.delete(card.item_id);
   if (cards.has(card.item_id)) dropCard(card.item_id);
-  if (card.status === 'active') { addCard(Object.assign({}, card, {score: undefined, score_reason: undefined}), true); newCount = (newCount || 0) + 1; }
+  if (card.status === 'active') { addCard(card, true); newCount = (newCount || 0) + 1; }   // 分数同样先选后显示
   arCount = Math.max(0, (arCount || 0) - 1);
   setNet(false); sync(d); counts(); updateEmpty();
   return card;
@@ -704,7 +720,9 @@ async function openDetail(id, mode, opener) {
   else u.textContent = '—';
   $('dReason').textContent = d.agent_reason || '—';
   const sc = $('dScore'); sc.textContent = '';
-  if (d.score != null) { const m = document.createElement('span'); m.className = 'mono'; m.textContent = d.score; sc.append(m); if (d.score_reason) sc.append(' · ' + d.score_reason); }
+  // 故事 27：从 01 瀑布流打开的详情同样「先选后显示」——点过要或已记为看到之后才显示分数与理由。
+  if (mode === 'new' && cards.has(id) && !scoreOpen(id)) sc.textContent = '看到这件货之后显示';
+  else if (d.score != null) { const m = document.createElement('span'); m.className = 'mono'; m.textContent = d.score; sc.append(m); if (d.score_reason) sc.append(' · ' + d.score_reason); }
   else sc.textContent = '暂无分数';
   // 03 费用档位（手动值优先，可恢复自动）
   renderFee(d); $('dFeeMsg').hidden = true;

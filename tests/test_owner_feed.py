@@ -84,15 +84,15 @@ def http(db):
 
 # ---------- 瀑布流 ----------
 
-def test_feed_order_rescued_first_then_newest_without_scores(db, cfg, http):
+def test_feed_order_rescued_first_then_newest_not_by_score(db, cfg, http):
     stocked(db, cfg)
     d = http['get']('/api/triage/feed')
     ids = [c['item_id'] for c in d['items']]
     assert ids == ['bad', 'n0', 'n1', 'n2', 'n3', 'n4']      # 捞回的第一；高分的 n4 仍按上架时间排在最后
     assert d['next_cursor'] is None and d['counts'] == {'new': 6, 'auto_removed': 0, 'seen': 0}
     for c in d['items']:
-        assert 'score' not in c and 'score_reason' not in c
-        assert {'item_id', 'name', 'price', 'platform', 'image', 'code', 'tags'} <= set(c)
+        # 故事 27：卡片带分数与理由（界面在点要或记为看到之后才显示，见 triage.js）；排序仍不按分数。
+        assert {'item_id', 'name', 'price', 'platform', 'image', 'code', 'tags', 'score', 'score_reason'} <= set(c)
     # 详情里照旧显示分数
     assert http['get']('/api/triage/item?id=n4')['score'] == 99
     # 旧接口 /api/triage 的分数排序不变（其他调用方仍用）
@@ -271,7 +271,7 @@ def test_seen_unpicked_list_and_restore(db, cfg, http):
     set_at(db, 's4', '2026-11-04T07:00:00+00:00')
     d = http['get']('/api/triage/seen?session=B')
     assert [c['item_id'] for c in d['items']] == ['n2', 'n1', 'n4'] and d['total'] == 3     # 最近看到的在前
-    assert all('score' not in c and c['seen_at'] for c in d['items'])
+    assert all(c['seen_at'] for c in d['items'])
     a = http['get']('/api/triage/seen?session=B&limit=2')
     b = http['get']('/api/triage/seen?session=B&limit=2&cursor=' + a['next_cursor'])
     assert [c['item_id'] for c in a['items'] + b['items']] == ['n2', 'n1', 'n4'] and b['next_cursor'] is None

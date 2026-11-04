@@ -752,8 +752,11 @@ def run(root,clock=time.time):
             # 空闲轮也发心跳（AD-10）：同步模块每轮都把各平台最近成功时间发给服务器。
             from . import sync,learning
             # CAP-8：每轮归纳一次待审规律（只改 05 计数，不打断）。
+            # 故事 27：封存之前重算全部货的综合分（失败只记结果字段）。
+            from .scoring import refresh_for_run
+            composite=refresh_for_run(store,root,clock())
             predicted=seal_for_run(store,clock())
-            return {'status':'idle',**sched.summary(),**learning.run(store,root),**sync.run(store,root),**predicted}
+            return {'status':'idle',**sched.summary(),**learning.run(store,root),**sync.run(store,root),**composite,**predicted}
         result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub,'pool_check_ran':do_pool}
         with store.connect() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
@@ -838,6 +841,9 @@ def run(root,clock=time.time):
         # CAP-4：抓取与在售检查之后，在 AI 预算内给新货打分；失败只记 ai_status，不影响其它结果。
         from . import ai
         result.update(ai.run(store,root,config,clock))
+        # 故事 27：AI 打分之后、封存之前重算全部货的综合分（含 backlog、自动移出、已处理）；失败只记结果字段。
+        from .scoring import refresh_for_run
+        result.update(refresh_for_run(store,root,clock()))
         result.update(seal_for_run(store,clock()))
         # AD-14：每天最多成功取一次 ECB 人民币参考汇率（失败沿用上次的值与日期），发布时随快照上线。
         from . import fx

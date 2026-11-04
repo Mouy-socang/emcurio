@@ -17,6 +17,7 @@
   let status = null;            // 发布状态 {published_at, dirty}
   let rankLoaded = false, unsaved = false, saving = false, again = false, saveError = '';
   let selected = null, dragging = false, previewing = false, cancelDrag = null;
+  let poolSort = 'score';       // 02 排序：score（按分数，服务端顺序）/ time（按进池时间，新到旧）
 
   const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
   const two = n => String(n).padStart(2, '0');
@@ -36,6 +37,13 @@
     h.append(t);
     (c.tags || []).forEach(x => h.append(tagEl(x)));
     return h;
+  }
+  // 故事 27：分数与理由一行（02 每张卡、03 每行）；没有分数时不显示。
+  function scoreEl(c) {
+    if (c.score == null) return null;
+    const p = el('p', 'sc'); p.append('分数 ', el('span', 'mono', String(c.score)));
+    if (c.score_reason) p.append(' · ' + c.score_reason);
+    return p;
   }
   // 重绘后把焦点放回同一个控件（data-k = 货号:用途）。
   function keyOf() { const a = document.activeElement; return a && a.dataset ? a.dataset.k : null; }
@@ -185,7 +193,9 @@
       yes.onclick = () => poolAct('mark_sold', c, msg, yes);
       acts.append(rb, ob, sb);
     }
-    body.append(code, t, p, st, acts);
+    body.append(code, t, p, st);
+    const sc = scoreEl(c); if (sc) body.append(sc);
+    body.append(acts);
     if (confirmBox) body.append(confirmBox);
     body.append(why, msg);
     li.append(th, body);
@@ -201,15 +211,30 @@
     for (const li of rows) { const r = li.getBoundingClientRect(); if (r.bottom > 0 && r.height) return li; }
     return null;
   }
+  // 02 排序切换：按分数为服务端顺序（综合分高到低）；按进池时间为最近进池的在前。
+  function sortedPool() {
+    if (poolSort !== 'time') return pool.items;
+    return pool.items.slice().sort((a, b) => (b.pool_at || '').localeCompare(a.pool_at || '') || a.item_id.localeCompare(b.item_id));
+  }
+  function setPoolSort(v) {
+    if (poolSort === v) return;
+    poolSort = v; renderPool(false);
+    const top = $('poolList').getBoundingClientRect().top;
+    if (top < 0) window.scrollBy(0, top - 12);          // 换了排序从第一件看起
+    say(v === 'time' ? '已按进池时间排序' : '已按分数排序');
+  }
   function renderPool(anchor, top) {
     if (!pool) return;
     const k = keyOf();
-    const a = view === 'pool' ? anchorRow(anchor) : null;
+    const a = view === 'pool' && anchor !== false ? anchorRow(anchor) : null;     // anchor=false：不保持原位（换排序）
     const aId = a && a.dataset.id, aTop = a && (top != null && a.dataset.id === anchor ? top : a.getBoundingClientRect().top);
     $('poolN').textContent = pool.counts.kept;
     $('poolRankN').textContent = order.length;
     const list = $('poolList'); list.textContent = '';
-    pool.items.forEach(c => list.append(poolRow(c, false)));
+    sortedPool().forEach(c => list.append(poolRow(c, false)));
+    list.setAttribute('aria-label', poolSort === 'time' ? '已留下的货，最近进池的在前' : '已留下的货，按分数高到低');
+    $('sortScore').setAttribute('aria-pressed', poolSort === 'score' ? 'true' : 'false');
+    $('sortTime').setAttribute('aria-pressed', poolSort === 'time' ? 'true' : 'false');
     list.classList.add('grid');
     $('poolEmpty').hidden = pool.items.length > 0;
     const outList = $('outList'); outList.textContent = '';
@@ -369,6 +394,7 @@
     h3.prepend(vis);
     const rp = el('p', 'rp', code + (c.price ? ' · ' + c.price : ''));
     sel.append(h3, rp);
+    const sc = scoreEl(c); if (sc) sel.append(sc);
     if (st.off && st.reason && !st.gone) sel.append(el('p', 'why', st.reason));
     const hd = el('button', 'hd', '≡'); hd.type = 'button'; hd.dataset.k = code + ':hd';
     hd.setAttribute('aria-label', '拖动 ' + (c.name || code) + '，第 ' + (i + 1) + ' 名' + (st.off ? '，已下架' : ''));
@@ -565,6 +591,8 @@
   /* ---------- 绑定 ---------- */
   $('btnPreview').onclick = preview;
   $('poolReload').onclick = loadPool;
+  $('sortScore').onclick = () => setPoolSort('score');
+  $('sortTime').onclick = () => setPoolSort('time');
   window.addEventListener('hashchange', () => show(fromHash(), true));
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && cancelDrag) { e.preventDefault(); cancelDrag(); } });
   window.addEventListener('curio:detail-closed', () => {

@@ -211,6 +211,11 @@ class Store:
                 item_id TEXT PRIMARY KEY, score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 100),
                 source TEXT NOT NULL CHECK(source IN ('rule','ai')), model TEXT, reason TEXT,
                 rule_version INTEGER, scored_at TEXT NOT NULL);
+            -- 故事 27 综合评分（方案 C）：每件货一行，每轮采集在封存之前全量重写（curio/scoring.py）；
+            -- score 与四个成分为 0–100，reason 为一句中文理由，version 为参数版本。
+            CREATE TABLE IF NOT EXISTS composite_scores(item_id TEXT PRIMARY KEY, score REAL NOT NULL,
+                momo REAL NOT NULL, value REAL NOT NULL, trend REAL NOT NULL, customer REAL NOT NULL,
+                reason TEXT NOT NULL, version TEXT NOT NULL, scored_at TEXT NOT NULL);
             -- AI 已答复过的货（时间与当时 rule_version）：漏回、越界、截断的货 24 小时内不重发。
             CREATE TABLE IF NOT EXISTS ai_attempts(item_id TEXT PRIMARY KEY, attempted_at TEXT NOT NULL, rule_version INTEGER);
             -- 故事 19 看图硬筛：AI 对送检主图的三项观察（只是观察，是否移出由 judge.visual_filter 决定）；
@@ -660,7 +665,8 @@ def _decode_cursor(cursor):
     except (ValueError,TypeError,UnicodeError):raise ValueError('游标无效')
 
 def _feed_card(c,row,root):
-    d=card(c,row,root);d.pop('score',None);d.pop('score_reason',None);return d
+    # 故事 27：卡片带分数与理由；01 界面在墨墨点要或这张卡已记为看到之后才显示（triage.js）。
+    return card(c,row,root)
 
 def _feed_counts(c,session):
     """瀑布流计数：new 为本次打开实际能看到的件数（新货减去「看过即不要」排除的），seen 为被排除的件数。
@@ -761,7 +767,10 @@ def card(c,item,root=ROOT):
     item=dict(item);iid=item['item_id']
     std=_std(c,iid)
     named=std is not None and std['status']=='named' and bool(std['std_name'])
-    score=c.execute('SELECT score,reason FROM scores WHERE item_id=?',(iid,)).fetchone()
+    # 故事 27：优先显示综合分（四舍五入到整数）与理由；没有综合分时用旧分数。
+    score=c.execute('SELECT score,reason FROM composite_scores WHERE item_id=?',(iid,)).fetchone()
+    if score is not None:score=dict(score=int(round(score['score'])),reason=score['reason'])
+    else:score=c.execute('SELECT score,reason FROM scores WHERE item_id=?',(iid,)).fetchone()
     images=item_images(c,iid,item.get('image'),root)
     tags=[]
     if std is not None and 'overpaint' in std.keys() and std['overpaint']:tags.append('外画')

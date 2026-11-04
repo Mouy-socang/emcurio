@@ -1104,3 +1104,270 @@ def personal_order(pool, needs, prefs, seen, rejected, rules, params):
     """一位客户的商品池顺序（personal_scores + order_by_scores）。返回 (货号顺序, 需求/喜好是否对上池中至少一件)。"""
     scores, matched = personal_scores(pool, needs, prefs, seen, rejected, rules, params)
     return order_by_scores([c for c, _ in pool], scores), matched
+
+
+# ---------------------------------------------------------------- 综合评分（故事 27，方案 C；AD-15）
+# 纯函数：不读库、不读文件、不调用 AI。参数见 config/scoring.yaml（config.scoring_rules），
+# 读库与写 composite_scores 在 curio/scoring.py；对外入口 curio/rules.composite_scores。
+#
+# 一件货（dict）用到的字段：item_id、brand、pattern_id、function_id（标准名称）、listed_price、currency、
+# label（墨墨人工留下 1 / 去掉或「看过没选」0 / 无 None）、ai_score（source=ai 的旧分数，否则 None）。
+
+import bisect as _bisect
+import math as _math
+import statistics as _statistics
+
+_TASTE_LEVELS = (('b', ('brand',)), ('bf', ('brand', 'function_id')), ('bfp', ('brand', 'function_id', 'pattern_id')))
+
+
+def _key(it, kind, fields):
+    vals = tuple(it.get(f) for f in fields)
+    return (kind,) + vals if all(vals) else None
+
+
+def eur_price(it):
+    """欧元标价；非欧元、无价或非正数为 None。"""
+    p = it.get('listed_price')
+    if (it.get('currency') or '').upper() != 'EUR' or p is None or isinstance(p, bool):
+        return None
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return None
+    return p if p > 0 and _math.isfinite(p) else None
+
+
+def price_tier(it, edges):
+    """欧元标价所在价位档（第一个大于标价的上界；超过最后一档为 inf）；无欧元价 None。"""
+    p = eur_price(it)
+    if p is None:
+        return None
+    for e in edges:
+        if p < e:
+            return e
+    return float('inf')
+
+
+def taste_counts(items, params):
+    """留下率统计：({分组键: [留下数, 有标签件数]}, 全局留下率)。分组：品牌、品牌+器型、品牌+器型+图案、品牌+价位。"""
+    cnt = {}
+    labelled = [it for it in items if it.get('label') in (0, 1)]
+    for it in labelled:
+        keys = [_key(it, kind, fields) for kind, fields in _TASTE_LEVELS]
+        tier = price_tier(it, params['price_edges'])
+        keys.append(('pb', it.get('brand'), tier) if it.get('brand') and tier is not None else None)
+        for k in keys:
+            if k is not None:
+                c = cnt.setdefault(k, [0, 0])
+                c[0] += it['label']
+                c[1] += 1
+    cnt[('all',)] = [sum(it['label'] for it in labelled), len(labelled)]     # 全局（留一时据此去掉自己）
+    g = cnt[('all',)][0] / len(labelled) if labelled else 0.0
+    return cnt, g
+
+
+def taste(it, cnt, g, params):
+    """墨墨口味（原始留下率）与理由依据：(rate, dict(level, keys, kept, total))。
+    分层平滑：从全局留下率起，依次向品牌、品牌+器型、品牌+器型+图案收缩（强度 m = smoothing），
+    下一层没有记录就停；再乘以 √(品牌+价位留下率 ÷ 全局留下率)（价位层同样平滑到全局）。
+    这件货自己的标签不计入（留一）。level 为用到的最深一层（kind 与键），没有可用记录时 None。"""
+    m = params['smoothing']
+    y = it.get('label') if it.get('label') in (0, 1) else None
+    if y is not None and ('all',) in cnt:        # 留一：全局留下率也不含自己
+        a, n = cnt[('all',)]
+        g = (a - y) / (n - 1) if n > 1 else 0.0
+    rate, used = g, None
+    for kind, fields in _TASTE_LEVELS:
+        k = _key(it, kind, fields)
+        if k is None or k not in cnt:
+            break
+        a, n = cnt[k]
+        if y is not None:
+            a, n = a - y, n - 1
+        if n <= 0:
+            break
+        rate = (a + m * rate) / (n + m)
+        used = (k, a, n)
+    tier = price_tier(it, params['price_edges'])
+    pk = ('pb', it.get('brand'), tier) if it.get('brand') and tier is not None else None
+    if pk is not None and pk in cnt and g > 0:
+        a, n = cnt[pk]
+        if y is not None:
+            a, n = a - y, n - 1
+        if n > 0:
+            rate *= ((a + m * g) / (n + m) / g) ** 0.5
+    return rate, (dict(key=used[0], kept=used[1], total=used[2]) if used else None)
+
+
+def peer_medians(items, params):
+    """同类挂牌价中位数：{('bfp'|'bf', …): 中位数}，只留件数 ≥ min_peers 的组（只算有品牌、有欧元标价的货）。"""
+    groups = {}
+    for it in items:
+        p = eur_price(it)
+        if p is None or not it.get('brand'):
+            continue
+        for kind, fields in (('bfp', ('brand', 'function_id', 'pattern_id')), ('bf', ('brand', 'function_id'))):
+            k = _key(it, kind, fields)
+            if k is not None:
+                groups.setdefault(k, []).append(p)
+    return {k: _statistics.median(v) for k, v in groups.items() if len(v) >= params['min_peers']}
+
+
+def value_ratio(it, med):
+    """性价比原始值：(欧元标价 ÷ 同类中位数, 中位数, 为什么没有)。先找品牌+器型+图案，再找品牌+器型。
+    算不了时比值与中位数为 None，第三项为原因（无标价 / 非欧元 / 无品牌 / 无同类）。"""
+    if it.get('listed_price') is None:
+        return None, None, '无标价'
+    p = eur_price(it)
+    if p is None:
+        return None, None, '非欧元标价' if (it.get('currency') or '').upper() != 'EUR' else '无标价'
+    if not it.get('brand'):
+        return None, None, '无品牌'
+    for kind, fields in (('bfp', ('brand', 'function_id', 'pattern_id')), ('bf', ('brand', 'function_id'))):
+        k = _key(it, kind, fields)
+        if k is not None and k in med and med[k] > 0:
+            return p / med[k], med[k], None
+    return None, None, '无同类'
+
+
+def gc_order_facts(name, maker_guess, aliases, patterns, functions):
+    """一条 GoodCustomer 订单的（品牌, 图案 ID, 器型 ID）：品牌按中文品名包含品牌别名（aliases：[(小写别名, 品牌)]，按顺序），
+    没有再用 maker_guess；图案 / 器型按中文品名包含知识库中文名（patterns / functions：[(中文名, ID)]，长的在前）。"""
+    name = name or ''
+    low = name.lower()
+    brand = next((b for a, b in aliases if a in low), None)
+    if not brand and maker_guess:
+        brand = dict(aliases).get(str(maker_guess).lower(), maker_guess)
+    pat = next((i for zh, i in patterns if zh in name), None)
+    fun = next((i for zh, i in functions if zh in name), None)
+    return brand, pat, fun
+
+
+def gc_demand(orders, aliases, patterns, functions, today, params):
+    """客群成交量（按成交日期衰减，每 half_life_days 天减半；不含退款）：{('b', 品牌) / ('bp', 品牌, 图案) / ('bf', 品牌, 器型): 量}。
+    orders：GoodCustomer order_items 行（dict）；today：date；日期读不了的按 365 天前算。"""
+    from datetime import date as _date
+    dem = {}
+    for o in orders:
+        if not isinstance(o, dict) or o.get('refunded'):
+            continue
+        b, p, f = gc_order_facts(o.get('product_name'), o.get('maker_guess'), aliases, patterns, functions)
+        try:
+            age = max(0, (today - _date.fromisoformat(str(o.get('session_date'))[:10])).days)
+        except (TypeError, ValueError):
+            age = 365
+        w = 0.5 ** (age / params['half_life_days'])
+        if b:
+            dem[('b', b)] = dem.get(('b', b), 0.0) + w
+            if p:
+                dem[('bp', b, p)] = dem.get(('bp', b, p), 0.0) + w
+            if f:
+                dem[('bf', b, f)] = dem.get(('bf', b, f), 0.0) + w
+    return dem
+
+
+def trend(it, dem, params):
+    """客群趋势原始值：ln(1+同品牌) + pattern × ln(1+同品牌+图案) + function × ln(1+同品牌+器型)；无品牌为 0。"""
+    b = it.get('brand')
+    if not b:
+        return 0.0
+    tw = params['trend_weights']
+    return (tw['brand'] * _math.log1p(dem.get(('b', b), 0.0))
+            + tw['pattern'] * _math.log1p(dem.get(('bp', b, it.get('pattern_id')), 0.0))
+            + tw['function'] * _math.log1p(dem.get(('bf', b, it.get('function_id')), 0.0)))
+
+
+def percentiles(values):
+    """{键: 原始值或 None} → {键: 0–100 百分位}：在全部非 None 值里的位置（同值取最低名次）；None 为 50。"""
+    known = sorted(v for v in values.values() if v is not None)
+    if len(set(known)) < 2:          # 没有可区分的值（如还没有标签、只有一个 AI 分）：一律 50
+        return {k: 50.0 for k in values}
+    span = max(1, len(known) - 1)
+    return {k: 50.0 if v is None else 100.0 * _bisect.bisect_left(known, v) / span for k, v in values.items()}
+
+
+def customer_weights(n, params):
+    """客人喜好的权重随数据量增长：w = n ÷ (n + k)；返回 (口味权重, 客人权重) = (momo − max·w, max·w)。
+    n 为这位客人的数据量（条数），≤ 0 时客人权重为 0。"""
+    n = max(0.0, float(n or 0))
+    w = n / (n + params['customer_k'])
+    return params['weights']['momo'] - params['customer_max'] * w, params['customer_max'] * w
+
+
+def composite_total(parts, params, momo_weight=None, customer_weight=None):
+    """合成：(口味·wm + 性价比·(口味/100)²·wv + 趋势·wt + 客人·wc) ÷ 权重和。parts = dict(momo, value, trend, customer)。"""
+    w = dict(params['weights'])
+    if momo_weight is not None:
+        w['momo'] = momo_weight
+    if customer_weight is not None:
+        w['customer'] = customer_weight
+    total = sum(w.values())
+    gated = parts['value'] * (parts['momo'] / 100.0) ** 2
+    return (w['momo'] * parts['momo'] + w['value'] * gated + w['trend'] * parts['trend']
+            + w['customer'] * parts['customer']) / total if total else 0.0
+
+
+def _group_label(key, names):
+    """分组键 → "梅森·洋葱·盘"（品牌·图案·器型）。names：dict(brand, pattern, function) 三个 {ID: 中文}。"""
+    kind, brand = key[0], key[1]
+    parts = [names.get('brand', {}).get(brand) or brand]
+    if kind == 'bfp':
+        parts.append(names.get('pattern', {}).get(key[3]) or key[3])
+    if kind in ('bf', 'bfp'):
+        parts.append(names.get('function', {}).get(key[2]) or key[2])
+    return '·'.join(parts)
+
+
+def _euro(v):
+    return '€%d' % round(v) if v >= 10 else '€%.2f' % v
+
+
+def composite_reason(parts, why, names, demand_ok=True):
+    """一句中文理由，如 "口味 82（梅森·洋葱·盘：你留下 6/20）· 性价比 40（同类中位 €80）· 客群 75"。"""
+    t = why.get('taste')
+    if t:
+        momo = '%s：你留下 %d/%d' % (_group_label(t['key'], names), t['kept'], t['total'])
+    elif why.get('brand'):
+        momo = '%s：还没有你的记录' % (names.get('brand', {}).get(why['brand']) or why['brand'])
+    else:
+        momo = '无品牌，按全局留下率'
+    if why.get('ai') is not None:
+        momo += '；AI 分 %d' % round(why['ai'])
+    value = '同类中位 ' + _euro(why['median']) if why.get('median') else why.get('value_missing') or '无同类'
+    text = '口味 %d（%s）· 性价比 %d（%s）· 客群 %d' % (round(parts['momo']), momo, round(parts['value']), value,
+                                                round(parts['trend']))
+    if not demand_ok:
+        text += '（客群数据缺）'
+    return text
+
+
+def composite_scores(items, demand, names, params):
+    """方案 C 综合评分。items 见上；demand 为 gc_demand 结果，None 表示客群数据读不了（趋势全为 50）；
+    names 为理由用的中文名 dict(brand, pattern, function)。百分位在本次全部货上算。
+    返回 {item_id: dict(score, momo, value, trend, customer, reason)}（分数与成分都是 0–100 的浮点数）。"""
+    items = list(items)
+    if not items:
+        return {}
+    cnt, g = taste_counts(items, params)
+    med = peer_medians(items, params)
+    raw_t, why_t, raw_v, why_v, raw_r = {}, {}, {}, {}, {}
+    for it in items:
+        iid = it['item_id']
+        raw_t[iid], why_t[iid] = taste(it, cnt, g, params)
+        ratio, m, missing = value_ratio(it, med)
+        raw_v[iid] = None if ratio is None or ratio <= 0 else -_math.log(ratio)
+        why_v[iid] = (m, missing)
+        raw_r[iid] = None if demand is None else trend(it, demand, params)
+    pt, pv, pr = percentiles(raw_t), percentiles(raw_v), percentiles(raw_r)
+    ai = percentiles({it['item_id']: it.get('ai_score') for it in items if it.get('ai_score') is not None})
+    share = params['ai_share']
+    out = {}
+    for it in items:
+        iid = it['item_id']
+        momo = pt[iid] if iid not in ai else (1 - share) * pt[iid] + share * ai[iid]
+        parts = dict(momo=momo, value=pv[iid], trend=pr[iid], customer=0.0)
+        why = dict(taste=why_t[iid], brand=it.get('brand'), median=why_v[iid][0], value_missing=why_v[iid][1],
+                   ai=it.get('ai_score') if iid in ai else None)
+        out[iid] = dict(parts, score=composite_total(parts, params),
+                        reason=composite_reason(parts, why, names, demand is not None))
+    return out

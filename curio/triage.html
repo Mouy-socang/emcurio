@@ -58,6 +58,14 @@ img{display:block}
 .fpr .mono{font-size:17px;font-weight:500;line-height:1.3}
 .fsrc{font-size:14px;color:var(--muted);overflow-wrap:anywhere}
 .fsrc .mono{font-size:14px}
+/* 故事 27：01 卡上的分数与理由；veil = 还没点要、还没记为看到（占位不显示，显示时版面不跳） */
+.fsc{font-size:12px;color:var(--muted);line-height:1.4;margin-top:2px;overflow-wrap:anywhere}
+.fsc .mono{font-size:12px;color:var(--ink)}
+.fsc.veil{visibility:hidden}
+.sc{font-size:12px;color:var(--muted);line-height:1.4;overflow-wrap:anywhere}
+.sc .mono{color:var(--ink)}
+.psort{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
+.psort .btn[aria-pressed="true"]{background:var(--inv);color:var(--inv-ink)}
 .facts{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
 .facts .btn{padding:0 4px}
 .fmsg{margin-top:8px}
@@ -318,6 +326,8 @@ img{display:block}
   <h1 class="vh" id="h02" tabindex="-1">商品池</h1>
   <p class="poolsum">已留下 <span class="mono" id="poolN">—</span> 件 · R12 <span class="mono" id="poolRankN">—</span> / <span class="mono">12</span></p>
   <p class="im" id="poolErr" role="alert" hidden>未能读取商品池 · <button class="lnk lnk-pad" id="poolReload" type="button">重试</button></p>
+  <div class="psort" role="group" aria-label="商品池排序">
+    <button class="btn" id="sortScore" type="button" aria-pressed="true">按分数</button><button class="btn" id="sortTime" type="button" aria-pressed="false">按进池时间</button></div>
   <ol class="plist" id="poolList" aria-label="已留下的货，按分数高到低"></ol>
   <div class="empty" id="poolEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>商品池还没有货</h2><p class="muted">在 01 新货里留下的货会出现在这里。</p></div>
   <h2 class="sub" id="outH" hidden>已移出商品池 <span class="mono" id="outN"></span></h2>
