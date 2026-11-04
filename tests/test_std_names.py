@@ -99,9 +99,9 @@ def test_brand_only(cfg):
 
 def test_non_meissen_ignores_meissen_vocab(cfg):
     r = name('KPM Berlin Rocaille Zwiebelmuster Neuer Ausschnitt Terrine', cfg)
-    assert r['brand'] == 'KPM Berlin' and r['brand_display'] == 'KPM Berlin'
+    assert r['brand'] == 'KPM Berlin' and r['brand_display'] == 'KPM柏林'
     assert r['pattern_id'] is None and r['form_id'] is None and r['function_id'] == 'FN-026'
-    assert r['std_name'] == 'KPM Berlin 带盖汤碗' and r['std_key'] == 'KPM Berlin|-|-|FN-026'
+    assert r['std_name'] == 'KPM柏林 带盖汤碗' and r['std_key'] == 'KPM Berlin|-|-|FN-026'
 
 
 def test_no_brand_not_inferred_from_pattern(cfg):
@@ -316,3 +316,23 @@ def test_missing_row_regenerated_then_stable(db, cfg):
     with db.connect() as c:
         again = c.execute('SELECT generated_at FROM std_names WHERE item_id=?', ('a',)).fetchone()[0]
     assert again == first['generated_at']
+
+
+def test_catalog_chinese_column_wins_over_german(tmp_path):
+    """官方图案目录有「名称（中文）」列时，标题用中文名，不再把德文原样写进标题。"""
+    root = make_kb(tmp_path / 'EM 西洋瓷器')
+    write(root, M + '/4 Patterns 图案/Meissen_官方图案目录数据.csv',
+          '图案编号,名称（德文）,名称（中文）,原目录文字,金绘（德文）,金绘（中文）,官方分类,原目录页码,档案路径\n'
+          '210110,Frucht- und Blumenmalerei,果实与花卉,"Frucht- und Blumenmalerei, Goldrand",Goldrand,金边,2.1,20,'
+          'a/210110 Frucht- und Blumenmalerei.md\n'
+          '010110,Gestreute Blümchen,,"Gestreute Blümchen, bunt",Goldrand,金边,1.1,10,a/010110 Gestreute Blümchen 散花.md\n')
+    cfg = dict(load(), em_kb_path=str(root))
+    r = name('Meissen Teller Frucht- und Blumenmalerei Goldrand', cfg)
+    assert r['pattern'] == '果实与花卉' and 'Frucht' not in r['std_name']
+    assert name('Meissen Teller Gestreute Blümchen', cfg)['pattern'] == '散花'   # 中文列空时仍取档案名里的中文
+
+
+def test_brand_display_has_no_berlin():
+    """KPM 写成「KPM柏林」；其它常见品牌带中文名。"""
+    assert judge.BRAND_DISPLAY['KPM Berlin'] == 'KPM柏林'
+    assert judge.BRAND_ZH['Royal Copenhagen'] == '皇家哥本哈根'

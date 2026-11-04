@@ -199,7 +199,11 @@ KB_FILES = {
     'functions': ('05 General Knowledge 通用知识', '买手培训', '功能词表.csv'),
 }
 # 品牌中文名：知识库里 Meissen 没有中文别名，沿用 product_v2 的厂名中文（梅森）；其它品牌只写外文名。
-BRAND_ZH = {'Meissen': '梅森'}
+BRAND_ZH = {'Meissen': '梅森', 'Royal Copenhagen': '皇家哥本哈根', 'Sèvres': '塞夫尔', 'Herend': '赫伦',
+            'Hutschenreuther': '胡申罗伊特', 'Rosenthal': '罗森塔尔', 'Villeroy & Boch': '唯宝',
+            'Nymphenburg': '宁芬堡', 'Fürstenberg': '菲尔斯滕贝格'}
+# 品牌在标准名称里的写法（默认「品牌原名 + 中文」）；KPM 不写 Berlin，免得标题里留德文
+BRAND_DISPLAY = {'KPM Berlin': 'KPM柏林'}
 MEISSEN_BRAND = 'Meissen'
 
 _SEP = r"[\s,.;:/\-–]*"
@@ -392,9 +396,11 @@ def _load_kb(root):
             code = (r.get('图案编号') or '').strip()
             if not re.fullmatch(r'\d{6}', code):
                 continue
+            # 中文名优先用目录里的「名称（中文）」列，其次档案文件名末尾的中文，都没有才用德文
+            zh_col = (r.get('名称（中文）') or '').strip()
             base = Path((r.get('档案路径') or '').replace('\\', '/')).stem
             zh = re.search(r'[一-鿿][一-鿿（）()·／]*$', base)
-            payload = mp_for(code) or (code, zh.group(0) if zh else (r.get('名称（德文）') or code).strip())
+            payload = mp_for(code) or (code, zh_col or (zh.group(0) if zh else (r.get('名称（德文）') or code).strip()))
             vocab['codes'].setdefault(code, payload)
             name = (r.get('名称（德文）') or '').strip()
             if name:
@@ -587,7 +593,7 @@ def standard_name(title, description='', config=None):
         if m:
             grade = m.group(0)
             break
-    brand_display = (brand + BRAND_ZH.get(brand, '')) if brand else None
+    brand_display = (BRAND_DISPLAY.get(brand) or brand + BRAND_ZH.get(brand, '')) if brand else None
     named = bool(form or function)
     # 厂家等级须可靠证据（V2），卖家陈述不入名，故名称中此段始终省略。
     painted = overpaint(title, description)
