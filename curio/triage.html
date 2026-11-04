@@ -172,6 +172,16 @@ img{display:block}
 .prow.gone .t,.prow.gone .p{color:var(--muted)}
 .prow.leaving{opacity:0;transition:opacity .2s ease-out}
 @media (min-width:768px){.scr.wide{max-width:960px}.plist.grid{display:grid;grid-template-columns:1fr 1fr;column-gap:24px}}
+/* 02 改为与 01 新货同一构图（墨墨 2026-11-04）：两列、4:5 大图在上、文字与按钮在下；只作用于 02，其他用 .prow 的列表不变。 */
+#poolView .plist{display:grid;grid-template-columns:1fr 1fr;gap:20px 12px;border-top:0;margin-top:16px}
+#poolView .prow{display:block;padding:0;border-bottom:0;min-width:0}
+#poolView .prow .th{display:block;width:100%;height:auto;aspect-ratio:4/5}
+#poolView .prow>div{padding-top:8px}
+#poolView .prow .t{font-size:15px}
+#poolView .prow .p .mono{font-size:17px;font-weight:500}
+#poolView .prow .acts2{gap:8px}
+#poolView .prow .acts2 .btn{padding:0 4px}
+@media (min-width:768px){#poolView .plist.grid{column-gap:12px}}
 
 /* 03 榜（DESIGN.md rank-row）：名次 + 缩略图 + 标题 + 右侧 44px 拖动把手；选中行展开上移 / 下移 / 移出榜 */
 .pub{padding:14px 0 10px;font-size:14px;overflow-wrap:anywhere}
