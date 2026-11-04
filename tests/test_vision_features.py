@@ -194,9 +194,9 @@ def test_kept_items_backfilled_after_scoring_without_score_or_state_change(db, c
                                      row('k1', plain_white=True), row('k2', not_porcelain=True)]))
     result = run(db, kb, post)
     assert result['ai_featured'] == 4 and result['ai_scored'] == 2 and result['ai_removed'] == 0
-    # 需要打分的新货排前，补做的留下货在后、标 features_only
+    # 每轮第一批先补留下的货（标 features_only），同批空位再放需要打分的新货
     sent = sent_items(post)
-    assert [x['item_id'] for x in sent][:2] in (['n1', 'n2'], ['n2', 'n1'])
+    assert [x['item_id'] for x in sent][:2] in (['k1', 'k2'], ['k2', 'k1'])
     assert {x['item_id'] for x in sent if x.get('features_only')} == {'k1', 'k2'}
     assert 'features_only' in system_text(post)
     assert set(images_sent(post)) == {'k1', 'k2', 'n1', 'n2'}
@@ -419,3 +419,22 @@ def test_parse_features_unit():
     # features_only 不要求 score
     got = ai.parse(json.dumps([dict(item_id='k', function='FN-001', form=None, pattern=None)]), {'k'}, {'k': 'u'}, fv, {'k'})
     assert got['k'][0] is None and got['k'][3]['function'] == 'FN-001'
+
+
+def test_first_batch_backfills_pool_then_new_items_get_scored(db, cfg, kb):
+    """新货多于一批时：第一批先补留下的货，之后的批次新货打分优先（商品池不会一直轮不到，新货也不会被挤掉）。"""
+    new = ['n%02d' % i for i in range(ai.BATCH_SIZE + 5)]
+    for i in new + ['k1']:
+        db.ingest(item(i), cfg)
+    keep(db, 'k1')
+    calls = []
+
+    def reply(*a, **kw):
+        items = json.loads(kw['json']['messages'][0]['content'][0]['text'].rsplit('\n', 1)[1])
+        calls.append(items)
+        return answer([row(x['item_id'], 70) for x in items])
+    post = Mock(side_effect=reply)
+    result = run(db, kb, post)
+    assert 'k1' in {x['item_id'] for x in calls[0]}                       # 第一批带上留下的货
+    assert all(not x.get('features_only') for x in calls[1])              # 第二批全是要打分的新货
+    assert result['ai_scored'] == len(new) and 'k1' in features(db)

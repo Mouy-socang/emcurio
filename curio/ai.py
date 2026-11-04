@@ -40,8 +40,8 @@ RETRY_WAIT = 2.0             # 重试前等待；有 retry-after 时按它，但
 RETRY_WAIT_MAX = 5.0
 # 每轮采集最多发出的 HTTP 请求次数（含重试）与整个 AI 步骤的时限：避免长时间占用采集锁。
 MAX_REQUESTS_PER_ROUND = 10
-ROUND_SECONDS = 120
-MIN_REQUEST_SECONDS = 10     # 剩余时间不足时不再发请求
+ROUND_SECONDS = 300         # 每次带 20 张图的请求要 30–60 秒，120 秒一轮只够 3–4 次且最后一次常超时
+MIN_REQUEST_SECONDS = 60     # 剩余时间不足时不再发请求（不足一次带图请求的耗时就不发，免得白白超时）
 RETRY_HOURS = 24             # 已请求过但仍没拿到 AI 分的货（漏回、越界、截断），24 小时内不重发
 KV_AI_USAGE = 'ai_usage'
 # 看图只送这两个图片站（不复用会做 DNS 解析的 publish._check_host）；Etsy 不看图。
@@ -398,7 +398,7 @@ CANDIDATES = '''SELECT i.*, NOT ''' + _SCORE_SQL + ''' AS fonly
             AND NOT EXISTS(SELECT 1 FROM visual_features f WHERE f.item_id=i.item_id AND f.image=i.image)
             AND NOT EXISTS(SELECT 1 FROM feature_attempts fa WHERE fa.item_id=i.item_id AND fa.image IS i.image
                            AND fa.attempted_at>?)))
-    ORDER BY fonly, t.state='kept' DESC, i.first_seen DESC, i.item_id LIMIT ?'''
+    ORDER BY (fonly=?) DESC, t.state='kept' DESC, i.first_seen DESC, i.item_id LIMIT ?'''
 FEATURE_RETRY_DAYS = 7          # 为三项送检过（含带图被拒、缺字段）的主图，7 天后可再送
 
 
@@ -432,7 +432,8 @@ def score_round(store, key, limit, clock=time.time, post=None, max_requests=MAX_
     warnings = 0
     cutoff = _iso(clock() - RETRY_HOURS * 3600)
     fcutoff = _iso(clock() - FEATURE_RETRY_DAYS * 86400)
-    params = lambda n: (cutoff, cutoff, want, fcutoff, n)
+    # 每轮第一批先补看图三项（留下的货优先），其余批次新货打分优先：新货多时商品池也不会一直轮不到
+    params = lambda n: (cutoff, cutoff, want, fcutoff, int(bool(fvocab) and not done), n)
     while True:
         with store.connect() as c:
             rows = [r for r in c.execute(CANDIDATES, params(BATCH_SIZE + len(done))).fetchall() if r['item_id'] not in done][:BATCH_SIZE]
