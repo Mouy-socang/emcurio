@@ -21,16 +21,27 @@ class Clock:
 @pytest.fixture
 def db(tmp_path):return Store(tmp_path/'curio.db')
 
+@pytest.fixture(autouse=True)
+def neutral_windows(request,monkeypatch):
+    """自适应间隔的测试不受分时段上下限影响；分时段本身的测试（名字含 windows / night）照常。"""
+    if 'windows' in request.node.name or 'night' in request.node.name:return
+    monkeypatch.setattr('curio.schedule.FETCH_WINDOWS',())
+    monkeypatch.setattr('curio.schedule.SUNDAY_PEAK_HOURS',range(0))
+
 @pytest.mark.parametrize('base,new,expected',[(20,12,10),(20,10,10),(50,0,60),(20,0,30),(20,3,20),(6,50,5),(60,1,60)])
 def test_interval_scaling_and_clamp(base,new,expected):
     assert next_base_interval(base,new)==expected
 
-def test_night_doubles_but_caps():
-    assert effective_interval(20,at(2,3))==40          # 柏林 03:00
-    assert effective_interval(20,at(2,12))==20
-    assert effective_interval(40,at(2,1))==60          # 夜间仍不超过 60
-    assert effective_interval(20,at(2,6,59))==40 and effective_interval(20,at(2,7))==20
-    assert effective_interval(20,at(2,0,59))==20
+def test_fetch_windows_by_time_of_day():
+    # 分时段（FETCH_WINDOWS）：2026-11-02 为周一、11-01 为周日
+    assert effective_interval(20,at(2,3))==30          # 夜间下限 30
+    assert effective_interval(40,at(2,1))==40 and effective_interval(60,at(2,2))==60
+    assert effective_interval(20,at(2,12))==5          # 高峰固定 5
+    assert effective_interval(20,at(2,6,59))==30 and effective_interval(20,at(2,7))==15   # 早间上限 15
+    assert effective_interval(5,at(2,8))==5 and effective_interval(20,at(2,21))==15
+    assert effective_interval(20,at(2,23))==30 and effective_interval(20,at(2,0,59))==30
+    assert effective_interval(20,at(1,9))==5 and effective_interval(20,at(1,21,30))==5    # 周日白天按高峰
+    assert effective_interval(20,at(1,22))==15
 
 def test_scheduler_due_and_record(db):
     clock=Clock(at(2,12));s=Scheduler(db,clock)
@@ -44,9 +55,9 @@ def test_scheduler_due_and_record(db):
 def test_scheduler_night_uses_effective_interval(db):
     clock=Clock(at(2,3));s=Scheduler(db,clock)
     db.set(KV_BASE,20);s.mark_fetch_started()
-    clock.ts+=30*60;assert not s.fetch_due()
-    clock.ts+=10*60;assert s.fetch_due()
-    assert s.summary()['fetch_interval_min']==40 and s.summary()['night_mode'] is True
+    clock.ts+=29*60;assert not s.fetch_due()            # 夜间下限 30 分钟
+    clock.ts+=60;assert s.fetch_due()
+    assert s.summary()['fetch_interval_min']==30 and s.summary()['night_mode'] is True
 
 def test_budget_split_and_exhaustion(db):
     b=Budget(db,{'ebay':10,'etsy':0,'kleinanzeigen':5},Clock(at(2,12)))

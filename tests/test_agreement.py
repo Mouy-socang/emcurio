@@ -171,7 +171,7 @@ def test_collection_round_seals_after_fetch(tmp_path):
          patch('curio.curio_monitor.check_existing', return_value={'errors': 0}), \
          patch('curio.sync.run', return_value={'sync_status': 'disabled'}):
         first = run(tmp_path, lambda: noon)
-        idle = run(tmp_path, lambda: noon + 300)
+        idle = run(tmp_path, lambda: noon + 120)        # 高峰时段间隔 5 分钟：2 分钟后仍空闲
     assert first['prediction_status'] == 'sealed' and first['prediction_day'] == '2026-11-03'
     assert idle['status'] == 'idle' and idle['prediction_status'] == 'already_sealed'
     db = Store(tmp_path / 'data/curio.db')

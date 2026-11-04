@@ -61,10 +61,32 @@ def next_base_interval(base, new_count):
     return clamp(base)
 
 
+# 分时段抓取（墨墨 2026-11-04，依据 Kleinanzeigen 真实发帖分布：10–19 点每小时 12–16 件，凌晨约 1 件，周日最多）：
+# 每个时段给出间隔的下限与上限（分钟），自适应间隔夹在其中。周日 08:00–21:59 按高峰处理。
+FETCH_WINDOWS = (
+    (range(10, 20), 5.0, 5.0),            # 高峰：每 5 分钟
+    (range(7, 10), 5.0, 15.0),            # 早间：5–15 分钟
+    (range(20, 23), 5.0, 15.0),           # 晚间：5–15 分钟
+    (tuple(range(23, 24)) + tuple(range(0, 7)), 30.0, 60.0),   # 夜间：30–60 分钟
+)
+SUNDAY_PEAK_HOURS = range(8, 22)
+
+
+def window(ts):
+    """该时刻所在时段的 (下限, 上限) 分钟。"""
+    t = berlin(ts)
+    if t.weekday() == 6 and t.hour in SUNDAY_PEAK_HOURS:
+        return 5.0, 5.0
+    for hours, lo, hi in FETCH_WINDOWS:
+        if t.hour in hours:
+            return lo, hi
+    return MIN_INTERVAL, MAX_INTERVAL
+
+
 def effective_interval(base, ts):
-    """夜间（柏林 01:00–06:59）间隔 ×2，仍不超过 60 分钟。"""
-    base = clamp(base)
-    return min(MAX_INTERVAL, base * 2) if is_night(ts) else base
+    """按上新数量自适应的基础间隔，再夹进当前时段的上下限（FETCH_WINDOWS）。"""
+    lo, hi = window(ts)
+    return min(hi, max(lo, clamp(base)))
 
 
 def check_rounds_left(ts):
