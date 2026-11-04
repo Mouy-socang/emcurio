@@ -49,7 +49,7 @@ def preview_shell(page,token,rank):
 def message_page(title,text,status=200):
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>%s · 后台</title><link rel="stylesheet" href="/preview/bar.css"></head><body class="pvempty"><main><h1>%s</h1><p>%s</p>'
-            '<p><a href="/#rank">回到 03 榜</a></p></main></body></html>')%(htmlmod.escape(title),htmlmod.escape(title),htmlmod.escape(text))
+            '<p><a href="/#rank">回到 03 R12</a></p></main></body></html>')%(htmlmod.escape(title),htmlmod.escape(title),htmlmod.escape(text))
 
 def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=None,pull=None,gcdb_run=None):
     """root：.env 与本机已下载图片所在（测试传临时目录）；fetch：卖家图片下载函数（测试注入）；
@@ -128,7 +128,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 if not f.is_file():return self.reply(404,{'error':'图片不存在'})
                 return self.send_raw(200,f.read_bytes(),'image/jpeg',{'Cache-Control':'no-store'})
             if not snap:
-                return self.send_raw(200,message_page('预览已失效','排序有变化或后台重启过，请回到 03 榜重新点"预览"。').encode(),'text/html; charset=utf-8',{'Cache-Control':'no-store','Content-Security-Policy':GUEST_CSP})
+                return self.send_raw(200,message_page('预览已失效','排序有变化或后台重启过，请回到 03 R12 重新点"预览"。').encode(),'text/html; charset=utf-8',{'Cache-Control':'no-store','Content-Security-Policy':GUEST_CSP})
             if path not in ('/','/legal','/api/pool') and not PREVIEW_ITEM.fullmatch(path):
                 return self.send_raw(404,message_page('页面不存在','预览里没有这个页面。',404).encode(),'text/html; charset=utf-8',{'Cache-Control':'no-store','Content-Security-Policy':GUEST_CSP})
             key=(path,url.query)
@@ -156,7 +156,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
         def make_preview(self,data):
             """生成候选快照（必要时先转码图片），留在内存供 /preview/ 渲染。榜须与界面所见一致。"""
             want=data.get('rank')
-            if not isinstance(want,list) or not all(isinstance(x,str) for x in want):return self.reply(400,{'error':'榜须为货号列表'})
+            if not isinstance(want,list) or not all(isinstance(x,str) for x in want):return self.reply(400,{'error':'R12 须为货号列表'})
             with build_lock:
                 with preview_lock:gen=state['gen']
                 with store.connect() as c:current=publish.rank(c)
@@ -175,7 +175,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
             request_id 的结果与快照同一事务记下），再后台 flush 一次。同一 request_id 进行中的重试等第一次的结果。"""
             rid=data['request_id'];want=data['rank']
             if not isinstance(rid,str) or not 1<=len(rid)<=100:raise ValueError('请求编号无效')
-            if not isinstance(want,list) or not all(isinstance(x,str) for x in want):raise ValueError('榜须为货号列表')
+            if not isinstance(want,list) or not all(isinstance(x,str) for x in want):raise ValueError('R12 须为货号列表')
             with store.connect() as c:
                 prev=c.execute('SELECT * FROM triage_requests WHERE request_id=?',(rid,)).fetchone()
             if prev:
@@ -201,10 +201,10 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
             with preview_lock:
                 snap=dict(preview) if preview else None
                 if snap and snap['rank']==want:state['gen']+=1;preview.clear()     # 发布前即作废预览
-            if snap is None:return 409,{'error':'请先在 03 榜点"预览"，再从预览里发布'}
+            if snap is None:return 409,{'error':'请先在 03 R12 点"预览"，再从预览里发布'}
             if snap['rank']!=want:return 409,{'error':'排序在预览之后有变化，请重新预览后再发布'}
             try:r=publish.publish(store,root,fetch=fetch,expect_rank=want,expect_fingerprint=snap['fp'],request_id=rid,gc=gc_settings())
-            except publish.PublishBusy as e:return 409,{'error':str(e)+'；请回到 03 榜重新预览'}
+            except publish.PublishBusy as e:return 409,{'error':str(e)+'；请回到 03 R12 重新预览'}
             except publish.PublishStale as e:return 409,{'error':str(e)}
             except publish.PublishError as e:return 400,{'error':str(e)}
             except Exception:

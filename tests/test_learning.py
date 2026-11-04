@@ -598,7 +598,7 @@ def test_monitor_rounds_carry_learning_status(tmp_path):
     clock = Clock(at(2, 12))
     with patch.object(L, 'run', lrun), patch.object(S, 'run', srun):
         active_, *_ = run_with(root, clock)
-        clock.ts += 5 * 60
+        clock.ts += 2 * 60          # 高峰时段间隔 5 分钟：2 分钟后仍是空闲轮
         idle, *_ = run_with(root, clock)
     assert active_['learning_status'] == 'ok' and active_['rules_pending'] == 0
     assert idle['status'] == 'idle' and idle['learning_status'] == 'ok' and 'rules_pending' in idle

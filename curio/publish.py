@@ -1,7 +1,7 @@
 """发布快照与即时隐藏（AD-5、AD-6、AD-13、AD-22；CAP-7、CAP-9）。
 
 - 入选：拣选状态 kept、items.status='active'、非 Kleinanzeigen、欧元标价的货；商品池按墨墨留下时间新到旧。
-- 榜：`publish_rank` 表里墨墨指定的恰好 RANK_SIZE（12）件，且都须在入选集合内；不足拒绝生成（FR-16）。
+- R12（榜）：`publish_rank` 表里墨墨指定的 0 到 RANK_SIZE（12）件，且都须在入选集合内；不必排满即可发布（2026-11-04）。
 - 白名单（AD-6）：快照只含 contract/schemas/snapshot.v1 里的字段；卖家原文先清洗（去平台名、商品号、卖家/店铺、链接）。
 - 图片（AD-13）：用系统 `sips` 转成最长边 1600 与 600 的 JPEG，文件名 = 内容 sha256 前 16 位 + .jpg，
   放在 curio.db 同目录的 publish_images/；同步模块提交快照前先上传、经服务器确认（curio/sync）。
@@ -124,7 +124,7 @@ def why_not(c, code):
     if row is None:
         return f'{code} 不存在'
     if row['platform'] == 'kleinanzeigen':
-        return f'{code} 是 Kleinanzeigen 的货，不能上榜'
+        return f'{code} 是 Kleinanzeigen 的货，不能加入 R12'
     if row['state'] != 'kept':
         return f'{code} 当前是「{triage.LABELS.get(row["state"], row["state"])}」，不在商品池'
     if row['status'] != 'active':
@@ -150,12 +150,12 @@ def set_rank(c, codes, keep_stale=False):
     codes = [str(x).strip().upper() for x in codes]
     stale = set(rank(c)) if keep_stale else set()
     if len(codes) > RANK_SIZE:
-        raise PublishError(f'榜最多 {RANK_SIZE} 件')
+        raise PublishError(f'R12 最多 {RANK_SIZE} 件')
     for code in codes:
         if not CODE_RE.fullmatch(code):
             raise PublishError(f'货号格式不对：{code[:20]}')
     if len(set(codes)) != len(codes):
-        raise PublishError('榜里有重复的货号')
+        raise PublishError('R12 里有重复的货号')
     for code in codes:
         reason = None if code in stale else why_not(c, code)
         if reason:
@@ -560,14 +560,14 @@ def _tombstones(c, pool_codes, now):
 
 
 def check_rank(c):
-    """榜须恰好 RANK_SIZE 件且都能发布；否则抛 PublishError。返回榜（货号按名次）。"""
+    """R12 至多 RANK_SIZE 件（可为 0）且都能发布；否则抛 PublishError。返回榜（货号按名次）。"""
     ranked = rank(c)
-    if len(ranked) < RANK_SIZE:
-        raise PublishError(f'榜需满 {RANK_SIZE} 件才能发布（现在 {len(ranked)} 件）')
+    if len(ranked) > RANK_SIZE:
+        raise PublishError(f'R12 最多 {RANK_SIZE} 件（现在 {len(ranked)} 件）')
     for pos, code in enumerate(ranked, 1):
         reason = why_not(c, code)
         if reason:
-            raise PublishError(f'榜里第 {pos} 名 {code} 已不能发布（{reason}），请换一件后再发布')
+            raise PublishError(f'R12 第 {pos} 名 {code} 已不能发布（{reason}），请换一件或移出后再发布')
     return ranked
 
 
@@ -812,7 +812,7 @@ def request_payload(expect_rank):
 def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_rank=None, expect_fingerprint=None,
             request_id=None, gc=None):
     """生成并入队一份完整快照（持发布锁）。返回摘要（no_images：没有可用图片的货号）；
-    榜不足、榜里有不能发布的货、另一发布进行中时抛 PublishError。
+    R12 超过 RANK_SIZE 件、R12 里有不能发布的货、另一发布进行中时抛 PublishError。
     后台从预览发布时：expect_rank / expect_fingerprint 为预览所见的榜与内容指纹，入队前（同一写事务）已不同则抛
     PublishStale；request_id 的结果（REPLY_KEYS）与快照在同一事务里记入 triage_requests，重放返回该结果（replayed=True）。
     gc：GoodCustomer 资料库路径（千人千面读需求与喜好；None 时读 config/settings.yaml，没有已关联账号时不读）。"""
@@ -820,9 +820,6 @@ def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_r
     _lock(store, owner, clock)
     try:
         with store.connect() as c:
-            ranked = rank(c)
-            if len(ranked) < RANK_SIZE:
-                raise PublishError(f'榜需满 {RANK_SIZE} 件才能发布（现在 {len(ranked)} 件）')
             items = eligible(c)
         attempted, failures = prepare_images(store, items, root, fetch, sips,
                                              heartbeat=lambda: _refresh(store, owner, clock))

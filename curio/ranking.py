@@ -1,4 +1,4 @@
-"""后台 02 商品池与 03 榜（故事 11，CAP-7；AD-5、AD-22、AD-26、AD-28）。
+"""后台 02 商品池与 03 R12（榜；故事 11，CAP-7；AD-5、AD-22、AD-26、AD-28）。
 
 - 02 商品池：拣选状态 kept 的货（分数高到低，无分在后），每件带货号、名称、欧元价、平台、是否在售、是否在榜、
   不能上榜的原因；另列已移出商品池的货（可放回；标记售出的带 sold，可撤销售出）。移出 / 放回 / 标记售出 / 撤销售出
@@ -21,8 +21,8 @@ from .store import card, now
 
 SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 RENDER_TIMEOUT = 60
-REASON_KA = 'Kleinanzeigen 的货不能上榜'
-REASON_FULL = f'榜已满 {publish.RANK_SIZE} 件，请先移出一件'
+REASON_KA = 'Kleinanzeigen 的货不能加入 R12'
+REASON_FULL = f'R12 已满 {publish.RANK_SIZE} 件，请先移出一件'
 
 
 class PreviewError(RuntimeError):
@@ -36,9 +36,9 @@ def rank_reason(c, item, code):
     if not code:
         return '还没有货号，请先留下'
     if item['status'] != 'active':
-        return '原平台已下架，不能上榜'
+        return '原平台已下架，不能加入 R12'
     if not publish._priced(item):
-        return '没有欧元标价，不能上榜'
+        return '没有欧元标价，不能加入 R12'
     return None
 
 
@@ -90,7 +90,7 @@ def detail_rank_reason(store, iid):
         if item['platform'] == 'kleinanzeigen':
             return REASON_KA
         if triage.state(c, iid) != 'kept':
-            return '不在商品池，不能上榜'
+            return '不在商品池，不能加入 R12'
         return rank_reason(c, item, triage.code(c, iid))
 
 
@@ -136,7 +136,7 @@ def _once(store, request_id, payload, fn, mark_replay=False):
 def save_rank(store, codes, request_id):
     """保存榜（按名次的货号列表）。返回 dict(rank=…)。校验失败抛 PublishError（ValueError）。"""
     if not isinstance(codes, list) or not all(isinstance(x, str) for x in codes):
-        raise ValueError('榜须为货号列表')
+        raise ValueError('R12 须为货号列表')
 
     def work(c):
         return dict(rank=publish.set_rank(c, codes, keep_stale=True))

@@ -1,6 +1,6 @@
 """故事 11（CAP-7）：后台 02 商品池、03 榜、预览与发布——服务端可验证的部分。
 
-覆盖 I/O 矩阵：加入榜到 12 件、榜满 / Kleinanzeigen 不能上榜、上移 / 拖动后保存（名次存储）、不足 12 件不能预览、
+覆盖 I/O 矩阵：加入 R12 到 12 件、R12 已满 / Kleinanzeigen 不能加入、上移 / 拖动后保存（名次存储）、不足 12 件（5 件、0 件）也能预览与发布、
 预览（与客人页同一模板、页内只引用本机地址、不入发件箱、不分配编号、不记录行为）、只从预览发布与发布状态、
 发布后改排序 / 点评即"有未发布的修改"、移出商品池（隐藏入队并移出榜）、榜内货下架。
 图片用系统 sips 真转码（源图现做的 PNG），远程图片只经注入的假下载；任何非 127.0.0.1 的请求直接失败。
@@ -188,7 +188,7 @@ def test_tabs_02_and_03_enabled_and_scripts_served(http):
     assert status == 200 and 'javascript' in headers['Content-Type'] and b'/api/rank/preview' in body
     js = body.decode()
     # 只在把手上长按拖动；播报文案照 EXPERIENCE.md。
-    assert "'已拿起，第 '" in js and "'已放到第 '" in js and "'榜需满 ' + SIZE + ' 件才能发布'" in js and f'const SIZE = {RANK};' in js and '排序尚未保存' in js
+    assert "'已拿起，第 '" in js and "'已放到第 '" in js and "'R12 最多 ' + SIZE + ' 件'" in js and '榜需满' not in js and f'const SIZE = {RANK};' in js and '排序尚未保存' in js
     css = page
     assert '-webkit-touch-callout:none' in css and 'touch-action:none' in css
     assert '>发布<' not in re.search(r'<section id="rankView".*?</section>', page, re.S)[0]   # 03 上不放"发布"
@@ -207,7 +207,7 @@ def test_pool_lists_kept_items_by_score_with_flags(db, cfg, http):
     order = [it['code'] for it in d['items']]
     assert order[0] == ka_code and order[1:13] == list(reversed(codes))       # 分数高到低
     by = {it['code']: it for it in d['items']}
-    assert by[ka_code]['rank_reason'] == 'Kleinanzeigen 的货不能上榜'
+    assert by[ka_code]['rank_reason'] == 'Kleinanzeigen 的货不能加入 R12'
     assert '仅后台 · Kleinanzeigen' in by[ka_code]['tags']
     assert by[gone_code]['on_sale'] is False and by[gone_code]['rank_reason']
     assert by[codes[0]]['rank_reason'] is None and by[codes[0]]['price'].startswith('€')
@@ -218,7 +218,7 @@ def test_add_to_rank_until_full_then_preview_enabled(db, cfg, http):
     _, codes = kept(db, cfg, RANK + 2)
     status, d = http['save'](codes[:RANK - 1])
     assert status == 200 and d['count'] == RANK - 1
-    assert http['post']('/api/rank/preview', {'rank': codes[:RANK - 1]}) == (400, {'error': f'榜需满 {RANK} 件才能发布（现在 {RANK - 1} 件）'})
+    assert http['post']('/api/rank/preview', {'rank': codes[:RANK - 1]})[0] == 200    # 不满 12 件也能预览
     status, d = http['save'](codes[:RANK])
     assert status == 200 and d['count'] == RANK and [r['code'] for r in d['rows']] == codes[:RANK]
     assert http['get']('/api/pool')['items'][-1]['rank_pos'] == 1        # 分数最低的 codes[0] 在榜第 1 名
@@ -358,6 +358,26 @@ def test_preview_renders_candidate_with_guest_templates_locally(db, cfg, http, f
     assert fetch.urls and all(urlsplit(u).hostname == 'i.ebayimg.com' for u in fetch.urls)
 
 
+@pytest.mark.parametrize('n', [5, 0])
+def test_preview_and_publish_with_partial_rank(db, cfg, http, n):
+    """2026-11-04：R12 不必排满——5 件、0 件都能预览并从预览发布；客人页 rank 照实（0 件时不显示今日榜）。"""
+    _, codes = kept(db, cfg, RANK)
+    rank = codes[:n]
+    assert http['save'](rank)[0] == 200
+    status, d = http['post']('/api/rank/preview', {'rank': rank})
+    assert status == 200 and d['pool'] == RANK
+    html = http['raw']('/preview/')[2].decode()
+    assert re.findall(r'<li class="rk"><a class="rk-a" href="/preview/item/(CO-\d+)"', html) == rank
+    if n:
+        assert f'aria-label="MyR12，{n} 件"' in html
+    else:
+        assert '<ol class="rank"' not in html and '全部藏品' in html
+    status, d = http['post']('/api/rank/publish', {'rank': rank, 'request_id': f'partial-{n}'})
+    assert status == 200 and d['publish_no'] >= 1
+    snap = outbox(db, 'snapshot')[-1]['payload']
+    assert snap['rank'] == rank and len(snap['pool']) == RANK
+
+
 def test_preview_invalidated_by_rank_change(db, cfg, http):
     _, codes = kept(db, cfg, RANK + 1)
     http['save'](codes[:RANK])
@@ -437,7 +457,7 @@ def test_publish_failure_keeps_rank(db, cfg, http):
 def test_preview_needs_rank_list(db, cfg, http):
     kept(db, cfg, RANK)
     assert http['post']('/api/rank/preview', {})[0] == 400
-    assert http['post']('/api/rank/preview', {'rank': 'CO-0001'}) == (400, {'error': '榜须为货号列表'})
+    assert http['post']('/api/rank/preview', {'rank': 'CO-0001'}) == (400, {'error': 'R12 须为货号列表'})
 
 
 def test_comment_after_preview_blocks_publish(db, cfg, http):
@@ -549,8 +569,8 @@ def test_detail_reports_rank_reason_from_server(db, cfg, http):
     new, _ = add(db, cfg, 51, keep=False)
     db.mark_gone(iids[1])
     reason = lambda iid: http['get']('/api/triage/item?id=' + iid)['rank_reason']
-    assert reason(iids[0]) is None and reason(ka) == 'Kleinanzeigen 的货不能上榜'
-    assert reason(new) == '不在商品池，不能上榜' and reason(iids[1]) == '原平台已下架，不能上榜'
+    assert reason(iids[0]) is None and reason(ka) == 'Kleinanzeigen 的货不能加入 R12'
+    assert reason(new) == '不在商品池，不能加入 R12' and reason(iids[1]) == '原平台已下架，不能加入 R12'
 
 
 def test_render_preview_rejects_empty_output(tmp_path):

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "snapshot.v1.schema.json",
   "title": "发布快照 v1（Mac → 服务器，AD-5、AD-6、AD-13、AD-22）",
-  "description": "完整快照，服务器整体原子替换。字段只限 AD-6 白名单：永不包含原平台链接与图片地址、分数与理由、自动移出的货、Kleinanzeigen 的货、GC 编号。publish_no 与 hide 的 hide_seq 出自 Mac 同一计数器；服务器拒收 publish_no ≤ 当前编号的快照（确认里 applied 为 false，不算错误），替换时保留 hide_seq 大于 hide_watermark 的隐藏项。引用的图片须先经 PUT /admin/images/<name> 上传，服务器缺任何一张即 400 拒收。rank 恰好 12 件且都在 pool 里；pool 为墨墨的顺序，items 与 pool 是同一组货。",
+  "description": "完整快照，服务器整体原子替换。字段只限 AD-6 白名单：永不包含原平台链接与图片地址、分数与理由、自动移出的货、Kleinanzeigen 的货、GC 编号。publish_no 与 hide 的 hide_seq 出自 Mac 同一计数器；服务器拒收 publish_no ≤ 当前编号的快照（确认里 applied 为 false，不算错误），替换时保留 hide_seq 大于 hide_watermark 的隐藏项。引用的图片须先经 PUT /admin/images/<name> 上传，服务器缺任何一张即 400 拒收。rank 为 0 到 12 件（不必排满）且都在 pool 里；pool 为墨墨的顺序，items 与 pool 是同一组货。",
   "type": "object",
   "required": [
     "schema_version",
@@ -28,8 +28,8 @@
     },
     "rank": {
       "type": "array",
-      "description": "MyR12（今日榜）：恰好 12 个货号，按名次。",
-      "minItems": 12,
+      "description": "MyR12（今日榜，后台称 R12）：0 到 12 个货号，按名次，不必排满；须都在 pool 里且不重复。为空时客人首页不显示今日榜。",
+      "minItems": 0,
       "maxItems": 12,
       "items": {
         "type": "string",

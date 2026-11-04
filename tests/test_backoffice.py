@@ -71,7 +71,7 @@ def http(db):
 def test_new_page_at_root_and_old_page_at_old(http):
     html = http['html']
     assert '<nav class="tabs"' in html and '/triage.js' in html and '__TOKEN__' not in html
-    for name in ('新货', '商品池', '榜', '匹配', '待审核', '客人'):
+    for name in ('新货', '商品池', 'R12', '匹配', '待审核', '客人'):
         assert '<b>' + name + '</b>' in html
     assert html.count('暂不可用') == 0 and 'href="/#rules"' in html and 'href="/#guests"' in html and 'aria-current="page"' in html
     assert 'maximum-scale' not in html and 'user-scalable' not in html

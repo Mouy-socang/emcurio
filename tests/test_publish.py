@@ -131,13 +131,32 @@ def do_publish(db, root, fetch):
 
 # ---------- 榜与入选 ----------
 
-def test_rank_needs_full_size(db, cfg, root, fetch):
+def test_rank_need_not_be_full(db, cfg, root, fetch):
+    """2026-11-04：R12 不必排满——5 件、0 件都能发布；快照的 rank 原样是这几件（或空）。"""
     _, codes = pool(db, cfg, RANK - 1)
-    set_rank(db, codes)
-    with pytest.raises(publish.PublishError) as e:
+    set_rank(db, codes[:5])
+    first = do_publish(db, root, fetch)
+    assert first['rank'] == 5
+    snaps = outbox(db, 'snapshot')
+    assert snaps[-1]['payload']['rank'] == codes[:5] and len(snaps[-1]['payload']['pool']) == RANK - 1
+    set_rank(db, [])
+    second = do_publish(db, root, fetch)
+    assert second['rank'] == 0 and second['publish_no'] > first['publish_no']
+    assert outbox(db, 'snapshot')[-1]['payload']['rank'] == []
+
+
+def test_rank_over_size_rejected_at_publish(db, cfg, root, fetch):
+    """超过 RANK_SIZE（13 件）：set_rank 拒绝；库里绕过 set_rank 写进 13 件时发布与预览也拒绝。"""
+    _, codes = pool(db, cfg, RANK + 1)
+    with pytest.raises(publish.PublishError, match=f'R12 最多 {RANK} 件'):
+        set_rank(db, codes)
+    with db.connect() as c:
+        c.executemany('INSERT INTO publish_rank(pos,code) VALUES(?,?)', list(enumerate(codes, 1)))
+    with pytest.raises(publish.PublishError, match=f'R12 最多 {RANK} 件'):
         do_publish(db, root, fetch)
-    assert f'榜需满 {RANK} 件才能发布' in str(e.value)
-    assert outbox(db) == [] and fetch.urls == []
+    with pytest.raises(publish.PublishError, match=f'R12 最多 {RANK} 件'):
+        publish.candidate(db, root, fetch=fetch)
+    assert outbox(db, 'snapshot') == []
 
 
 def test_set_rank_rejects_ineligible(db, cfg):
@@ -285,8 +304,8 @@ def test_publish_and_hide_share_one_counter(db, cfg, root, fetch):
     assert [h['hide_seq'] for h in hides] == [first + 1, first + 2]
     assert [(h['code'], h['action'], h['reason']) for h in hides] == [(codes[0], 'hide', 'sold'),
                                                                     (codes[1], 'hide', 'removed')]
-    # 榜里两件已离开（下架、去掉）：补位前不能再发布；隐藏不受"满 RANK 件"限制。
-    with pytest.raises(publish.PublishError, match=f'榜里第 1 名 {codes[0]} 已不能发布.*请换一件'):
+    # R12 里两件已离开（下架、去掉）：移出或换一件前不能再发布。
+    with pytest.raises(publish.PublishError, match=f'R12 第 1 名 {codes[0]} 已不能发布.*请换一件'):
         do_publish(db, root, fetch)
     assert len(outbox(db, 'snapshot')) == 1
 
@@ -385,7 +404,9 @@ def test_snapshot_and_hide_contract_agree_with_server(db, cfg, root, fetch):
     hide = {'schema_version': 1, 'code': 'CO-0001', 'hide_seq': 5, 'action': 'hide', 'reason': 'sold',
             'at': '2026-11-03T08:00:00.000Z'}
     cases = [('snapshot', snap), ('hide', hide),
-             ('snapshot', dict(snap, rank=snap['rank'][:RANK - 1])),
+             ('snapshot', dict(snap, rank=snap['rank'][:5])),
+             ('snapshot', dict(snap, rank=[])),
+             ('snapshot', dict(snap, rank=snap['rank'] + ['CO-9998'])),
              ('snapshot', dict(snap, items=[dict(snap['items'][0], url='https://x')] + snap['items'][1:])),
              ('snapshot', dict(snap, items=[dict(snap['items'][0], price_band='cheap')] + snap['items'][1:])),
              ('hide', dict(hide, action='delete')), ('hide', dict(hide, code='CO-1')),
@@ -404,7 +425,7 @@ def test_snapshot_and_hide_contract_agree_with_server(db, cfg, root, fetch):
             mac.append(True)
         except sync.ContractError:
             mac.append(False)
-    assert mac == json.loads(r.stdout) == [True, True] + [False] * 6
+    assert mac == json.loads(r.stdout) == [True, True, True, True] + [False] * 6
 
 
 # ---------- 运维命令 ----------
@@ -414,14 +435,15 @@ def test_publish_script_rank_and_publish(db, cfg, root, fetch):
     _, codes = pool(db, cfg, RANK)
     lines = []
     args = ['--db', str(db.path), '--root', str(root)]
-    assert cli.main(args + ['rank'] + codes[:RANK - 1], out=lines.append, fetch=fetch) == 0
-    assert cli.main(args + ['publish'], out=lines.append, fetch=fetch) == 1
-    assert f'榜需满 {RANK} 件才能发布' in lines[-1]
+    assert cli.main(args + ['rank'] + codes[:5], out=lines.append, fetch=fetch) == 0
+    assert lines[-2] == f'R12 已设为 5 件（最多 {RANK} 件）'
+    assert cli.main(args + ['publish'], out=lines.append, fetch=fetch) == 0       # 不满 12 件也能发布
+    assert '已入队发布' in lines[-1] and 'R12 5 件' in lines[-1] and len(outbox(db, 'snapshot')) == 1
     assert cli.main(args + ['rank'] + codes, out=lines.append, fetch=fetch) == 0
     assert cli.main(args + ['rank'], out=lines.append, fetch=fetch) == 0
     assert codes[0] in lines[-1]
     assert cli.main(args + ['publish'], out=lines.append, fetch=fetch) == 0
-    assert '已入队发布' in lines[-1] and len(outbox(db, 'snapshot')) == 1
+    assert '已入队发布' in lines[-1] and len(outbox(db, 'snapshot')) == 2
     assert cli.main(args + ['rank', 'CO-9999'], out=lines.append, fetch=fetch) == 1
 
 

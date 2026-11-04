@@ -1,11 +1,11 @@
-/* 后台 02 商品池与 03 榜（故事 11，CAP-7）：分区切换（#new / #pool / #rank …… #agree）、商品池列表（加入榜、移出 / 放回商品池、
+/* 后台 02 商品池与 03 R12（故事 11，CAP-7）：分区切换（#new / #pool / #rank …… #agree）、商品池列表（加入榜、移出 / 放回商品池、
    标记售出（需确认）/ 撤销售出（故事 13）、货详情）、排榜（把手长按拖动、上移 / 下移 / 移出榜、播报）、排序即时保存与重试、预览入口与发布状态。
    原生 JS，无构建、无外部库；与 triage.js 共用 $、rid、get、post、say、shout、setNet、openDetail、viewTitle。
    发布不在这里：只从预览横条（/preview/，preview-bar.js）发起。 */
 (function () {
   'use strict';
   const SIZE = 12;
-  const REASON_FULL = '榜已满 ' + SIZE + ' 件，请先移出一件';
+  const REASON_FULL = 'R12 已满 ' + SIZE + ' 件，请先移出一件';
   const LONG_PRESS = 350;
 
   let view = 'new';
@@ -119,7 +119,7 @@
       if (force || (!unsaved && !saving)) { order = d.rows.map(r => r.code); saved = order.slice(); }
       rankLoaded = true;
     } catch (e) {
-      if (view === 'rank') { showRankErr('未能读取榜', loadRank); }
+      if (view === 'rank') { showRankErr('未能读取 R12', loadRank); }
       return;
     }
     renderRank(); counts();
@@ -146,7 +146,7 @@
     const p = el('p', 'p'); p.append(el('span', 'mono', c.price), ' · 来源 ' + c.platform);
     const st = el('p', 'st', out && c.sold ? '已售出' : c.on_sale ? '在售' : '已下架');
     const pos = order.indexOf(c.code);
-    if (!out && pos >= 0) st.append(' · 在榜第 ', el('span', 'mono', String(pos + 1)), ' 名');
+    if (!out && pos >= 0) st.append(' · R12 第 ', el('span', 'mono', String(pos + 1)), ' 名');
     const why = el('p', 'reason'); why.id = 'why-' + c.item_id.replace(/[^\w-]/g, '_'); why.hidden = true;
     const msg = el('p', 'im'); msg.hidden = true; msg.setAttribute('role', 'alert');
     const acts = el('div', 'acts2');
@@ -161,7 +161,7 @@
       acts.append(back); acts.style.gridTemplateColumns = '1fr';
     } else {
       const inRank = pos >= 0;
-      const rb = el('button', 'btn', inRank ? '移出榜' : '加入榜'); rb.type = 'button'; rb.dataset.k = c.item_id + ':rank';
+      const rb = el('button', 'btn', inRank ? '移出 R12' : '加入 R12'); rb.type = 'button'; rb.dataset.k = c.item_id + ':rank';
       disable(rb, inRank ? null : rankReason(c), why);
       rb.onclick = () => {
         if (rb.getAttribute('aria-disabled') === 'true') { say(why.textContent); return; }
@@ -267,7 +267,7 @@
     setNet(false);
     const d = res.data;
     // 不用响应里的榜覆盖本地（可能是重放的旧结果）：只拿掉移出商品池的那件（moveLocal），其余以重新读取的榜为准。
-    const rankNote = d.left_rank ? '，并已移出榜' : '';
+    const rankNote = d.left_rank ? '，并已移出 R12' : '';
     const next = {out_of_pool: '已移出商品池' + rankNote, mark_sold: '已标记售出' + rankNote,
                   undo_sold: '已撤销售出', back_to_pool: '已放回商品池'}[action];
     // 原位：这一件淡出，页面以下一行为锚不跳动；焦点移到下一行的同一个按钮（不滚动），没有则到列表标题。
@@ -286,22 +286,22 @@
     loadRank();
   }
 
-  /* ---------- 03 榜 ---------- */
+  /* ---------- 03 R12 ---------- */
   function addToRank(code) {
     if (order.includes(code)) return;
     if (order.length >= SIZE) { say(REASON_FULL); return; }
     order.push(code); selected = null;
-    say('已加入榜，第 ' + order.length + ' 名');
+    say('已加入 R12，第 ' + order.length + ' 名');
     changed();
-    return '已加入榜，第 ' + order.length + ' 名';
+    return '已加入 R12，第 ' + order.length + ' 名';
   }
   function dropFromRank(code) {
     const i = order.indexOf(code); if (i < 0) return;
     order.splice(i, 1);
     if (selected === code) selected = null;
-    say('已移出榜');
+    say('已移出 R12');
     changed();
-    return '已移出榜';
+    return '已移出 R12';
   }
   function move(code, to, focusPart) {
     const from = order.indexOf(code);
@@ -378,7 +378,7 @@
       const mv = el('div', 'mv');
       const up = el('button', 'btn', '上移'); up.type = 'button'; up.dataset.k = code + ':up';
       const down = el('button', 'btn', '下移'); down.type = 'button'; down.dataset.k = code + ':down';
-      const rm = el('button', 'btn', '移出榜'); rm.type = 'button'; rm.dataset.k = code + ':rm';
+      const rm = el('button', 'btn', '移出 R12'); rm.type = 'button'; rm.dataset.k = code + ':rm';
       const det = el('button', 'lnk lnk-pad', '查看详情'); det.type = 'button'; det.dataset.k = code + ':det';
       up.onclick = () => move(code, order.indexOf(code) - 1, 'up');
       down.onclick = () => move(code, order.indexOf(code) + 1, 'down');
@@ -428,13 +428,13 @@
     // 补位提示
     const off = offRows();
     const offMsg = $('rankOff');
-    if (off.length) { offMsg.textContent = '第 ' + off.map(([, i]) => i + 1).join('、') + ' 名已下架或不能发布，请移出并从 02 商品池补位'; offMsg.hidden = false; }
+    if (off.length) { offMsg.textContent = '第 ' + off.map(([, i]) => i + 1).join('、') + ' 名已下架或不能发布，请移出（或从 02 商品池换一件）'; offMsg.hidden = false; }
     else offMsg.hidden = true;
     // 预览
     let reason = null;
-    if (order.length < SIZE) reason = '榜需满 ' + SIZE + ' 件才能发布';
+    if (order.length > SIZE) reason = 'R12 最多 ' + SIZE + ' 件';
     else if (unsaved || saving) reason = '排序尚未保存';
-    else if (off.length) reason = '榜里有已下架或不能发布的货，请先补位';
+    else if (off.length) reason = 'R12 里有已下架或不能发布的货，请先移出或换一件';
     disable($('btnPreview'), reason, $('whyPreview'));
     if (!previewing) $('btnPreview').textContent = '预览';
   }
@@ -549,16 +549,16 @@
     // d：/api/triage/item 的结果；rank_reason 由服务端判定（null 为可以上榜），榜满按当前件数判断。
     primary(d) {
       const code = d.code;
-      if (code && order.includes(code)) return {label: '移出榜', reason: null};
-      return {label: '加入榜', reason: d.rank_reason || (order.length >= SIZE ? REASON_FULL : null)};
+      if (code && order.includes(code)) return {label: '移出 R12', reason: null};
+      return {label: '加入 R12', reason: d.rank_reason || (order.length >= SIZE ? REASON_FULL : null)};
     },
     async fromDetail(d) {
-      if (!d.code) return '未能加入榜：这件货还没有货号';
+      if (!d.code) return '未能加入 R12：这件货还没有货号';
       if (!order.includes(d.code) && !cards.has(d.code)) {
         cards.set(d.code, {item_id: d.item_id, code: d.code, name: d.name, name_lang: d.name_lang, image: d.image,
                            price: d.price, tags: d.tags || [], on_sale: d.status === 'active', rank_reason: d.rank_reason});
       }
-      return (order.includes(d.code) ? dropFromRank(d.code) : addToRank(d.code)) || '未能加入榜';
+      return (order.includes(d.code) ? dropFromRank(d.code) : addToRank(d.code)) || '未能加入 R12';
     }
   };
 

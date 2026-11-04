@@ -751,7 +751,7 @@ function viewTitle() {
   if (!$('guestsView').hidden) return '客人 · 后台';
   if (!$('agreeView').hidden) return '符合度 · 后台';
   if (!$('poolView').hidden) return '商品池 · 后台';
-  if (!$('rankView').hidden) return '榜 · 后台';
+  if (!$('rankView').hidden) return 'R12 · 后台';
   if (!$('seenView').hidden) return '看过未选 · 后台';
   return $('arView').hidden ? '新货 · 后台' : '已自动移出 · 后台';
 }
@@ -909,9 +909,9 @@ async function markSold() {
   detail.state = res.data.state; detail.sold = !!res.data.sold;
   if (window.curioRank && window.curioRank.reload) window.curioRank.reload();
   $('dSoldConfirm').hidden = true; $('dSoldRow').hidden = true;
-  msg.textContent = '已标记售出' + (res.data.left_rank ? '，并已移出榜' : '') + '（可在 02 商品池"已移出"里撤销）';
+  msg.textContent = '已标记售出' + (res.data.left_rank ? '，并已移出 R12' : '') + '（可在 02 商品池"已移出"里撤销）';
   msg.hidden = false; say('已标记售出');
-  if (detailMode === 'pool' || detailMode === 'rank') { $('dPrimary').textContent = '加入榜'; setPrimaryReason('不在商品池，不能上榜'); }
+  if (detailMode === 'pool' || detailMode === 'rank') { $('dPrimary').textContent = '加入 R12'; setPrimaryReason('不在商品池，不能加入 R12'); }
 }
 function primaryMsg(text) { const m = $('dPrimaryMsg'); m.textContent = text; m.hidden = false; shout(text); }
 async function primary() {
@@ -1841,7 +1841,7 @@ window.curioAgree = (function () {
     } else {
       box.append(el('p', 'none', noneText(p)));
     }
-    row('榜重合', k.status === 'ok' ? k.overlap + ' / ' + k.size : '无数据');
+    row('R12 重合', k.status === 'ok' ? k.overlap + ' / ' + k.size : '无数据');
     box.append(dl);
     if (p.n) box.append(el('p', 'none', '你留下的 ' + p.n + ' 件里有 ' + p.kept_in_top + ' 件在系统前 ' + (p.system_top || 100)));
     if (p.late_seal) box.append(el('p', 'none', '封存晚于当天最早的 ' + p.late_decisions + ' 次挑选，这些不计入'));

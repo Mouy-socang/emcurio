@@ -80,7 +80,7 @@ def build(publish_no, items, watermark=None, rank=None, tombstones=()):
     pool = [it['code'] for it in items]
     return {'schema_version': 1, 'publish_no': publish_no,
             'hide_watermark': publish_no if watermark is None else watermark,
-            'rank': rank or pool[:12], 'pool': pool, 'items': items, 'tombstones': list(tombstones)}
+            'rank': pool[:12] if rank is None else rank, 'pool': pool, 'items': items, 'tombstones': list(tombstones)}
 
 
 def send(client, kind, payload):
@@ -89,7 +89,7 @@ def send(client, kind, payload):
     return client.post('/admin/events', json=env, headers=AUTH)
 
 
-def publish(client, publish_no, n_items=30, upload=True, **kw):
+def publish(client, publish_no, n_items=30, upload=True, rank_n=None, **kw):
     items = []
     for n in range(1, n_items + 1):
         if upload:
@@ -97,7 +97,8 @@ def publish(client, publish_no, n_items=30, upload=True, **kw):
         else:       # 从未上传的图
             imgs = [(jpeg(f'big{n}')[0], jpeg(f'th{n}')[0])]
         items.append(make_item(n, imgs, **kw))
-    r = send(client, 'snapshot', build(publish_no, items))
+    rank = None if rank_n is None else [it['code'] for it in items[:rank_n]]
+    r = send(client, 'snapshot', build(publish_no, items, rank=rank))
     return r, items
 
 
@@ -249,8 +250,23 @@ def test_tombstone_and_unknown_item_pages(client):
     assert ok.status_code == 200 and '<title>Meissen梅森' in ok.text and '货号 CO-0001' in ok.text
 
 
+@pytest.mark.parametrize('n', [5, 0])
+def test_partial_rank_accepted_and_shown(client, n):
+    """2026-11-04：R12 不必排满（0–12 件）。5 件照实显示；0 件时首页不显示今日榜、全部藏品照常。"""
+    r, items = publish(client, 3, rank_n=n)
+    assert r.status_code == 200 and r.json()['applied'] is True
+    sign_in(client)
+    html = client.get('/').text
+    assert rank_codes(html) == [it['code'] for it in items[:n]]
+    if n:
+        assert f'aria-label="MyR12，{n} 件"' in html
+    else:
+        assert '<ol class="rank"' not in html and 'aria-label="MyR12' not in html
+    assert '全部藏品 <span class="mono cnt">30</span>' in html and '墨墨正在准备' not in html
+
+
 @pytest.mark.parametrize('mutate,detail', [
-    (lambda p: p.update(rank=p['rank'][:11]), '不符合要求'),
+    (lambda p: p.update(rank=p['rank'] + ['CO-0013']), '不符合要求'),        # 13 件：超过 maxItems
     (lambda p: p['items'].append(dict(p['items'][0])), '重复'),
     (lambda p: p.update(rank=p['rank'][:11] + ['CO-9999']), '不在商品池'),
     (lambda p: p['items'][0].update(url='https://www.ebay.de/itm/1'), '不符合要求'),
