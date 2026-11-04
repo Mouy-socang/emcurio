@@ -336,7 +336,7 @@ _SCORING_CACHE={}
 SCORING_WEIGHTS=('momo','value','trend','customer')
 SCORING_TREND=('brand','pattern','function')
 # 可用 scripts/score_compare.py --set 覆盖的参数名（扁平）：四个权重、trend_brand / trend_pattern / trend_function 与下列标量。
-SCORING_SCALARS=('customer_k','customer_max','smoothing','ai_share','min_peers','half_life_days')
+SCORING_SCALARS=('customer_k','customer_max','smoothing','ai_share','min_peers','half_life_days','absolute','trend_scale')
 # 故事 28：曝光衰减参数（scoring.yaml 的 exposure 段）；score_compare.py 用 --set exposure.per_day=… 覆盖。
 SCORING_EXPOSURE=('per_day','max','hint_days')
 
@@ -377,6 +377,10 @@ def scoring_validate(raw):
     out['ai_share']=float(share)
     out['min_peers']=_nonneg(raw.get('min_peers'),'scoring.min_peers',integer=True,positive=True)
     out['half_life_days']=float(_nonneg(raw.get('half_life_days'),'scoring.half_life_days',positive=True))
+    flag=raw.get('absolute')
+    if flag not in (0,1) or isinstance(flag,bool):raise ValueError('scoring.absolute 必须为 0（排名百分位）或 1（绝对刻度）')
+    out['absolute']=int(flag)
+    out['trend_scale']=float(_nonneg(raw.get('trend_scale'),'scoring.trend_scale',positive=True))
     e=raw.get('exposure')
     if not isinstance(e,dict) or set(e)!=set(SCORING_EXPOSURE):raise ValueError('scoring.exposure 必须恰好有 per_day、max、hint_days')
     hint=_nonneg(e['hint_days'],'scoring.exposure.hint_days',integer=True)
@@ -403,7 +407,7 @@ def scoring_override(params,sets):
     for name,value in sets.items():
         if name in SCORING_WEIGHTS:raw['weights'][name]=value
         elif name.startswith('trend_') and name[6:] in SCORING_TREND:raw['trend_weights'][name[6:]]=value
-        elif name in SCORING_SCALARS:raw[name]=int(value) if name=='min_peers' and float(value).is_integer() else value
+        elif name in SCORING_SCALARS:raw[name]=int(value) if name in ('min_peers','absolute') and float(value).is_integer() else value
         elif name.startswith('exposure.') and name[9:] in SCORING_EXPOSURE:
             raw['exposure'][name[9:]]=int(value) if name=='exposure.hint_days' and float(value).is_integer() else value
         else:raise ValueError('未知参数：'+name)

@@ -1359,6 +1359,17 @@ def percentiles(values):
     return {k: 50.0 if v is None else 100.0 * _bisect.bisect_left(known, v) / span for k, v in values.items()}
 
 
+def absolute_parts(raw_t, raw_v, raw_r, params):
+    """绝对刻度（absolute = 1）：成分不再是"在全部货里排第几"，而是本身的大小，各 0–100。
+    口味 = 平滑留下率 × 100（留下 1/4 左右约 25）；性价比 = 100 ÷ (1 + 标价/同类中位)（同价 50，越便宜越高）；
+    客群 = 100 × (1 − e^(−趋势原始值 ÷ trend_scale))（成交越多越接近 100）。缺值为 50。"""
+    k = params['trend_scale']
+    pt = {i: min(100.0, 100.0 * v) for i, v in raw_t.items()}
+    pv = {i: 50.0 if v is None else 100.0 / (1.0 + _math.exp(-v)) for i, v in raw_v.items()}
+    pr = {i: 50.0 if v is None else 100.0 * (1.0 - _math.exp(-v / k)) for i, v in raw_r.items()}
+    return pt, pv, pr
+
+
 def customer_weights(n, params):
     """客人喜好的权重随数据量增长：w = n ÷ (n + k)；返回 (口味权重, 客人权重) = (momo − max·w, max·w)。
     n 为这位客人的数据量（条数），≤ 0 时客人权重为 0。"""
@@ -1419,7 +1430,8 @@ def composite_reason(parts, why, names, demand_ok=True, weights=None):
 
 def composite_scores(items, demand, names, params):
     """方案 C 综合评分。items 见上；demand 为 gc_demand 结果，None 表示客群数据读不了（趋势全为 50）；
-    names 为理由用的中文名 dict(brand, pattern, function)。百分位在本次全部货上算。
+    names 为理由用的中文名 dict(brand, pattern, function)。absolute = 0 时成分为本次全部货上的百分位，
+    absolute = 1 时为绝对刻度（见 absolute_parts）。
     返回 {item_id: dict(score, momo, value, trend, customer, reason)}（分数与成分都是 0–100 的浮点数）。"""
     items = list(items)
     if not items:
@@ -1434,8 +1446,12 @@ def composite_scores(items, demand, names, params):
         raw_v[iid] = None if ratio is None or ratio <= 0 else -_math.log(ratio)
         why_v[iid] = (m, missing)
         raw_r[iid] = None if demand is None else trend(it, demand, params)
-    pt, pv, pr = percentiles(raw_t), percentiles(raw_v), percentiles(raw_r)
-    ai = percentiles({it['item_id']: it.get('ai_score') for it in items if it.get('ai_score') is not None})
+    if params.get('absolute'):
+        pt, pv, pr = absolute_parts(raw_t, raw_v, raw_r, params)
+        ai = {it['item_id']: float(it['ai_score']) for it in items if it.get('ai_score') is not None}
+    else:
+        pt, pv, pr = percentiles(raw_t), percentiles(raw_v), percentiles(raw_r)
+        ai = percentiles({it['item_id']: it.get('ai_score') for it in items if it.get('ai_score') is not None})
     share = params['ai_share']
     out = {}
     for it in items:
