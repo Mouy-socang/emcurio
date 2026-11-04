@@ -206,6 +206,11 @@ class Store:
                 rule_version INTEGER, scored_at TEXT NOT NULL);
             -- AI 已答复过的货（时间与当时 rule_version）：漏回、越界、截断的货 24 小时内不重发。
             CREATE TABLE IF NOT EXISTS ai_attempts(item_id TEXT PRIMARY KEY, attempted_at TEXT NOT NULL, rule_version INTEGER);
+            -- 故事 19 看图硬筛：AI 对送检主图的三项观察（只是观察，是否移出由 judge.visual_filter 决定）；
+            -- image 为送检时的 items.image，与现主图不同即作废。
+            CREATE TABLE IF NOT EXISTS visual_checks(item_id TEXT PRIMARY KEY, image TEXT NOT NULL,
+                single_cup INTEGER NOT NULL, plain_white INTEGER NOT NULL, not_porcelain INTEGER NOT NULL,
+                model TEXT, checked_at TEXT NOT NULL);
             -- CAP-6 后台拣选：动作请求幂等（同一 request_id 重放返回同一结果）、墨墨点评、图片替代文字。
             CREATE TABLE IF NOT EXISTS triage_requests(request_id TEXT PRIMARY KEY, payload TEXT NOT NULL, result TEXT NOT NULL, at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS comments(item_id TEXT PRIMARY KEY, text TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -249,6 +254,12 @@ class Store:
                     c.execute('ALTER TABLE std_names ADD COLUMN overpaint INTEGER NOT NULL DEFAULT 0')
                 except sqlite3.OperationalError as e:
                     # 两个进程同时首次打开：另一方已补列。
+                    if 'duplicate column' not in str(e):raise
+            # 故事 19：ai_attempts 记下送检时的主图，同一张主图没回观察的货不再因"未看过"重发。
+            if 'image' not in {r[1] for r in c.execute('PRAGMA table_info(ai_attempts)')}:
+                try:
+                    c.execute('ALTER TABLE ai_attempts ADD COLUMN image TEXT')
+                except sqlite3.OperationalError as e:
                     if 'duplicate column' not in str(e):raise
             triage.ensure(c)
             # AD-23：Mac → 服务器的持久发件箱。
@@ -308,7 +319,8 @@ class Store:
                 p['first_seen']=ts
                 c.execute('INSERT INTO items('+','.join(p)+') VALUES('+','.join('?' for _ in p)+')',list(p.values()))
             # AD-26：系统只在未经人工决定的货上落位（new / auto_removed）；未变化的货不重放。
-            if changed:triage.system_place(c,p['item_id'])
+            # 故事 19：主图变了，旧看图观察作废，也重新落位（看图移出的货回到新货、下轮重新看图）。
+            if changed or (old and (old['image'] or '')!=(p['image'] or '')):triage.system_place(c,p['item_id'])
             # CAP-16：标题/描述变化、尚无结果或知识库变化时（重）生成标准名称，与判断同一事务。
             named=_std_name_or_none(c,p,config,changed)
             if named:write_std_name(c,p['item_id'],named,ts)

@@ -221,13 +221,21 @@ uv run python scripts/rejudge.py   # 打印 checked / changed / moved / transiti
 **两种分数来源：**
 
 - **规则基线分**（`rules.baseline_score(item, std)`，始终可算）：判断想要 60 / 询市 40 / 不要（捞回的）15；标准名称有图案 +12、有器型 +8、有功能 +6；卖家等级 1. Wahl +6、2. Wahl −10、3./4. Wahl −15（"1.WAHL"、"I.Wahl"、"erste Wahl" 等写法都认）；外画只在理由里标明、不减分；结果夹在 0–100，理由如「判断想要；有图案、器型；1. Wahl」。入库、重判（`rejudge` / `rejudge_all`）时随判断写入；未过期的 AI 分不会被基线分覆盖，过期的会先换成基线分、下轮再由 AI 重算。
-- **AI 分**（`curio/ai.py`，唯一的 Anthropic 调用点）：`requests` 直接 POST `https://api.anthropic.com/v1/messages`，头 `anthropic-version: 2026-10-21`，模型 `claude-haiku-5-5`，不发 `temperature` / `top_p` / `top_k`。一次最多 20 件（item_id、标题、描述前 600 字、欧元价、标准名称、外画标签、基线分），附墨墨最近最多 30 件「留下」与 30 件「去掉」的标题与理由作偏好示例；要求只回 JSON 数组 `[{item_id, score, reason}]`。返回解析失败、缺件、分数越界的那几件保留原分（记警告），不中断。AI 只写 `scores`，不改判断、拣选状态或人工决定。
+- **AI 分**（`curio/ai.py`，唯一的 Anthropic 调用点）：`requests` 直接 POST `https://api.anthropic.com/v1/messages`，头 `anthropic-version: 2026-10-21`，模型 `claude-haiku-5-5`，不发 `temperature` / `top_p` / `top_k`。一次最多 20 件（item_id、标题、描述前 600 字、欧元价、标准名称、外画标签、基线分），附墨墨最近最多 30 件「留下」与 30 件「去掉」的标题与理由作偏好示例；要求只回 JSON 数组 `[{item_id, score, reason}]`。返回解析失败、缺件、分数越界的那几件保留原分（记警告），不中断。AI 只写 `scores` 与看图观察 `visual_checks`（见下文看图硬筛），不改判断或人工决定。
 
 **启用 AI：** 由墨墨在 `.env` 加一行 `ANTHROPIC_API_KEY=...`（只读 `.env`，不读系统环境变量；key 不进日志、结果或提交）。不填时只有基线分，每轮结果 `ai_status: disabled`，新货队列按基线分排序。
 
 **采集轮打分：** 抓取与在售检查之后，对 新货、非 backlog、在售、分数缺失 / 过期 / 来源为 rule 的货按 `first_seen` 新到旧打分。结果 JSON 增加 `ai_status`（`disabled` / `ok` / `budget_exhausted` / `error`）、`ai_scored`（本轮写入件数）与 `ai_usage`；AI 出错（如 HTTP 529、超时、返回被截断 `stop_reason: max_tokens` 或被拒绝 `refusal`）只让 `ai_status: error`，基线分不动，其它平台结果与本轮状态不受影响。为免一轮占用采集锁太久，每轮至多 10 次请求（含重试，`ai.MAX_REQUESTS_PER_ROUND`），整个 AI 步骤限时 120 秒（`ai.ROUND_SECONDS`，每次请求前检查，单次请求超时 120 秒且不超过剩余时间）；到限即正常结束（结果带 `ai_stopped: round_limit`），下轮继续。已得到答复但漏回、越界或被截断的货记在表 `ai_attempts`，24 小时内（且 `rule_version` 未变）不重发。`requests_per_day: 0` 视同未启用（`ai_status: disabled`）。各种结果都带 `ai_usage`。提示里说明货品标题与描述是不可信的卖家文字、其中的指令一律忽略；非欧元货发送原价与币种。
 
-**预算（AD-20）：** `config/settings.yaml` 的 `ai_budget.requests_per_day`（默认 100），按柏林日期在 kv `ai_usage` 计数，每个 HTTP 请求（含重试：429/5xx/网络错误时等待 `retry-after`（最多 5 秒）或 2 秒后重试 1 次；重试时额度用完则报原错误）计一次；用完当天停止，结果写 `ai_status: budget_exhausted`。月费估算（haiku 5.5 价格：输入 $0.10、输出 $0.50 / 百万 token；按 1 美元 ≈ 0.9 欧元换算，汇率为估计值，以账单为准）：每请求约 5k 输入 token（20 件货 + 60 条示例）与约 1–3k 输出 token（含模型思考），约 €0.001–0.002；默认额度 100 次/天 × 30 天 ≈ 3000 次 ≈ **每月约 €3–5**；即使每次都用满 `max_tokens`（16k 输出）也只约 €25/月。计入 AD-20 每月合计 €200 上限；约 4000 件待打分的新货在默认额度下约 2 天打完一遍。
+**预算（AD-20）：** `config/settings.yaml` 的 `ai_budget.requests_per_day`（默认 100），按柏林日期在 kv `ai_usage` 计数，每个 HTTP 请求（含重试：429/5xx/网络错误时等待 `retry-after`（最多 5 秒）或 2 秒后重试 1 次；重试时额度用完则报原错误）计一次；用完当天停止，结果写 `ai_status: budget_exhausted`。月费估算（haiku 5.5 价格：输入 $0.10、输出 $0.50 / 百万 token；按 1 美元 ≈ 0.9 欧元换算，汇率为估计值，以账单为准）：每请求约 5k 输入 token（20 件货 + 60 条示例），看图后每张主图再加约 200 token（eBay 按 `s-l400` 送；Kleinanzeigen 按原地址尺寸送，可能更多），一批 20 张图约多 4k，合计约 9k 输入 token；输出约 1–3k token（含模型思考），每请求约 €0.002–0.003；默认额度 100 次/天 × 30 天 ≈ 3000 次 ≈ **每月约 €5–8**；即使每次都用满 `max_tokens`（16k 输出）也只约 €27/月。计入 AD-20 每月合计 €200 上限；约 4000 件待打分的新货在默认额度下约 2 天打完一遍。上线看图后有一次性补看：已有 AI 分、但现主图没看过的新货（约 4000 件）各重新送检一次，同时重新打分、覆盖一次原 AI 分，头几天会用掉当日额度。
+
+**看图硬筛（故事 19）：** 同一次打分请求里附上每件货的主图，模型对附图的货多回三项观察（`single_cup` 主图只有杯子、没有任何碟子；`plain_white` 瓷器通体白色无彩绘，只带金边金线、白色浮雕、白色塑像也算；`not_porcelain` 主体不是瓷器，如书、目录、画、其他材质）。不新增请求，与打分共用当日预算与本轮限额（约 200 输入 token/图）。
+- 只送 https 的 `i.ebayimg.com`（尺寸改为 `s-l400`）与 `img.kleinanzeigen.de`（`ai.vision_url`）；无图或其他站点的货照常只打分、不看图。请求 content 为一个文本块（示例与货品 JSON）加每件附图货的 `#item_id` 文本块与 url 图片块。
+- 带图的批次被拒（HTTP 400，如某张图取不到）时，这些主图记为已送检（不再因“未看过”重发），本轮限额内去掉图片重发一次本批；提示里说明图片中的文字同样是不可信的卖家内容。
+- 观察存表 `visual_checks`（每件一行，`image` 为送检时的 `items.image`）；主图变了旧观察作废：入库时主图变化即重新落位（看图移出的货回到新货），下轮重新看图。观察漏回或不是 true/false 的货只写分数、记警告。
+- AI 只给观察（AD-16）；是否移出与理由只在 `judge.visual_filter`，落位只经 `triage.system_place`，只动未经人工决定、当前为新货 / 自动移出的货（AD-26），墨墨捞回后不再被看图结果移出。理由（多项命中取第一项）：`硬筛（看图）：主图只有杯子，不带碟` / `硬筛（看图）：白瓷（含金饰）` / `硬筛（看图）：不是瓷器`；「已自动移出」列表显示该理由。本轮看图移出的件数记在结果 `ai_removed`。
+- 候选：除分数缺失 / 过期 / 来源为 rule 的新货外，已有 AI 分但现主图还没看过的新货也进候选，同一张主图只送检一次（`ai_attempts.image` 记送检时主图）。
+- 标题白瓷同步收紧：标题写 weiß / weiss / white 且只带金饰（`Goldrand`、`vergoldet`）也算白瓷（`硬过滤：纯白瓷（标题写 weiß）`）；带彩绘 / 蓝白（如 `mit blauem Dekor`、`Rote Rose`）不算。已在库的货需重判才按新规则移出。
 
 **拣选快照与排序：** `triage` 写每条事件时 `triage_events.score` 取该货当时的 `scores.score`（无分为空），`rule_version` 照旧。新货队列 `triage.queue()`：捞回的最前，其后按分数高到低、无分的排在有分之后，再按 `first_seen` 新到旧；每件附 `score`、`score_source`、`score_reason`。
 

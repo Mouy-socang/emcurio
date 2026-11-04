@@ -143,7 +143,7 @@ def test_ai_scores_three_items_and_request_shape(db, cfg):
     assert kw['headers'] == {'x-api-key': KEY, 'anthropic-version': '2026-10-21', 'content-type': 'application/json'}
     body = kw['json']
     assert body['model'] == 'claude-haiku-5-5' and not {'temperature', 'top_p', 'top_k'} & set(body)
-    sent = json.loads(body['messages'][0]['content'].rsplit('\n', 1)[1])
+    sent = json.loads(body['messages'][0]['content'][0]['text'].rsplit('\n', 1)[1])
     assert {x['item_id'] for x in sent} == {'a', 'b', 'c'} and all(len(x['description']) == 600 for x in sent)
     assert {'title', 'price_eur', 'std_name', 'overpaint', 'baseline_score'} <= set(sent[0])
     # 已是未过期的 AI 分：下一轮不再请求
@@ -224,7 +224,7 @@ def test_budget_runs_out_mid_round(db, cfg):
     for n in range(25):
         db.ingest(item('i%02d' % n), cfg)
     def post(url, headers, json, timeout):
-        ids = [x['item_id'] for x in __import__('json').loads(json['messages'][0]['content'].rsplit('\n', 1)[1])]
+        ids = [x['item_id'] for x in __import__('json').loads(json['messages'][0]['content'][0]['text'].rsplit('\n', 1)[1])]
         return answer([{'item_id': i, 'score': 50, 'reason': 'r'} for i in ids])
     result = ai.score_round(db, KEY, 1, lambda: NOON, post)
     assert result['ai_status'] == 'budget_exhausted' and result['ai_scored'] == 20
@@ -332,7 +332,7 @@ def keep_resp(rows, stop='end_turn'):
 
 
 def sent_ids(kw):
-    return [x['item_id'] for x in json.loads(kw['json']['messages'][0]['content'].rsplit('\n', 1)[1])]
+    return [x['item_id'] for x in json.loads(kw['json']['messages'][0]['content'][0]['text'].rsplit('\n', 1)[1])]
 
 
 def st_new(db, iid):
@@ -472,7 +472,7 @@ def test_payload_non_eur_and_untrusted_line(db, cfg):
     post = Mock(return_value=answer([]))
     ai.score_round(db, KEY, 100, lambda: NOON, post)
     body = post.call_args.kwargs['json']
-    sent = json.loads(body['messages'][0]['content'].rsplit('\n', 1)[1])[0]
+    sent = json.loads(body['messages'][0]['content'][0]['text'].rsplit('\n', 1)[1])[0]
     assert (sent['price_eur'], sent['price'], sent['currency']) == (None, 40, 'USD')
     assert '不可信' in body['system'] and '忽略' in body['system']
 

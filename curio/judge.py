@@ -20,7 +20,7 @@ HARD_FILTERS = [
      "房产/租房"),
     (r"\bpostbote\b|\bkurier\b|\bfahrer\s+gesucht\b|\bauto\b|\bpkw\b|haustür|\btür\b", "劳务/汽车/建材"),
     (r"\bankauf\b|ankaufen|\bsuche\b|\bgesucht\b", "求购帖"),
-    # 你确认的：纯白瓷 / 素白塑像（注意 "weiß / vergoldet" 这种带金边的不算纯白）
+    # 你确认的：纯白瓷 / 素白塑像（只带金饰的标题白瓷见 _NOT_PLAIN）
     (r"blanc\s*de\s*chine|biscuitporzellan|\bbiscuit\b|\bbiskuit\b|"
      r"wei[sß]{1,2}e[sn]?\s+porzellan|wei[sß]{1,2}porzellan|wei[sß]{1,2}ware|pure\s+white\s+porcelain|"
      r"ohne\s+dekor|undekoriert|ohne\s+malerei",
@@ -63,9 +63,30 @@ RC_SMALL_MAX = 50           # RC 小件 ≤€50 常可要
 CHEAP_ANY_BRAND = 30        # 有品牌且 ≤€30 → 先备选
 
 
-# 标题里单独写 "weiß/weiss/white" 也当白瓷；但带金/彩绘/蓝白（如 "weiß / vergoldet"、"blau-weiß"）不算
+# 标题里单独写 "weiß/weiss/white" 也当白瓷；只带金饰（"weiß / vergoldet"、"Goldrand"）也算白瓷（墨墨 2026-11-04）；
+# 带彩绘/蓝白（如 "blau-weiß"、"mit blauem Dekor"、"Rote Rose"）不算
 _WHITE_WORD = re.compile(r"\b(wei[sß]{1,2}|white)\b", re.I)
-_NOT_PLAIN = re.compile(r"gold|vergoldet|blau|blue|bunt|dekor|malerei|bemalt|kobalt|rose|blume|indisch|zwiebel", re.I)
+_NOT_PLAIN = re.compile(r"blau|blue|bunt|dekor|malerei|bemalt|kobalt|rose(?!nthal)|blume|indisch|zwiebel|"
+                        r"watteau|kakiemon|imari|purpur|vogel|drache|landschaft|frücht|obst|blümchen|chines|chinoi|"
+                        r"\brot\b|grün|farbig|famille", re.I)
+
+# 故事 19 看图硬筛：AI 只给观察（AD-16），是否移出与理由只在这里；多项命中取第一项。
+VISUAL_RULES = (
+    ("single_cup", "硬筛（看图）：主图只有杯子，不带碟"),
+    ("plain_white", "硬筛（看图）：白瓷（含金饰）"),
+    ("not_porcelain", "硬筛（看图）：不是瓷器"),
+)
+
+
+def visual_filter(obs):
+    """看图观察（dict：single_cup / plain_white / not_porcelain）命中即返回移出理由，否则 None。"""
+    if not obs:
+        return None
+    keys = set(obs.keys())
+    for key, why in VISUAL_RULES:
+        if key in keys and obs[key]:
+            return why
+    return None
 
 # KPM 不一定是 KPM Berlin：Krister / Bavaria / "KPM Germany" 是别的厂
 _NOT_KPM_BERLIN = re.compile(r"krister|bavaria|kpm\s+germany|kups|schlesien|waldenburg", re.I)

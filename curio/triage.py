@@ -93,6 +93,27 @@ def system_state(agent_decision):
     return 'auto_removed' if agent_decision == 'skip' else 'new'
 
 
+def visual_check(c, item):
+    """故事 19：该货与现主图一致的看图观察（visual_checks 行）；主图变了、没看过或表尚未建立时为 None。"""
+    try:
+        return c.execute('SELECT * FROM visual_checks WHERE item_id=? AND image=?',
+                         (item['item_id'], item['image'] if 'image' in item.keys() else None)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _system_target(c, item):
+    """规则归口的落位与理由：判断 skip → 自动移出（判断理由）；否则有效看图观察经 judge.visual_filter 命中 →
+    自动移出（看图理由）；其余 → 新货。"""
+    if item['agent_decision'] == 'skip':
+        return 'auto_removed', _agent_reason(item)
+    from .judge import visual_filter
+    why = visual_filter(visual_check(c, item))
+    if why:
+        return 'auto_removed', why
+    return 'new', _agent_reason(item)
+
+
 def _score(c, iid):
     """CAP-4：该货当时的分数（scores 表；无分或表尚未建立时为 None）。"""
     try:
@@ -173,10 +194,10 @@ def _row(c, iid, item=None):
     s = state(c, iid)
     if s is None:
         item = item or _item(c, iid)
-        s = system_state(item['agent_decision'])
+        s, reason = _system_target(c, item)
         ts = now()
         c.execute('INSERT INTO triage(item_id,state,updated_at) VALUES(?,?,?)', (iid, s, ts))
-        _event(c, iid, None, s, 'ingest', 'system', item, reason=_agent_reason(item), at=ts)
+        _event(c, iid, None, s, 'ingest', 'system', item, reason=reason, at=ts)
     return s
 
 
@@ -187,7 +208,8 @@ def current(c, iid):
 
 
 def system_place(c, iid):
-    """入库或重新判断后调用：未经人工决定时按判断结果放入 new / auto_removed；有人工事件则不改状态。"""
+    """入库、重新判断或写入看图观察后调用：未经人工决定时按判断结果与有效看图观察放入 new / auto_removed；
+    有人工事件（含捞回）则不改状态（AD-26）。"""
     _begin(c)
     item = _item(c, iid)
     if state(c, iid) is None:
@@ -195,8 +217,7 @@ def system_place(c, iid):
     cur = state(c, iid)
     if has_human(c, iid):
         return cur
-    target = system_state(item['agent_decision'])
-    reason = _agent_reason(item)
+    target, reason = _system_target(c, item)
     if cur != target and cur in ('new', 'auto_removed'):
         ts = now()
         c.execute('UPDATE triage SET state=?,updated_at=? WHERE item_id=?', (target, ts, iid))
@@ -373,12 +394,16 @@ def queue(c, limit=100, offset=0):
 def auto_removed(c, limit=100, offset=0):
     """「已自动移出」列表：当前状态为 auto_removed 的货，按移出时间新到旧。
     每件含 item_id、title、platform、价格（price=标价、total_price、currency）、url、status、reason、removed_at：
-    reason 为该货当前的 items.agent_reason（重判后即为最新理由；当时的快照另记在 triage_events.reason），
+    reason 为该货当前的 items.agent_reason（重判后即为最新理由；当时的快照另记在 triage_events.reason）；
+    判断不是 skip、因看图硬筛移出的货取最近一次系统移出事件的理由，
     removed_at 为最近一次进入 auto_removed 的事件时间。捞回用 rescue()。"""
     if type(limit) is not int or limit < 1 or type(offset) is not int or offset < 0:
         raise ValueError('分页参数无效：limit 须 ≥1，offset 须 ≥0')
     return [dict(r) for r in c.execute('''SELECT i.item_id,i.title,i.platform,i.listed_price price,i.total_price,
-        i.currency,i.url,i.status,i.agent_reason reason,
+        i.currency,i.url,i.status,
+        CASE WHEN i.agent_decision IS 'skip' THEN i.agent_reason ELSE COALESCE((SELECT e.reason FROM triage_events e
+            WHERE e.item_id=t.item_id AND e.new_state='auto_removed' AND e.actor='system' ORDER BY e.id DESC LIMIT 1),
+            i.agent_reason) END reason,
         COALESCE((SELECT e.at FROM triage_events e WHERE e.item_id=t.item_id AND e.new_state='auto_removed'
                   AND e.old_state IS NOT 'auto_removed' ORDER BY e.id DESC LIMIT 1), t.updated_at) removed_at
         FROM triage t JOIN items i ON i.item_id=t.item_id
