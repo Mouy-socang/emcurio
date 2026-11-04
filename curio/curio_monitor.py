@@ -707,6 +707,38 @@ def archive_pool(store,root,api,config,budget=None,monotonic=time.monotonic,cloc
         else:summary['errors']+=1
     return summary
 
+AUCTION_ENDED_GRACE_HOURS=1
+AUCTION_ENDED_EVIDENCE='auction ended (ends passed)'
+
+def close_ended_auctions(store,clock=time.time,done=None):
+    """故事 20：结束的拍卖判下架。纯拍卖（triage.PURE_AUCTION；已"转为普通货"的不算，交给普通在售检查）、在售、
+    items.ends 早于现在 AUCTION_ENDED_GRACE_HOURS 小时以上的货，经 store.mark_gone 判下架（已发布的同一事务入队隐藏）；
+    实际改为下架的每件写一条 status_check_events（evidence 'auction ended (ends passed)'）。不发任何请求。
+    返回实际判下架的行（含拣选状态）；done 给出时逐件追加到它，中途出错时调用方仍拿得到已改的部分。"""
+    from . import triage
+    at=datetime.fromtimestamp(clock(),timezone.utc).isoformat(timespec='seconds')
+    with store.connect() as c:
+        rows=[dict(r) for r in c.execute("""SELECT i.item_id,i.platform,t.state FROM items i LEFT JOIN triage t ON t.item_id=i.item_id
+            WHERE i.status='active' AND """+triage.PURE_AUCTION+""" AND julianday(NULLIF(i.ends,'')) IS NOT NULL
+              AND julianday(NULLIF(i.ends,'')) < julianday(?) - ?/24.0 ORDER BY i.item_id""",(at,AUCTION_ENDED_GRACE_HOURS))]
+    done=[] if done is None else done
+    if not rows:return done
+    _ensure_check_events(store)
+    for row in rows:
+        if not store.mark_gone_changed(row['item_id']):continue
+        done.append(row)
+        _record_check(store,row['item_id'],row['platform'],'gone',AUCTION_ENDED_EVIDENCE)
+    return done
+
+def archive_ended_auctions(store,rows,root,api,config,budget,clock=time.time,monotonic=time.monotonic):
+    """结束的拍卖里商品池（留下）的货：与池检查判下架同样立即存档（_archive_gone，限时、受尝试次数上限）。"""
+    started=monotonic()
+    for row in rows:
+        if row.get('state')!='kept':continue
+        if monotonic()-started>=ARCHIVE_SECONDS:break
+        try:_archive_gone(store,row['item_id'],root,api,config,budget,clock)
+        except Exception:log.exception('下架存档失败：%s',row['item_id'])
+
 FETCH_OK=('ok','disabled','not_due')
 
 def run(root,clock=time.time):
@@ -751,7 +783,18 @@ def run(root,clock=time.time):
         except Exception:
             log.exception('商品池到期货读取失败');pool_due=[]
         do_pool=bool(pool_due)
+        # 故事 20：结束的拍卖（结束时间已过 1 小时以上）判下架；每轮都做（空闲轮也做），不发请求，失败只记结果字段。
+        ended=[]
+        try:
+            close_ended_auctions(store,clock,ended);auction_result={'auction_ended':len(ended)}
+        except Exception:
+            log.exception('结束拍卖判下架失败')
+            auction_result={'auction_ended':len(ended),'auction_ended_error':'结束拍卖判下架未完成，将在后续轮次重试'}
         if not do_fetch and not do_check and not do_pub and not do_pool:
+            # 池里的结束拍卖照常立即存档（故事 26 的下架即快照）：只在有这样的货时才建 eBay 客户端。
+            if any(r.get('state')=='kept' for r in ended):
+                try:archive_ended_auctions(store,ended,root,EbayAPI(root,budget,store),config,budget,clock)
+                except Exception:log.exception('结束拍卖存档未完成')
             # 空闲轮也发心跳（AD-10）：同步模块每轮都把各平台最近成功时间发给服务器。
             from . import sync,learning
             # CAP-8：每轮归纳一次待审规律（只改 05 计数，不打断）。
@@ -759,8 +802,8 @@ def run(root,clock=time.time):
             from .scoring import refresh_for_run
             composite=refresh_for_run(store,root,clock())
             predicted=seal_for_run(store,clock())
-            return {'status':'idle',**sched.summary(),**learning.run(store,root),**sync.run(store,root),**composite,**predicted}
-        result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub,'pool_check_ran':do_pool}
+            return {'status':'idle',**sched.summary(),**auction_result,**learning.run(store,root),**sync.run(store,root),**composite,**predicted}
+        result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub,'pool_check_ran':do_pool,**auction_result}
         with store.connect() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
               id INTEGER PRIMARY KEY,started_at TEXT,finished_at TEXT,status TEXT,result TEXT)''')
@@ -786,6 +829,9 @@ def run(root,clock=time.time):
                 today=berlin_date(clock())
                 if store.get('published_capacity_warned')!=today:
                     store.set('published_capacity_warned',today);log.warning('已发布货检查容量不足：%s','；'.join(warn))
+        if ended:
+            try:archive_ended_auctions(store,ended,root,api,config,budget,clock)
+            except Exception:log.exception('结束拍卖存档未完成')
         if do_pool:
             # 优先级：复查 > 已发布货检查 > 商品池检查 > 新货抓取 > 普通在售检查（故事 26）。
             pool_etsy=None if etsy is None or etsy_backoff else etsy

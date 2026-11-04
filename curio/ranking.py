@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import publish, triage
 from .config import ROOT
-from .store import card, now
+from .store import auction_tag, card, now
 
 SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 RENDER_TIMEOUT = 60
@@ -39,6 +39,8 @@ def rank_reason(c, item, code):
         return '原平台已下架，不能加入 R12'
     if not publish._priced(item):
         return '没有欧元标价，不能加入 R12'
+    if triage.is_pure_auction(c, item['item_id']):
+        return publish.AUCTION_REASON
     return None
 
 
@@ -58,6 +60,13 @@ def _pool_row(c, item, ranked, root):
     out['rank_reason'] = rank_reason(c, item, code)
     out['sold'] = triage.is_sold(c, item['item_id'])
     out['pool_at'] = item['state_at']           # 进池（最近一次进入该状态）的时间，02 可按它排序
+    # 故事 20：auction = 当前按纯拍卖处理（拍卖中，不能上 R12）；auction_only = 只拍卖（含已转为普通货的，可改回拍卖）。
+    out['auction'] = triage.is_pure_auction(c, item['item_id'])
+    out['auction_only'] = triage.is_auction_only(item)
+    out['ends'] = item['ends'] or None
+    tag = auction_tag(c, item)
+    if tag:
+        out['tags'] = out['tags'] + [tag]
     return out
 
 
@@ -106,6 +115,10 @@ def rank_state(store, root=ROOT):
                              (code,)).fetchone()
             row = card(c, item, root) if item else dict(item_id=None, name=code, code=code, price='', tags=[],
                                                         image=None, platform='', status=None)
+            if item is not None:
+                tag = auction_tag(c, item)          # 故事 20：拍卖中的货在 R12 行上标"竞拍 · … 结束"
+                if tag:
+                    row['tags'] = row['tags'] + [tag]
             reason = publish.why_not(c, code)
             row.update(pos=pos, code=code, off=reason is not None, reason=reason,
                        gone=item is not None and item['status'] != 'active')

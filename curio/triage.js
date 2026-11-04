@@ -68,6 +68,11 @@ function counts() {
   $('seenN2').textContent = seenCount == null ? '' : seenCount;
   $('emptySeenN').textContent = seenCount == null ? '' : seenCount;
   $('emptySeen').hidden = !(seenCount > 0);
+  if ($('aucN')) {          // 故事 20：拍卖新品 N 件（24 小时内结束 M 件）
+    $('aucN').textContent = aucCount == null ? '—' : aucCount;
+    $('aucSoonN').textContent = aucSoon == null ? '—' : aucSoon;
+    $('aucN2').textContent = aucCount == null ? '' : aucCount;
+  }
 }
 function cardEl(c) {
   const li = document.createElement('li'); li.className = 'fc'; li.dataset.id = c.item_id;
@@ -182,6 +187,7 @@ async function loadMore() {
     cursor = d.next_cursor; more = !!cursor; feedLoaded = true;
     // 有写入在路上或未保存时，这份计数可能已过时，不采用。
     if (!inflight && !failed.size) { newCount = d.counts.new; arCount = d.counts.auto_removed; }
+    if (!inflight && !failed.size && d.counts.auction != null) { aucCount = d.counts.auction; aucSoon = d.counts.auction_soon; }
     counts();
     return true;
   } catch (e) {
@@ -319,7 +325,13 @@ async function undoOnce() {
   const d = res.data, c = d.card;
   const id = c ? c.item_id : d.item_id, e = cards.get(id);
   const had = !!e && !handled.has(id);
-  if (d.state === 'new' && c) {
+  if (d.state === 'new' && c && d.auction) {
+    // 故事 20：回到新货的纯拍卖不进瀑布流，回到拍卖新品（列表开着时重读）。
+    if (e) dropCard(id);
+    if (had) newCount = Math.max(0, (newCount || 0) - 1);
+    aucCount = (aucCount || 0) + 1;
+    if (!$('aucView').hidden) loadAuc(true);
+  } else if (d.state === 'new' && c) {
     // 回到新货：放在瀑布流最前。
     handled.delete(id);
     addCard(c, true);
@@ -672,6 +684,150 @@ async function seenKeep(li) {
   say('已留下 ' + c.name);
 }
 
+/* ---------- 拍卖新品（故事 20） ----------
+   eBay 纯拍卖的新货不进瀑布流，单列在这里：未结束的按结束时间近到远，已过结束时间的在后（"已结束 · 待复查"）。
+   剩余时间在本页按 ends 计算（<24 小时醒目）；留下 / 去掉走拣选动作（request_id 幂等），不记行为事件；
+   「转为普通货」后回到新货瀑布流（POST /api/auction/convert）。 */
+let aucCount = null, aucSoon = null, aucCursor = null, aucGen = 0;
+const DAY_MS = 86400000;
+function aucLeft(c) {
+  // 返回 {text, soon, ended}：剩余时间（前端按 ends 计算）。
+  const end = c.ends ? new Date(c.ends) : null;
+  if (!end || isNaN(end)) return {text: '结束时间未知', soon: false, ended: false};
+  const ms = end - Date.now();
+  if (c.ended || ms <= 0) return {text: '已结束 · 待复查', soon: false, ended: true};
+  const m = Math.floor(ms / 60000), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  const text = '剩余 ' + (d ? d + ' 天 ' + h + ' 小时' : h ? h + ' 小时 ' + mm + ' 分' : Math.max(1, mm) + ' 分');
+  return {text, soon: ms < DAY_MS, ended: false};
+}
+// 结束时间按柏林时间显示（"11月5日 21:05"，与 02 / 03 一致）；读不出时为空。
+function berlinTime(iso) {
+  const d = iso ? new Date(iso) : null; if (!d || isNaN(d)) return '';
+  try {
+    const f = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Europe/Berlin', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false}).formatToParts(d);
+    const g = t => (f.find(x => x.type === t) || {}).value || '';
+    return g('month') + '月' + g('day') + '日 ' + g('hour') + ':' + g('minute');
+  } catch (e) { return ''; }
+}
+function aucRow(c) {
+  const li = document.createElement('li'); li.dataset.id = c.item_id; li._card = c;
+  const th = document.createElement('button'); th.type = 'button'; th.className = 'th'; th.setAttribute('aria-label', c.name + '，打开货详情');
+  if (c.image) { const im = document.createElement('img'); im.src = c.image; im.alt = ''; im.loading = 'lazy'; th.append(im); }
+  const body = document.createElement('div');
+  const t = document.createElement('button'); t.type = 'button'; t.className = 't'; t.textContent = c.name; setLang(t, c.name_lang);
+  const parts = [t];
+  if (c.title && c.title !== c.name) { const st = document.createElement('p'); st.className = 'r'; st.textContent = c.title; setLang(st, c.title_lang); parts.push(st); }
+  const p = document.createElement('p'); p.className = 'p';
+  const pm = document.createElement('span'); pm.className = 'mono'; pm.textContent = c.bid || c.price; p.append('最近出价 ', pm, ' · ' + c.platform);
+  parts.push(p);
+  const left = aucLeft(c);
+  const when = document.createElement('p'); when.className = 'when';
+  const lt = document.createElement('span'); lt.className = left.ended ? 'ended' : 'left' + (left.soon ? ' soon' : ''); lt.textContent = left.text;
+  when.append(lt);
+  if (berlinTime(c.ends)) when.append(' · 结束于 ' + berlinTime(c.ends));
+  parts.push(when);
+  if (c.score != null) {
+    const sc = document.createElement('p'); sc.className = 'r';
+    const sm = document.createElement('span'); sm.className = 'mono'; sm.textContent = c.score;
+    sc.append('综合分 ', sm); if (c.score_reason) sc.append(' · ' + c.score_reason);
+    parts.push(sc);
+  }
+  if (c.url) {
+    const lp = document.createElement('p'); const a = document.createElement('a'); a.className = 'lnk lnk-pad';
+    a.href = c.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = 'eBay 原链接'; lp.append(a); parts.push(lp);
+  }
+  const acts = document.createElement('div'); acts.className = 'acts2';
+  const keep = document.createElement('button'); keep.type = 'button'; keep.className = 'btn primary'; keep.dataset.k = 'keep'; keep.textContent = '留下';
+  const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn'; rm.dataset.k = 'remove'; rm.textContent = '去掉';
+  keep.setAttribute('aria-label', '留下 ' + c.name); rm.setAttribute('aria-label', '去掉 ' + c.name);
+  acts.append(keep, rm);
+  const cv = document.createElement('button'); cv.type = 'button'; cv.className = 'btn'; cv.dataset.k = 'convert'; cv.textContent = '转为普通货';
+  cv.setAttribute('aria-label', c.name + ' 转为普通货');
+  const cvp = document.createElement('div'); cvp.className = 'acts2'; cvp.style.gridTemplateColumns = '1fr'; cvp.style.marginTop = '8px'; cvp.append(cv);
+  const msg = document.createElement('p'); msg.className = 'im'; msg.hidden = true; msg.setAttribute('role', 'alert');
+  parts.push(acts, cvp, msg);
+  body.append(...parts); li.append(th, body);
+  th.onclick = () => openDetail(c.item_id, 'auction', th);
+  t.onclick = () => openDetail(c.item_id, 'auction', t);
+  keep.onclick = () => aucAct(li, 'keep');
+  rm.onclick = () => aucAct(li, 'remove');
+  cv.onclick = () => aucConvert(li);
+  return li;
+}
+async function loadAuc(reset) {
+  if (reset) { aucGen++; aucCursor = null; $('aucList').textContent = ''; }
+  const gen = aucGen;
+  $('aucErr').hidden = true;
+  try {
+    const d = await get('/api/auctions?limit=' + FEED_BATCH + (aucCursor ? '&cursor=' + encodeURIComponent(aucCursor) : ''));
+    if (gen !== aucGen) return;
+    const shown = new Set([...$('aucList').children].map(li => li.dataset.id));
+    d.items.forEach(c => { if (!shown.has(c.item_id)) $('aucList').append(aucRow(c)); });
+    aucCursor = d.next_cursor; aucCount = d.counts.auction; aucSoon = d.counts.auction_soon; counts();
+    $('aucMore').hidden = !aucCursor;
+    $('aucEmpty').hidden = $('aucList').children.length > 0;
+  } catch (e) { if (gen === aucGen) { $('aucErr').hidden = false; shout('未能加载拍卖新品'); } }
+}
+function openAuc() {
+  hideMsg();
+  $('triageView').hidden = true; $('aucView').hidden = false;
+  document.title = '拍卖新品 · 后台';
+  loadAuc(true); $('aucTitle').focus();
+}
+function closeAuc() {
+  $('aucView').hidden = true; $('triageView').hidden = false;
+  document.title = '新货 · 后台';
+  layoutSoon();
+  $('openAuc').focus();
+}
+function aucRemoveRow(li, k) {
+  const c = li._card;
+  const next = li.nextElementSibling || li.previousElementSibling;
+  li.remove();
+  aucCount = Math.max(0, (aucCount || 0) - 1);
+  if (aucLeft(c).soon) aucSoon = Math.max(0, (aucSoon || 0) - 1);
+  counts();
+  $('aucEmpty').hidden = $('aucList').children.length > 0;
+  (next ? next.querySelector('[data-k="' + k + '"]') : $('aucTitle')).focus();
+}
+async function aucAct(li, action) {
+  if (li.dataset.busy) return;
+  const c = li._card;
+  if (li.dataset.ract !== action) { li.dataset.ract = action; li.dataset.rid = rid(); }
+  li.dataset.busy = '1'; li.querySelector('.im').hidden = true;
+  let res = null;
+  try { res = await send({action, item_id: c.item_id, request_id: li.dataset.rid}); } catch (e) { setNet(true); }
+  delete li.dataset.busy;
+  if (!res || res.status >= 500) { seenRowMsg(li, '未保存', () => aucAct(li, action)); shout('未保存，请重试'); return; }
+  if (!res.ok) { delete li.dataset.ract; seenRowMsg(li, '未保存：' + (res.data.error || '请刷新本页后重试')); shout('未保存'); return; }
+  setNet(false);
+  aucRemoveRow(li, action);
+  sync(res.data); counts();
+  say((action === 'keep' ? '已留下 ' : '已去掉 ') + c.name);
+}
+async function aucConvert(li) {
+  if (li.dataset.busy) return;
+  const c = li._card;
+  li.dataset.cid = li.dataset.cid || rid();
+  li.dataset.busy = '1'; li.querySelector('.im').hidden = true;
+  let res = null;
+  try { res = await post('/api/auction/convert', {item_id: c.item_id, on: true, request_id: li.dataset.cid}); } catch (e) { setNet(true); }
+  delete li.dataset.busy;
+  if (!res || res.status >= 500) { seenRowMsg(li, '未保存', () => aucConvert(li)); shout('未保存，请重试'); return; }
+  if (!res.ok) { delete li.dataset.cid; seenRowMsg(li, '未保存：' + (res.data.error || '请刷新本页后重试')); shout('未保存'); return; }
+  setNet(false);
+  const d = res.data;
+  // 转为普通货的新货回到瀑布流（本页先放在最前；之后重读时按上架时间排在原位）。
+  if (d.state === 'new' && d.card && d.card.status === 'active' && !cards.has(c.item_id)) addCard(d.card, true);
+  aucRemoveRow(li, 'convert');
+  // 计数同 loadMore：有写入在路上或未保存时不采用服务器值；01 计数 = 新货件数减去「看过即不要」排除的。
+  if (!inflight && !failed.size && d.counts) {
+    newCount = Math.max(0, d.counts.new - (seenCount || 0)); aucCount = d.counts.auction; aucSoon = d.counts.auction_soon; counts();
+  }
+  updateEmpty();
+  say('已转为普通货，回到新货：' + c.name);
+}
+
 /* ---------- 货详情 ---------- */
 let detail = null, detailMode = 'new', detailOpener = null, gi = 0, savedComment = '', savedAlts = [];
 function focusables(root) {
@@ -681,11 +837,12 @@ async function openDetail(id, mode, opener) {
   let d;
   try { d = await get('/api/triage/item?id=' + encodeURIComponent(id)); }
   catch (e) {
-    if ($('arView').hidden) showMsg('未能打开货详情，请重试');
+    if (!$('aucView').hidden) { $('aucMsg').textContent = '未能打开货详情，请重试'; $('aucMsg').hidden = false; }
+    else if ($('arView').hidden) showMsg('未能打开货详情，请重试');
     else { $('arMsg').textContent = '未能打开货详情，请重试'; $('arMsg').hidden = false; }
     shout('未能打开货详情'); return;
   }
-  $('arMsg').hidden = true;
+  $('arMsg').hidden = true; $('aucMsg').hidden = true;
   detail = d; detailMode = mode; detailOpener = opener;
   beh.close();
   if (mode === 'new' && cards.has(id)) beh.open(id);      // 行为记录：从瀑布流打开详情
@@ -771,6 +928,7 @@ function viewTitle() {
   if (!$('poolView').hidden) return '商品池 · 后台';
   if (!$('rankView').hidden) return 'R12 · 后台';
   if (!$('seenView').hidden) return '看过未选 · 后台';
+  if (!$('aucView').hidden) return '拍卖新品 · 后台';
   return $('arView').hidden ? '新货 · 后台' : '已自动移出 · 后台';
 }
 function viewFocus() {
@@ -780,6 +938,7 @@ function viewFocus() {
   if (!$('poolView').hidden) return $('h02');
   if (!$('rankView').hidden) return $('h03');
   if (!$('seenView').hidden) return $('seenTitle');
+  if (!$('aucView').hidden) return $('aucTitle');
   return $('arView').hidden ? $('h01') : $('arTitle');
 }
 // 关闭前等未保存的点评 / 替代文字写完；任一失败则不关闭，字段下保留"未保存 · 重试"。
@@ -947,6 +1106,11 @@ async function primary() {
     }
     return;
   }
+  if (detailMode === 'auction') {
+    const li = [...$('aucList').children].find(x => x.dataset.id === id);
+    if (li && await closeDetail(false)) { li.querySelector('[data-k="keep"]').focus(); aucAct(li, 'keep'); }
+    return;                                // 列表里已没有这一行：不落到其他模式
+  }
   if (detailMode === 'seen') {
     const li = [...$('seenList').children].find(x => x.dataset.id === id);
     if (li) { if (await closeDetail(false)) { li.querySelector('[data-k="keep"]').focus(); seenKeep(li); } return; }
@@ -1049,6 +1213,10 @@ $('seenBack').onclick = closeSeen;
 $('seenMore').onclick = () => loadSeen(false);
 $('seenReload').onclick = () => loadSeen(false);
 $('back').onclick = closeAr;
+$('openAuc').onclick = openAuc;
+$('aucBack').onclick = closeAuc;
+$('aucMore').onclick = () => loadAuc(false);
+$('aucReload').onclick = () => loadAuc(false);
 $('arMore').onclick = () => loadAr(false);
 $('arReload').onclick = () => loadAr(false);
 $('dClose').onclick = () => closeDetail();

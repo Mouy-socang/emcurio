@@ -374,11 +374,16 @@ class Store:
             out['prices']=similar_prices(c,row['std_key']) if row['status']=='named' else []
             return out
     def mark_gone(self,iid):
+        self.mark_gone_changed(iid)
+    def mark_gone_changed(self,iid):
+        """同 mark_gone，返回本次是否真的把在售改成了下架（已不在售时 False）。"""
         # AD-5：已发布的货判下架时，与状态变更同一事务入发件箱隐藏。
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             if c.execute("UPDATE items SET status='gone',gone_at=?,checked_at=? WHERE item_id=? AND status='active'",(now(),now(),iid)).rowcount:
                 publish.reconcile(c,iid)
+                return True
+            return False   # 已不在售（并发已改），没有改动
     def archive(self):
         # Missing/withdrawn is never asserted to be sold. Archive in SQLite only.
         with self.connect() as c:c.execute("UPDATE items SET status='archived' WHERE status='gone' AND julianday(gone_at)<julianday('now','-3 days')")
@@ -548,6 +553,36 @@ class Store:
                 if item is None:continue
                 out.append(dict(card(c,item,root),reason=r['reason'],reason_lang=guess_lang(r['reason']),removed_at=r['removed_at']))
             return dict(items=out,total=backoffice_counts(c)['auto_removed'])
+    # ---- 故事 20：拍卖新品 ----
+    def auction_list(self,limit=FEED_BATCH,cursor=None,root=ROOT,at=None):
+        """拍卖新品列表：未结束的按结束时间近到远在前，已过结束时间的在后；每件为卡片字段（主图、名称、分数与理由）
+        加 title、bid（当前出价）、ends、ended、url（eBay 链接）。返回 dict(items, next_cursor, counts)。"""
+        if type(limit) is not int or not 1<=limit<=100:raise ValueError('分页参数无效')
+        with self.connect() as c:
+            rows,nxt=triage.auctions(c,limit,_decode_cursor(cursor),at)
+            return dict(items=[auction_card(c,r,root) for r in rows],next_cursor=_encode_cursor(nxt),
+                        counts=triage.auction_counts(c,at))
+    def auction_convert(self,iid,on,request_id,root=ROOT):
+        """转为普通货（on=True）/ 改回拍卖（on=False）。同一 request_id 重放返回首次结果；重复点击幂等。
+        返回 dict(item_id, converted, auction（当前是否按纯拍卖处理）, state, on_rank（是否在 R12 上）, counts, card)。"""
+        if not isinstance(iid,str) or not iid:raise ValueError('商品编号无效')
+        if not isinstance(on,bool):raise ValueError('参数无效')
+        if not isinstance(request_id,str) or not 1<=len(request_id)<=100:raise ValueError('请求编号无效')
+        payload=json.dumps(['auction_convert',iid,on],ensure_ascii=False)
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            prev=c.execute('SELECT * FROM triage_requests WHERE request_id=?',(request_id,)).fetchone()
+            if prev:
+                if prev['payload']!=payload:raise ValueError('重复请求内容不同')
+                return json.loads(prev['result'])
+            converted=triage.set_converted(c,iid,on)
+            item=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
+            code=triage.code(c,iid)
+            on_rank=bool(code) and c.execute('SELECT 1 FROM publish_rank WHERE code=?',(code,)).fetchone() is not None
+            result=dict(item_id=iid,converted=converted,auction=triage.is_pure_auction(c,iid),state=triage.state(c,iid),
+                        on_rank=on_rank,counts=backoffice_counts(c),card=card(c,item,root))
+            c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False),now()))
+            return result
     def item_detail(self,iid,root=ROOT):
         with self.connect() as c:return item_detail(c,iid,root)
     def triage_act(self,action,iid,request_id,root=ROOT):
@@ -567,8 +602,10 @@ class Store:
             else:r=dict(getattr(triage,action)(c,iid,source='backoffice'),item_id=iid)
             item=c.execute('SELECT * FROM items WHERE item_id=?',(r['item_id'],)).fetchone()
             counts=backoffice_counts(c)
+            # auction：这件是否按纯拍卖处理（故事 20：撤销回到新货的纯拍卖不进 01 瀑布流，回到拍卖新品）。
             result=dict(item_id=r['item_id'],state=r['state'],code=r['code'],remaining=counts['new'],
-                        auto_removed=counts['auto_removed'],card=card(c,item,root) if item else None)
+                        auto_removed=counts['auto_removed'],card=card(c,item,root) if item else None,
+                        auction=triage.is_pure_auction(c,r['item_id']))
             c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False),now()))
             return result
     def save_comment(self,iid,text):
@@ -726,11 +763,11 @@ def _owner_event(c,ev):
     return dict(event_id=ev['event_id'],type=kind,item_id=iid,client_ts=ts,session_id=ev['session_id'],params=text)
 
 def backoffice_counts(c):
-    """01 计数与队列口径一致（不含 backlog 与已下架）；自动移出计全部当前处于该状态的货。"""
-    new=c.execute("""SELECT count(*) FROM triage t JOIN items i ON i.item_id=t.item_id
-        WHERE t.state='new' AND t.backlog=0 AND i.status='active'""").fetchone()[0]
+    """01 计数与队列口径一致（不含 backlog、已下架与纯拍卖）；自动移出计全部当前处于该状态的货；
+    故事 20：auction 为拍卖新品件数，auction_soon 为其中 24 小时内结束的件数。"""
+    new=c.execute('SELECT count(*) FROM triage t JOIN items i ON i.item_id=t.item_id WHERE '+triage.FEED_BASE).fetchone()[0]
     auto=c.execute("SELECT count(*) FROM triage WHERE state='auto_removed'").fetchone()[0]
-    return dict(new=new,auto_removed=auto)
+    return dict(new=new,auto_removed=auto,**triage.auction_counts(c))
 
 def price_label(amount,currency):
     """欧元显示 €185；非欧元显示原币 185 USD；无价格显示「价格待询」。"""
@@ -782,6 +819,27 @@ def card(c,item,root=ROOT):
                 score=score['score'] if score else None,score_reason=score['reason'] if score else None,
                 image=images[0]['src'] if images else None,code=triage.code(c,iid),tags=tags,status=item.get('status'))
 
+def auction_tag(c,item,now=None):
+    """02 / 03 卡片的拍卖标签（故事 20）：纯拍卖（未转为普通货）为"竞拍 · 11月5日 21:05 结束"（柏林时间），
+    已过结束时间为"竞拍 · 已结束"，没有可读的结束时间为"竞拍"；其余货为 None。"""
+    from zoneinfo import ZoneInfo
+    item=dict(item)
+    if not triage.is_auction_only(item) or triage.is_converted(c,item['item_id']):return None
+    try:end=datetime.fromisoformat((item.get('ends') or '').replace('Z','+00:00'))
+    except ValueError:return '竞拍'
+    if end.tzinfo is None:end=end.replace(tzinfo=timezone.utc)
+    if end<=(now or datetime.now(timezone.utc)):return '竞拍 · 已结束'
+    b=end.astimezone(ZoneInfo('Europe/Berlin'))
+    return '竞拍 · %d月%d日 %02d:%02d 结束'%(b.month,b.day,b.hour,b.minute)
+
+def auction_card(c,row,root=ROOT):
+    """拍卖新品列表的一行（故事 20）：卡片字段加卖家标题、当前出价、结束时间、是否已过结束时间与 eBay 链接。"""
+    out=card(c,row,root)
+    url=row.get('url') or ''
+    out.update(title=row.get('title') or '',title_lang=guess_lang(row.get('title')),bid=out['price'],
+               ends=row.get('ends') or None,ended=bool(row.get('ended')),url=url if re.match(r'https?://',url) else '')
+    return out
+
 def item_detail(c,iid,root=ROOT):
     """货详情：货号（已留下才有）、名称与标签、图片与替代文字、卖家原文、来源与判断、分数、点评、拣选状态。"""
     item=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
@@ -797,7 +855,9 @@ def item_detail(c,iid,root=ROOT):
     out.update(description=item['description'] or '',description_lang=guess_lang(item['description']),
                title=item['title'],url=url if re.match(r'https?://',url) else '',
                agent_reason=item['agent_reason'] or '',comment=comment[0] if comment else '',
-               state=triage.state(c,iid),sold=triage.is_sold(c,iid))
+               state=triage.state(c,iid),sold=triage.is_sold(c,iid),
+               auction=triage.is_pure_auction(c,iid),auction_only=triage.is_auction_only(item),
+               converted=triage.is_converted(c,iid),ends=item['ends'] or None)
     fees=fees_for(root)
     out.update(fee=fee_info(c,item,fees),fee_choices=fee_choices(fees))
     return out

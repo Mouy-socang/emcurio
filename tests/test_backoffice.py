@@ -96,7 +96,7 @@ def test_queue_order_counts_and_card(db, cfg, http):
     db.ingest(item('bad', title='Meissen defekt Tasse'), cfg)
     db.ingest(item('usd', price=99.5, title='Meissen Teller', currency='USD'), cfg)
     d = http['get']('/api/triage')
-    assert d['counts'] == {'new': 3, 'auto_removed': 1}
+    assert d['counts'] == {'new': 3, 'auto_removed': 1, 'auction': 0, 'auction_soon': 0}
     with db.connect() as c:
         expected = [r['item_id'] for r in triage.queue(c)]
     assert [x['item_id'] for x in d['queue']] == expected

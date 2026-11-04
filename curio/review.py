@@ -287,6 +287,13 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 try:return self.reply(200,{'results':guests.search(gc_settings(),parse_qs(url.query).get('q',[''])[0])})
                 except guests.GuestError as e:return self.reply(400,{'error':str(e)})
             if url.path=='/api/rank':return self.reply(200,ranking.rank_state(store,root))
+            if url.path=='/api/auctions':
+                # 故事 20：拍卖新品（纯拍卖新货）：未结束的按结束时间近到远，已结束的在后；游标续载。
+                q=parse_qs(url.query)
+                try:limit=int(q.get('limit',['40'])[0])
+                except ValueError:return self.reply(400,{'error':'参数无效'})
+                try:return self.reply(200,store.auction_list(limit,q.get('cursor',[''])[0] or None,root))
+                except ValueError as e:return self.reply(400,{'error':str(e) or '参数无效'})
             if url.path in ('/api/agreement','/api/agreement/history'):
                 # 07 符合度（故事 23）：只读；往日结果首次计算后固定。
                 q=parse_qs(url.query)
@@ -354,7 +361,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
             # 故事 22：行为上报在页面离开时用 sendBeacon 补发（不能带自定义请求头），令牌也可放在请求体的 token 字段。
             if self.path=='/api/owner-events':return self.owner_events()
             if self.headers.get('X-Curio-Token')!=token:return self.reply(403,{'error':'请刷新本机审核页后重试'})
-            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/guests/link','/api/guests/command','/api/guests/invite','/api/match/decide','/api/rules/decide','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
+            if self.path not in ('/api/rank','/api/pool/action','/api/rank/preview','/api/rank/publish','/api/triage/action','/api/auction/convert','/api/triage/comment','/api/triage/alt','/api/triage/fee','/api/triage/recheck','/api/guests/link','/api/guests/command','/api/guests/invite','/api/match/decide','/api/rules/decide','/api/review','/api/block','/api/visual/confirm','/api/visual/run','/api/market/decision','/api/archive-classifications/review'):return self.reply(404,{'error':'接口不存在'})
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<=150000:raise ValueError('请求过大或为空')
@@ -372,6 +379,10 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 if self.path=='/api/rank/publish':return self.publish_from_preview(data)
                 if self.path=='/api/triage/action':
                     result=store.triage_act(data['action'],data.get('item_id'),data['request_id']);drop_preview()
+                    return self.reply(200,result)
+                if self.path=='/api/auction/convert':
+                    # 故事 20：转为普通货 / 改回拍卖（改变能否上 R12 与发布入选）：作废当前预览。
+                    result=store.auction_convert(data['item_id'],data['on'],data['request_id'],root);drop_preview()
                     return self.reply(200,result)
                 # 点评、替代文字、拣选动作都可能改变预览内容：作废当前预览。
                 if self.path=='/api/triage/comment':

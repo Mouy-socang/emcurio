@@ -14,6 +14,7 @@
 item_codes.code / item_id 的唯一约束兜底，不会产生重复货号。
 `cases` / `market_decisions` 是决定日志，拣选状态以 `triage` 为准；撤销不改写 cases。
 """
+import math
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -61,6 +62,8 @@ def ensure(c):
     CREATE INDEX IF NOT EXISTS triage_queue ON triage(state,backlog,rescued_at);
     CREATE INDEX IF NOT EXISTS triage_events_item ON triage_events(item_id,id);
     CREATE INDEX IF NOT EXISTS triage_events_actor ON triage_events(actor,id);
+    -- 故事 20：墨墨点"转为普通货"的纯拍卖（拍下后解除拍卖限制）；删行即"改回拍卖"。
+    CREATE TABLE IF NOT EXISTS auction_converted(item_id TEXT PRIMARY KEY, at TEXT NOT NULL);
     ''')
     # source：动作来源（review / block / market / cases …）；grp：一起撤销的动作组。
     cols = {r[1] for r in c.execute('PRAGMA table_info(triage_events)')}
@@ -380,13 +383,13 @@ def undo_market(c, iid):
 
 
 def queue(c, limit=100, offset=0):
-    """新货队列：捞回的排最前（最近捞回优先）；其后按分数高到低，无分的排在有分之后，再按 first_seen 新到旧；不含 backlog。
+    """新货队列（不含纯拍卖，故事 20）：捞回的排最前（最近捞回优先）；其后按分数高到低，无分的排在有分之后，再按 first_seen 新到旧；不含 backlog。
     每件附 score、score_source、score_reason（CAP-4）。"""
     return [dict(r) for r in c.execute('''SELECT i.*,t.state triage_state,t.rescued_at,
         (SELECT code FROM item_codes k WHERE k.item_id=i.item_id) code,
         s.score score,s.source score_source,s.reason score_reason
         FROM triage t JOIN items i ON i.item_id=t.item_id LEFT JOIN scores s ON s.item_id=i.item_id
-        WHERE t.state='new' AND t.backlog=0 AND i.status='active'
+        WHERE t.state='new' AND t.backlog=0 AND i.status='active' AND NOT ''' + PURE_AUCTION + '''
         ORDER BY t.rescued_at IS NULL, t.rescued_at DESC, s.score IS NULL, s.score DESC, i.first_seen DESC, i.item_id
         LIMIT ? OFFSET ?''', (limit, offset))]
 
@@ -397,7 +400,12 @@ def queue(c, limit=100, offset=0):
 SEEN_ELSEWHERE = '''(SELECT max(e.eff_at) FROM owner_events e WHERE e.item_id=i.item_id AND e.type='seen' AND e.session_id<>?
         AND e.eff_at > COALESCE(t.rescued_at,'')
         AND e.eff_at > COALESCE((SELECT max(r.at) FROM owner_events r WHERE r.item_id=i.item_id AND r.type='restore'),''))'''
-FEED_BASE = "t.state='new' AND t.backlog=0 AND i.status='active'"
+# 故事 20：纯拍卖 = eBay、buying 含 AUCTION 不含 FIXED_PRICE（AUCTION、AUCTION,BEST_OFFER），且未被"转为普通货"。
+# FIXED_PRICE,AUCTION 是普通货。所有口径（01 瀑布流、看过未选、计数、queue、封存 pool、发布入选、拍卖新品列表）共用；别名 i 为 items。
+AUCTION_ONLY = ("(i.platform='ebay' AND instr(COALESCE(i.buying,''),'AUCTION')>0"
+                " AND instr(COALESCE(i.buying,''),'FIXED_PRICE')=0)")
+PURE_AUCTION = ('(' + AUCTION_ONLY + ' AND NOT EXISTS(SELECT 1 FROM auction_converted ac WHERE ac.item_id=i.item_id))')
+FEED_BASE = "t.state='new' AND t.backlog=0 AND i.status='active' AND NOT " + PURE_AUCTION
 FEED_SQL = '''SELECT i.*,t.state triage_state,t.rescued_at,
         t.rescued_at IS NULL k1, COALESCE(t.rescued_at,'') k2, COALESCE(i.first_seen,'') k3
         FROM triage t JOIN items i ON i.item_id=t.item_id
@@ -467,6 +475,82 @@ def seen_unpicked(c, limit=40, cursor=None, session=None):
 def seen_unpicked_count(c, session=None):
     return c.execute('SELECT count(*) FROM triage t JOIN items i ON i.item_id=t.item_id WHERE ' + FEED_BASE + ' AND '
                      + SEEN_ELSEWHERE + ' IS NOT NULL', (_session(session),)).fetchone()[0]
+
+
+# ---------- 故事 20：拍卖新品 ----------
+
+def is_auction_only(item):
+    """eBay 只拍卖（不看是否已转为普通货）；口径同 AUCTION_ONLY。item 为 items 行或 dict。"""
+    item = dict(item)
+    buying = item.get('buying') or ''
+    return item.get('platform') == 'ebay' and 'AUCTION' in buying and 'FIXED_PRICE' not in buying
+
+
+def is_converted(c, iid):
+    return c.execute('SELECT 1 FROM auction_converted WHERE item_id=?', (iid,)).fetchone() is not None
+
+
+def is_pure_auction(c, iid):
+    """这件货当前是否按纯拍卖口径处理（只拍卖、未转为普通货）。"""
+    return c.execute('SELECT 1 FROM items i WHERE i.item_id=? AND ' + PURE_AUCTION, (iid,)).fetchone() is not None
+
+
+def set_converted(c, iid, on):
+    """转为普通货（on=True，记一行）/ 改回拍卖（on=False，删行）。重复调用幂等；不改拣选状态与事件。返回是否已转换。"""
+    _begin(c)
+    item = _item(c, iid)
+    if on:
+        if not is_auction_only(item):
+            raise TriageError('这件货不是纯拍卖，不需要转为普通货')
+        c.execute('INSERT OR IGNORE INTO auction_converted(item_id,at) VALUES(?,?)', (iid, now()))
+    else:
+        c.execute('DELETE FROM auction_converted WHERE item_id=?', (iid,))
+    return is_converted(c, iid)
+
+
+# 拍卖新品列表：拣选状态 new、在售的纯拍卖。k1：0 = 未结束（ends 为空或无法解析也算未结束），1 = 已过结束时间；
+# k2：未结束组按结束时间近到远（无结束时间的排最后，1e9），已结束组按结束时间新到旧（取负值升序）。
+_ENDS_JD = "julianday(NULLIF(i.ends,''))"
+AUCTION_BASE = "t.state='new' AND i.status='active' AND " + PURE_AUCTION
+AUCTION_SQL = ('SELECT * FROM (SELECT i.*, t.state triage_state, '
+               'CASE WHEN ' + _ENDS_JD + ' IS NULL OR ' + _ENDS_JD + ' > julianday(?) THEN 0 ELSE 1 END k1, '
+               'CASE WHEN ' + _ENDS_JD + ' IS NULL THEN 1e9 WHEN ' + _ENDS_JD + ' > julianday(?) THEN ' + _ENDS_JD
+               + ' ELSE -' + _ENDS_JD + ' END k2 '
+               'FROM triage t JOIN items i ON i.item_id=t.item_id WHERE ' + AUCTION_BASE + ') '
+               'WHERE 1=1 %s ORDER BY k1, k2, item_id LIMIT ?')
+
+
+def auctions(c, limit=40, cursor=None, at=None):
+    """拍卖新品（故事 20）：未结束的按结束时间近到远在前，已过结束时间的在后（新到旧）；每行带 ended（是否已过结束时间）。
+    游标为上一批最后一件的 [k1, k2, item_id]。返回 (rows, next_cursor)。at 为"现在"（ISO，测试用）。"""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('分页参数无效：limit 须为 1–100')
+    at = at or now()
+    where, args = '', [at, at]
+    if cursor is not None:
+        if (not isinstance(cursor, list) or len(cursor) != 3 or type(cursor[0]) is not int or cursor[0] not in (0, 1)
+                or isinstance(cursor[1], bool) or not isinstance(cursor[1], (int, float)) or not math.isfinite(cursor[1])
+                or not isinstance(cursor[2], str)):
+            raise ValueError('游标无效')
+        where = 'AND (k1 > ? OR (k1 = ? AND (k2 > ? OR (k2 = ? AND item_id > ?))))'
+        args += [cursor[0], cursor[0], cursor[1], cursor[1], cursor[2]]
+    rows = [dict(r) for r in c.execute(AUCTION_SQL % where, args + [limit + 1])]
+    more = len(rows) > limit
+    rows = rows[:limit]
+    nxt = [rows[-1]['k1'], rows[-1]['k2'], rows[-1]['item_id']] if more and rows else None
+    for r in rows:
+        r['ended'] = r.pop('k1') == 1
+        r.pop('k2')
+    return rows, nxt
+
+
+def auction_counts(c, at=None):
+    """拍卖新品件数（auction）与其中 24 小时内结束、尚未结束的件数（auction_soon）。"""
+    at = at or now()
+    r = c.execute('SELECT count(*), COALESCE(sum(CASE WHEN ' + _ENDS_JD + ' > julianday(?) AND ' + _ENDS_JD
+                  + ' <= julianday(?) + 1 THEN 1 ELSE 0 END), 0) FROM triage t JOIN items i ON i.item_id=t.item_id WHERE '
+                  + AUCTION_BASE, (at, at)).fetchone()
+    return dict(auction=r[0], auction_soon=r[1])
 
 
 def auto_removed(c, limit=100, offset=0):

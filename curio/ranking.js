@@ -73,6 +73,7 @@
     // 回到 01 时显示刷货卡（已自动移出子视图收起）。
     $('arView').hidden = true;
     if ($('seenView')) $('seenView').hidden = true;      // 01 的「看过未选」子视图同样收起
+    if ($('aucView')) $('aucView').hidden = true;        // 故事 20：「拍卖新品」子视图同样收起
     $('triageView').hidden = v !== 'new';
     $('poolView').hidden = v !== 'pool';
     $('rankView').hidden = v !== 'rank';
@@ -155,6 +156,7 @@
     const st = el('p', 'st', out && c.sold ? '已售出' : c.on_sale ? '在售' : '已下架');
     const pos = order.indexOf(c.code);
     if (!out && pos >= 0) st.append(' · R12 第 ', el('span', 'mono', String(pos + 1)), ' 名');
+    if (c.auction) st.append(' · ', el('span', 'auc', '拍卖中' + (endsText(c.ends) ? ' · 结束于 ' + endsText(c.ends) : '')));
     const why = el('p', 'reason'); why.id = 'why-' + c.item_id.replace(/[^\w-]/g, '_'); why.hidden = true;
     const msg = el('p', 'im'); msg.hidden = true; msg.setAttribute('role', 'alert');
     const acts = el('div', 'acts2');
@@ -193,9 +195,17 @@
       yes.onclick = () => poolAct('mark_sold', c, msg, yes);
       acts.append(rb, ob, sb);
     }
+    // 故事 20：只拍卖的货可"转为普通货"（拍下后解除拍卖限制）或"改回拍卖"。
+    let conv = null;
+    if (c.auction_only) {
+      const cb = el('button', 'btn', c.auction ? '转为普通货' : '改回拍卖'); cb.type = 'button'; cb.dataset.k = c.item_id + ':conv';
+      cb.onclick = () => convert(c, !!c.auction, msg, cb);
+      conv = el('div', 'acts2'); conv.style.gridTemplateColumns = '1fr'; conv.append(cb);
+    }
     body.append(code, t, p, st);
-    const sc = scoreEl(c); if (sc) body.append(sc);
+    const sc = scoreEl(c, true); if (sc) body.append(sc);
     body.append(acts);
+    if (conv) body.append(conv);
     if (confirmBox) body.append(confirmBox);
     body.append(why, msg);
     li.append(th, body);
@@ -309,6 +319,44 @@
     // 后台重读：只在是最新一次读取时重画；重画沿用当时的焦点（用户已移开焦点就不抢回来）。
     loadPool(sid);
     loadRank();
+  }
+
+  // 结束时间（柏林时间，"11月5日 21:05"）；读不出时为空。
+  function endsText(iso) {
+    const d = iso ? new Date(iso) : null; if (!d || isNaN(d)) return '';
+    try {
+      const f = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Europe/Berlin', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false}).formatToParts(d);
+      const g = t => (f.find(x => x.type === t) || {}).value || '';
+      return g('month') + '月' + g('day') + '日 ' + g('hour') + ':' + g('minute');
+    } catch (e) { return ''; }
+  }
+  // 转为普通货 / 改回拍卖（故事 20）：同一按钮重试沿用 request_id；成功后重读商品池与 R12。
+  async function convert(c, on, msg, btn) {
+    if (btn.getAttribute('aria-busy') === 'true') return;
+    const r = btn.dataset.rid || rid(); btn.dataset.rid = r;
+    btn.setAttribute('aria-busy', 'true'); msg.hidden = true;
+    let res = null;
+    try { res = await post('/api/auction/convert', {item_id: c.item_id, on, request_id: r}); }
+    catch (e) { setNet(true); }
+    btn.removeAttribute('aria-busy');
+    if (!res || !res.ok) {
+      if (res && res.status < 500) delete btn.dataset.rid;
+      msg.textContent = (res && res.status < 500 && res.data.error ? '未保存：' + res.data.error : '未保存') + ' · ';
+      const again2 = el('button', 'lnk lnk-pad', '重试'); again2.type = 'button'; again2.onclick = () => convert(c, on, msg, btn);
+      msg.append(again2); msg.hidden = false; shout('未保存，请重试');
+      return;
+    }
+    delete btn.dataset.rid; setNet(false);
+    // 改回拍卖的货仍在 R12 上：下次发布会被拒，先提示（重画后写在这一行的消息里）。
+    const warn = !on && res.data.on_rank ? '这件在 R12 上，发布前请移出或再转为普通货' : '';
+    if (warn) shout(warn); else say(on ? '已转为普通货，可以加入 R12' : '已改回拍卖，拍卖中不能加入 R12');
+    await loadPool(c.item_id);
+    loadRank();
+    if (warn) {
+      const li = [...document.querySelectorAll('#poolList > li, #outList > li')].find(x => x.dataset.id === c.item_id);
+      const m = li ? li.querySelector('.im') : msg;
+      m.textContent = warn; m.hidden = false;
+    }
   }
 
   /* ---------- 03 R12 ---------- */

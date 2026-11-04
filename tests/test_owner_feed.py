@@ -89,7 +89,7 @@ def test_feed_order_rescued_first_then_newest_not_by_score(db, cfg, http):
     d = http['get']('/api/triage/feed')
     ids = [c['item_id'] for c in d['items']]
     assert ids == ['bad', 'n0', 'n1', 'n2', 'n3', 'n4']      # 捞回的第一；高分的 n4 仍按上架时间排在最后
-    assert d['next_cursor'] is None and d['counts'] == {'new': 6, 'auto_removed': 0, 'seen': 0}
+    assert d['next_cursor'] is None and d['counts'] == {'new': 6, 'auto_removed': 0, 'seen': 0, 'auction': 0, 'auction_soon': 0}
     for c in d['items']:
         # 故事 27：卡片带分数与理由（界面在点要或记为看到之后才显示，见 triage.js）；排序仍不按分数。
         assert {'item_id', 'name', 'price', 'platform', 'image', 'code', 'tags', 'score', 'score_reason'} <= set(c)

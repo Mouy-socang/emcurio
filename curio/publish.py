@@ -1,6 +1,6 @@
 """发布快照与即时隐藏（AD-5、AD-6、AD-13、AD-22；CAP-7、CAP-9）。
 
-- 入选：拣选状态 kept、items.status='active'、非 Kleinanzeigen、欧元标价的货；商品池按墨墨留下时间新到旧。
+- 入选：拣选状态 kept、items.status='active'、非 Kleinanzeigen、欧元标价、不是纯拍卖（故事 20）的货；商品池按墨墨留下时间新到旧。
 - R12（榜）：`publish_rank` 表里墨墨指定的 0 到 RANK_SIZE（12）件，且都须在入选集合内；不必排满即可发布（2026-11-04）。
 - 白名单（AD-6）：快照只含 contract/schemas/snapshot.v1 里的字段；卖家原文先清洗（去平台名、商品号、卖家/店铺、链接）。
 - 图片（AD-13）：用系统 `sips` 转成最长边 1600 与 600 的 JPEG，文件名 = 内容 sha256 前 16 位 + .jpg，
@@ -60,7 +60,12 @@ ELIGIBLE_SQL = """SELECT i.*, k.code, k.seq code_seq, t.updated_at kept_at
     FROM triage t JOIN items i ON i.item_id=t.item_id JOIN item_codes k ON k.item_id=i.item_id
     WHERE t.state='kept' AND i.status='active' AND i.platform!='kleinanzeigen'
       AND UPPER(COALESCE(NULLIF(i.currency,''),'EUR'))='EUR' AND i.listed_price IS NOT NULL AND i.listed_price>=0
+      AND NOT """ + triage.PURE_AUCTION + """
     ORDER BY t.updated_at DESC, k.seq DESC"""
+
+
+# 故事 20：纯拍卖（拍卖中）的货不能上 R12、不进发布快照；拍下后"转为普通货"即解除。
+AUCTION_REASON = '拍卖中的货不能上 R12，拍下后可转为普通货'
 
 
 class PublishError(ValueError):
@@ -133,6 +138,8 @@ def why_not(c, code):
         return f'{code} 原平台已下架'
     if not _priced(row):
         return f'{code} 没有欧元标价，暂不能发布'
+    if triage.is_pure_auction(c, row['item_id']):       # 顺序同 ranking.rank_reason：下架、价格之后
+        return f'{code} {AUCTION_REASON}'
     return None
 
 
