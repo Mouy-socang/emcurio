@@ -95,7 +95,7 @@ def test_no_key_disabled_and_queue_by_baseline(tmp_path, db, cfg):
     assert anthropic_key(tmp_path) is None
     db.ingest(item('a'), cfg)
     r = ai.run(db, tmp_path, cfg, lambda: NOON)
-    assert (r['ai_status'], r['ai_scored'], r['ai_usage']['limit']) == ('disabled', 0, 100)
+    assert (r['ai_status'], r['ai_scored'], r['ai_usage']['limit']) == ('disabled', 0, cfg['ai_budget']['requests_per_day'])
     assert score_row(db, 'a')['source'] == 'rule'
 
 
