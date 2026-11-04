@@ -3,7 +3,7 @@
 `/` 为后台一页拣选（CAP-6，curio/triage.html + triage.js）：01 新货、02 商品池与 03 榜（故事 11，ranking.js）、
 04 匹配（故事 16，curio/matching.py：按客人汇总、确认 / 不合适、复制单件页链接）、
 05 待审核（故事 17，curio/learning.py：从人工拣选归纳的规律，确认 / 否决）、
-06 客人（故事 14，curio/guests.py：账号关联、停用、重置密码、邀请码）；
+06 客人（故事 14，curio/guests.py：账号关联、停用、重置密码、邀请码）、07 符合度（故事 23，curio/agreement.py：只读）；
 旧审核页在 `/old`。`/preview/…` 为发布前预览（AD-28）：Mac 用客人页同一份模板渲染候选快照，只在后台可见，
 页内只引用本机地址（CSP 同客人页），不上传、不入发件箱、不记录行为；发布只从预览横条发起。"""
 import argparse,html as htmlmod,ipaddress,json,logging,re,secrets,threading
@@ -57,7 +57,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
     gc：GoodCustomer 资料库与 gcdb.py 路径（默认读 config/settings.yaml 的 goodcustomer；测试传临时库）；
     pull：打开 06 客人时拉取账号名单（默认 sync.pull_accounts(store, root)）；gcdb_run：调用 gcdb 的函数（测试注入）。"""
     if host not in LOCAL_HOSTS:raise ValueError('后台只监听本机地址（AD-4）；手机请经 tailscale serve 访问')
-    from . import ranking,publish,sync,guests,matching,learning
+    from . import ranking,publish,sync,guests,matching,learning,agreement
     if flush is None:flush=lambda:sync.flush(store,root)
     if pull is None:pull=lambda:sync.pull_accounts(store,root,seconds=5)
     def gc_settings():
@@ -287,6 +287,15 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 try:return self.reply(200,{'results':guests.search(gc_settings(),parse_qs(url.query).get('q',[''])[0])})
                 except guests.GuestError as e:return self.reply(400,{'error':str(e)})
             if url.path=='/api/rank':return self.reply(200,ranking.rank_state(store,root))
+            if url.path in ('/api/agreement','/api/agreement/history'):
+                # 07 符合度（故事 23）：只读；往日结果首次计算后固定。
+                q=parse_qs(url.query)
+                try:
+                    if url.path=='/api/agreement':return self.reply(200,agreement.view(store,q.get('day',[''])[0] or None,root))
+                    try:days=int(q.get('days',['30'])[0])
+                    except ValueError:raise ValueError('天数须为 1–%d'%agreement.HISTORY_MAX) from None
+                    return self.reply(200,agreement.history(store,days,root))
+                except ValueError as e:return self.reply(400,{'error':str(e) or '参数无效'})
             if url.path=='/preview':
                 self.send_response(303);self.send_header('Location','/preview/');self.send_header('Content-Length','0');self.end_headers();return
             if url.path.startswith('/preview/'):return self.preview_get(url)
@@ -297,7 +306,13 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                     if url.path=='/api/triage':return self.reply(200,store.triage_state(num('limit',50),num('offset',0)))
                     # 故事 22：01 瀑布流（捞回的最前，其余按上架时间；游标续载，卡片不带分数）。
                     sess=q.get('session',[''])[0] or None
-                    if url.path=='/api/triage/feed':return self.reply(200,store.triage_feed(num('limit',40),q.get('cursor',[''])[0] or None,sess))
+                    if url.path=='/api/triage/feed':
+                        # 故事 23：墨墨先于采集打开 01 时，首个（不带游标的）feed 请求封存当天的系统预测：同样只在柏林 05:00 之后，
+                        # 带本次打开的 session（本次里刚看到的货不被排除）；已封存则只读一次。
+                        if not q.get('cursor',[''])[0]:
+                            try:agreement.seal_for_feed(store,sess)
+                            except Exception:log.exception('封存当天预测失败')
+                        return self.reply(200,store.triage_feed(num('limit',40),q.get('cursor',[''])[0] or None,sess))
                     # 「看过未选」：别的打开里看过、没留下也没放回的货；页头计数（今日已留下 · 商品池共）。
                     if url.path=='/api/triage/seen':return self.reply(200,store.seen_unpicked(num('limit',40),q.get('cursor',[''])[0] or None,sess))
                     if url.path=='/api/triage/header':return self.reply(200,store.feed_header())

@@ -190,7 +190,10 @@ let seenCount = null, headerTimer = null;
 function showHeader(h) { if (!h) return; $('kToday').textContent = h.kept_today; $('kPool').textContent = h.pool; }
 function refreshHeader() {
   clearTimeout(headerTimer);
-  headerTimer = setTimeout(async () => { try { showHeader(await get('/api/triage/header')); } catch (e) { /* 下次再读 */ } }, 400);
+  headerTimer = setTimeout(async () => {
+    try { showHeader(await get('/api/triage/header')); } catch (e) { /* 下次再读 */ }
+    if (window.curioAgree) window.curioAgree.refreshCount();     // 07 符合度的分区计数（只读今天的摘要）
+  }, 400);
 }
 function sync(d) {
   refreshHeader();
@@ -746,6 +749,7 @@ function viewTitle() {
   if (!$('matchView').hidden) return '匹配 · 后台';
   if (!$('rulesView').hidden) return '待审核 · 后台';
   if (!$('guestsView').hidden) return '客人 · 后台';
+  if (!$('agreeView').hidden) return '符合度 · 后台';
   if (!$('poolView').hidden) return '商品池 · 后台';
   if (!$('rankView').hidden) return '榜 · 后台';
   if (!$('seenView').hidden) return '看过未选 · 后台';
@@ -1794,4 +1798,129 @@ window.curioRules = (function () {
     open() { active = true; load(true); },
     leave() { active = false; if (msgs.size) { [...msgs].forEach(([k, m]) => { if (!m.retry) msgs.delete(k); }); render(); } load(); }
   };
+})();
+
+/* ---------- 07 符合度（故事 23）：只读。今日 / 昨日数字、近 30 天折线（内联 SVG）、差异清单。
+   只在打开 07 时读完整数据；分区计数打开后台时与 01 写入后读一次今天的摘要。 ---------- */
+window.curioAgree = (function () {
+  let data = null, pick = 'day', inflight = null;
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const pct = x => Math.round(x * 100) + '%';
+  const shortDay = d => d.slice(5).replace('-', '/');
+  function load() {
+    if (inflight) return inflight;
+    inflight = (async () => {
+      try { data = await get('/api/agreement'); $('agErr').hidden = true; }
+      catch (e) { if (!$('agreeView').hidden) { $('agErr').hidden = false; shout('未能读取符合度'); } }
+      render();
+    })().finally(() => { inflight = null; });
+    return inflight;
+  }
+  function showCount(s) { $('cAgree').textContent = s && s.status === 'ok' ? pct(s.agreement) : '—'; }
+  async function refreshCount() {
+    try { const h = await get('/api/agreement/history?days=1'); showCount(h.days[h.days.length - 1]); }
+    catch (e) { /* 下次再读 */ }
+  }
+  function noneText(p) {
+    return p.status === 'no_prediction' ? '当天没有封存预测' : '无数据（当天没有留下）';
+  }
+  function dayBox(title, r) {
+    const box = el('div', 'agday');
+    box.append(el('h2', null, title), el('p', 'd', r.day));
+    const p = r.pool, k = r.rank;
+    const dl = el('dl');
+    const row = (t, v) => dl.append(el('dt', null, t), el('dd', null, v));
+    box.append(el('p', 'd', '进池符合度'));
+    if (p.status === 'ok') {
+      box.append(el('p', 'big', pct(p.agreement)));
+      row('随机基线', pct(p.baseline));
+      row('提升', p.lift == null ? '—' : p.lift.toFixed(1) + ' 倍');
+      row('留下', p.n + ' 件');
+      row('看到', p.seen + ' 件');
+      row('系统同选', p.hits + ' 件');
+    } else {
+      box.append(el('p', 'none', noneText(p)));
+    }
+    row('榜重合', k.status === 'ok' ? k.overlap + ' / ' + k.size : '无数据');
+    box.append(dl);
+    if (p.n) box.append(el('p', 'none', '你留下的 ' + p.n + ' 件里有 ' + p.kept_in_top + ' 件在系统前 ' + (p.system_top || 100)));
+    if (p.late_seal) box.append(el('p', 'none', '封存晚于当天最早的 ' + p.late_decisions + ' 次挑选，这些不计入'));
+    return box;
+  }
+  function chart(days) {
+    const ok = days.filter(r => r.status === 'ok');
+    if (!ok.length) return el('p', 'gnone', '暂无数据');
+    const W = 320, H = 140, L = 32, R = 8, T = 8, B = 22;
+    const ns = 'http://www.w3.org/2000/svg';
+    const s = (tag, attrs) => { const e = document.createElementNS(ns, tag); Object.entries(attrs).forEach(([a, v]) => e.setAttribute(a, v)); return e; };
+    const svg = s('svg', {viewBox: '0 0 ' + W + ' ' + H, role: 'img'});
+    const x = i => L + (W - L - R) * (days.length > 1 ? i / (days.length - 1) : 0.5);
+    const y = v => T + (H - T - B) * (1 - Math.min(1, Math.max(0, v)));
+    [0, 0.5, 1].forEach(v => {
+      svg.append(s('line', {class: 'ax', x1: L, x2: W - R, y1: y(v), y2: y(v)}));
+      const t = s('text', {x: L - 4, y: y(v) + 4, 'text-anchor': 'end'}); t.textContent = Math.round(v * 100) + '%'; svg.append(t);
+    });
+    [[0, 'start'], [days.length - 1, 'end']].forEach(([i, a]) => {
+      const t = s('text', {x: x(i), y: H - 6, 'text-anchor': a}); t.textContent = shortDay(days[i].day); svg.append(t);
+    });
+    // 无数据的日子断开折线，不画成 0。
+    const path = key => {
+      let d = '', pen = false;
+      days.forEach((r, i) => {
+        if (r.status !== 'ok') { pen = false; return; }
+        d += (pen ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(r[key]).toFixed(1) + ' '; pen = true;
+      });
+      return d.trim();
+    };
+    svg.append(s('path', {class: 'bl', d: path('baseline')}), s('path', {class: 'ln', d: path('agreement')}));
+    days.forEach((r, i) => {
+      if (r.status !== 'ok') return;
+      svg.append(s('rect', {class: 'bp', x: x(i) - 2, y: y(r.baseline) - 2, width: 4, height: 4}),
+                 s('circle', {class: 'pt', cx: x(i), cy: y(r.agreement), r: 2.5}));
+    });
+    const last = ok[ok.length - 1];
+    svg.setAttribute('aria-label', '近 ' + days.length + ' 天进池符合度：有数据 ' + ok.length + ' 天，最近一天 ' + last.day +
+      ' 为 ' + pct(last.agreement) + '，随机基线 ' + pct(last.baseline));
+    return svg;
+  }
+  function diffRow(c) {
+    const li = el('li', 'prow');
+    const th = el('div', 'th static');
+    if (c.image) { const im = el('img'); im.src = c.image; im.alt = ''; im.loading = 'lazy'; th.append(im); }
+    const body = el('div');
+    const name = el('p', 't'); const nm = el('span', null, c.name || c.item_id); if (c.name_lang) nm.lang = c.name_lang; name.append(nm);
+    (c.tags || []).forEach(x => name.append(tagEl(x)));
+    const p = el('p', 'p'); p.append(el('span', 'mono', c.price || '价格待询'), ' · 来源 ' + (c.platform || ''));
+    const st = el('p', 'st'); st.append('系统第 ', el('span', 'mono', String(c.system_pos)), ' 名 · 分数 ',
+      el('span', 'mono', c.system_score == null ? '无' : String(c.system_score)));
+    body.append(name, p, st);
+    li.append(th, body);
+    return li;
+  }
+  function renderDiff() {
+    const r = data ? (pick === 'day' ? data.day : data.prev) : null;
+    const p = r ? r.pool : null;
+    const ok = p && p.status === 'ok';
+    const you = ok ? p.you_only || [] : [], sys = ok ? p.system_only || [] : [];
+    $('agDiffNote').textContent = !r ? '' : !ok ? (pick === 'day' ? '今日' : '昨日') + '：' + noneText(p) + '，没有差异清单'
+      : !you.length && !sys.length ? '两边完全一致' : '';
+    $('agYouN').textContent = ok ? you.length : '';
+    $('agSysN').textContent = ok ? sys.length : '';
+    $('agYou').replaceChildren(...you.map(diffRow));
+    $('agSys').replaceChildren(...sys.map(diffRow));
+    [['agPickToday', 'day'], ['agPickPrev', 'prev']].forEach(([id, k]) => $(id).setAttribute('aria-pressed', String(pick === k)));
+  }
+  function render() {
+    if (!data) return;
+    const h = data.history || [];
+    showCount(h[h.length - 1]);
+    $('agDays').replaceChildren(dayBox('今日', data.day), dayBox('昨日', data.prev));
+    $('agChart').replaceChildren(chart(h));
+    renderDiff();
+  }
+  $('agReload').onclick = load;
+  $('agPickToday').onclick = () => { pick = 'day'; renderDiff(); };
+  $('agPickPrev').onclick = () => { pick = 'prev'; renderDiff(); };
+  refreshCount();              // 分区计数：打开后台时读一次今天的摘要
+  return {open() { load(); }, refreshCount};
 })();

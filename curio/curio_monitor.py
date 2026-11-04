@@ -539,11 +539,15 @@ def run(root,clock=time.time):
                 sched.mark_published_check_started()
                 for p in PUBLISHED_PLATFORMS:sched.record_published_ok(p)
                 do_pub=False
+        # 故事 23：当天第一轮（柏林 05:00 之后）封存系统预测；已封存不覆盖，失败只记结果字段、不影响采集。
+        # 空闲轮在这里封存；有工作的轮次在抓取入库与打分之后封存（让当天第一批新货进预测）。
+        from .agreement import seal_for_run
         if not do_fetch and not do_check and not do_pub:
             # 空闲轮也发心跳（AD-10）：同步模块每轮都把各平台最近成功时间发给服务器。
             from . import sync,learning
             # CAP-8：每轮归纳一次待审规律（只改 05 计数，不打断）。
-            return {'status':'idle',**sched.summary(),**learning.run(store,root),**sync.run(store,root)}
+            predicted=seal_for_run(store,clock())
+            return {'status':'idle',**sched.summary(),**learning.run(store,root),**sync.run(store,root),**predicted}
         result={'fetch_ran':do_fetch,'status_check_ran':do_check,'published_check_ran':do_pub}
         with store.connect() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS collection_runs(
@@ -618,6 +622,7 @@ def run(root,clock=time.time):
         # CAP-4：抓取与在售检查之后，在 AI 预算内给新货打分；失败只记 ai_status，不影响其它结果。
         from . import ai
         result.update(ai.run(store,root,config,clock))
+        result.update(seal_for_run(store,clock()))
         # AD-14：每天最多成功取一次 ECB 人民币参考汇率（失败沿用上次的值与日期），发布时随快照上线。
         from . import fx
         result.update(fx.run(store,clock))

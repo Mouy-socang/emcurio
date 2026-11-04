@@ -241,6 +241,30 @@ img{display:block}
 .rcard .im{margin-top:8px}
 .rcard>.btn{margin-top:10px;width:100%}
 
+/* 07 符合度（故事 23）：只读。今日 / 昨日两栏数字、近 30 天折线（内联 SVG，实线符合度、虚线基线）、差异清单。 */
+.agdays{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px;border-top:1px solid var(--hair);padding-top:12px}
+.agday h2{font-family:var(--serif);font-weight:600;font-size:17px;line-height:1.35}
+.agday .d{font-family:var(--mono);font-size:12px;letter-spacing:.14em;color:var(--muted)}
+.agday .big{font-family:var(--mono);font-size:32px;font-weight:500;line-height:1.2;margin-top:4px}
+.agday .none{font-size:14px;color:var(--muted);margin-top:8px}
+.agday dl{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;font-size:14px;margin-top:8px}
+.agday dt{color:var(--muted)}
+.agday dd{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.agchart svg{display:block;width:100%;height:auto}
+.agchart .ax{stroke:var(--hair);stroke-width:1}
+.agchart .ln{fill:none;stroke:var(--ink);stroke-width:2}
+.agchart .bl{fill:none;stroke:var(--muted);stroke-width:1.5;stroke-dasharray:4 3}
+.agchart .pt{fill:var(--ink)}
+.agchart .bp{fill:var(--muted)}
+.agchart text{font-family:var(--mono);font-size:11px;fill:var(--muted)}
+.aglegend{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;margin-top:4px}
+.aglegend .lk{display:inline-block;width:20px;height:0;border-top:2px solid var(--ink)}
+.aglegend .lk.dash{border-top:2px dashed var(--muted);margin-left:10px}
+.agsw{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:24px}
+.agsw .btn[aria-pressed="true"]{background:var(--inv);color:var(--inv-ink)}
+.prow .th.static{cursor:default}
+.prow p.t{min-height:0;cursor:default}
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
 </style></head><body>
 <div id="app">
@@ -251,6 +275,7 @@ img{display:block}
   <a class="tc" id="tab04" href="/#match"><span class="ix" aria-hidden="true">04</span><b>匹配</b><span class="ct mono" id="cMatch">—</span><span class="vh">位客人有待处理的匹配</span></a>
   <a class="tc" id="tab05" href="/#rules"><span class="ix" aria-hidden="true">05</span><b>待审核</b><span class="ct mono" id="cRules">—</span><span class="vh">条待确认规律</span></a>
   <a class="tc" id="tab06" href="/#guests"><span class="ix" aria-hidden="true">06</span><b>客人</b><span class="ct mono" id="cGuests">—</span><span class="vh">个待关联</span></a>
+  <a class="tc" id="tab07" href="/#agree"><span class="ix" aria-hidden="true">07</span><b>符合度</b><span class="ct mono" id="cAgree">—</span><span class="vh">今日进池符合度</span></a>
 </nav>
 <p class="im net" id="net" role="alert" hidden>网络已断开，操作未保存 · <button class="lnk lnk-pad" id="netRetry">重试</button></p>
 <main class="scr">
@@ -352,6 +377,22 @@ img{display:block}
   <ul class="glist" id="gLinked" aria-labelledby="gLinkedH"></ul>
   <h2 class="sub" id="gDisH" tabindex="-1">已停用 <span class="mono" id="gDisN"></span></h2>
   <ul class="glist" id="gDisabled" aria-labelledby="gDisH"></ul>
+</section>
+<section id="agreeView" hidden aria-labelledby="h07">
+  <h1 class="vh" id="h07" tabindex="-1">符合度</h1>
+  <p class="reason muted">每天你开始挑之前，系统按分数封存自己的选择；这里比较它和你实际留下、上榜的货。只看，不改。</p>
+  <p class="im" id="agErr" role="alert" hidden>未能读取符合度 · <button class="lnk lnk-pad" id="agReload" type="button">重试</button></p>
+  <div class="agdays" id="agDays"></div>
+  <h2 class="sub" id="agChartH">近 30 天进池符合度</h2>
+  <div class="agchart" id="agChart"></div>
+  <p class="aglegend" aria-hidden="true"><span class="lk solid"></span>进池符合度 <span class="lk dash"></span>随机基线</p>
+  <div class="agsw" role="group" aria-label="差异清单的日期">
+    <button class="btn" id="agPickToday" type="button" aria-pressed="true">今日差异</button><button class="btn" id="agPickPrev" type="button" aria-pressed="false">昨日差异</button></div>
+  <p class="gnone" id="agDiffNote"></p>
+  <h2 class="sub" id="agYouH">你选了、系统没选 <span class="mono" id="agYouN"></span></h2>
+  <ol class="plist" id="agYou" aria-labelledby="agYouH"></ol>
+  <h2 class="sub" id="agSysH">系统选了、你没选（你看到过） <span class="mono" id="agSysN"></span></h2>
+  <ol class="plist" id="agSys" aria-labelledby="agSysH"></ol>
 </section>
 </main>
 <p class="vh" id="live" role="status" aria-live="polite"></p>

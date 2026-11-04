@@ -1,4 +1,4 @@
-/* 后台 02 商品池与 03 榜（故事 11，CAP-7）：分区切换（#new / #pool / #rank）、商品池列表（加入榜、移出 / 放回商品池、
+/* 后台 02 商品池与 03 榜（故事 11，CAP-7）：分区切换（#new / #pool / #rank …… #agree）、商品池列表（加入榜、移出 / 放回商品池、
    标记售出（需确认）/ 撤销售出（故事 13）、货详情）、排榜（把手长按拖动、上移 / 下移 / 移出榜、播报）、排序即时保存与重试、预览入口与发布状态。
    原生 JS，无构建、无外部库；与 triage.js 共用 $、rid、get、post、say、shout、setNet、openDetail、viewTitle。
    发布不在这里：只从预览横条（/preview/，preview-bar.js）发起。 */
@@ -57,7 +57,7 @@
   /* ---------- 分区切换 ---------- */
   function fromHash() {
     return location.hash === '#pool' ? 'pool' : location.hash === '#rank' ? 'rank' : location.hash === '#match' ? 'match' :
-      location.hash === '#rules' ? 'rules' : location.hash === '#guests' ? 'guests' : 'new';
+      location.hash === '#rules' ? 'rules' : location.hash === '#guests' ? 'guests' : location.hash === '#agree' ? 'agree' : 'new';
   }
   function show(v, user) {
     view = v;
@@ -70,7 +70,8 @@
     $('matchView').hidden = v !== 'match';
     $('rulesView').hidden = v !== 'rules';
     $('guestsView').hidden = v !== 'guests';
-    [['new', 'tab01'], ['pool', 'tab02'], ['rank', 'tab03'], ['match', 'tab04'], ['rules', 'tab05'], ['guests', 'tab06']].forEach(([k, id]) => {
+    $('agreeView').hidden = v !== 'agree';
+    [['new', 'tab01'], ['pool', 'tab02'], ['rank', 'tab03'], ['match', 'tab04'], ['rules', 'tab05'], ['guests', 'tab06'], ['agree', 'tab07']].forEach(([k, id]) => {
       if (k === v) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
     });
     document.querySelector('main.scr').classList.toggle('wide', v === 'pool' || v === 'new');   // 01 瀑布流与 02 商品池用宽版
@@ -80,8 +81,9 @@
     if (window.curioMatches) { if (v === 'match') window.curioMatches.open(); else window.curioMatches.leave(); }
     if (window.curioRules) { if (v === 'rules') window.curioRules.open(); else window.curioRules.leave(); }
     if (window.curioGuests) { if (v === 'guests') window.curioGuests.open(); else window.curioGuests.leave(); }
+    if (window.curioAgree && v === 'agree') window.curioAgree.open();
     if (user) {
-      const h = v === 'pool' ? $('h02') : v === 'rank' ? $('h03') : v === 'match' ? $('h04') : v === 'rules' ? $('h05') : v === 'guests' ? $('h06') : $('h01');
+      const h = v === 'pool' ? $('h02') : v === 'rank' ? $('h03') : v === 'match' ? $('h04') : v === 'rules' ? $('h05') : v === 'guests' ? $('h06') : v === 'agree' ? $('h07') : $('h01');
       h.setAttribute('tabindex', '-1'); h.focus();
     }
   }

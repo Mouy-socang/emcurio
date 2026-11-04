@@ -16,6 +16,7 @@ from . import sync
 from . import publish
 from . import behavior
 from . import learning
+from . import agreement
 from .config import learning_for
 from screening.pipeline import process
 
@@ -292,6 +293,8 @@ class Store:
             behavior.ensure(c)
             # 故事 17（CAP-8）：待审 / 已确认 / 已否决的规律。
             learning.ensure(c)
+            # 故事 23：每日封存预测与历史符合度（只在本机）。
+            agreement.ensure(c)
     @contextmanager
     def connect(self):
         c=sqlite3.connect(self.path,timeout=30);c.row_factory=sqlite3.Row
