@@ -748,9 +748,9 @@ function aucRow(c) {
     a.href = c.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = 'eBay 原链接'; lp.append(a); parts.push(lp);
   }
   const acts = document.createElement('div'); acts.className = 'acts2';
-  const keep = document.createElement('button'); keep.type = 'button'; keep.className = 'btn primary'; keep.dataset.k = 'keep'; keep.textContent = '留下';
+  const keep = document.createElement('button'); keep.type = 'button'; keep.className = 'btn primary'; keep.dataset.k = 'keep'; keep.textContent = '留下（进拍卖池）';
   const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn'; rm.dataset.k = 'remove'; rm.textContent = '去掉';
-  keep.setAttribute('aria-label', '留下 ' + c.name); rm.setAttribute('aria-label', '去掉 ' + c.name);
+  keep.setAttribute('aria-label', '留下 ' + c.name + '，进拍卖商品池'); rm.setAttribute('aria-label', '去掉 ' + c.name);
   acts.append(keep, rm);
   const cv = document.createElement('button'); cv.type = 'button'; cv.className = 'btn'; cv.dataset.k = 'convert'; cv.textContent = '转为普通货';
   cv.setAttribute('aria-label', c.name + ' 转为普通货');
@@ -814,7 +814,7 @@ async function aucAct(li, action) {
   setNet(false);
   aucRemoveRow(li, action);
   sync(res.data); counts();
-  say((action === 'keep' ? '已留下 ' : '已去掉 ') + c.name);
+  say((action === 'keep' ? '已留下（进拍卖池）' : '已去掉 ') + c.name);
 }
 async function aucConvert(li) {
   if (li.dataset.busy) return;

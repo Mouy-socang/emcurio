@@ -41,7 +41,12 @@
   {{ gallery(it) }}
   <p class="code mono">货号 {{ it.code }}</p>
   <h1 class="h1s"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</h1>
+  {% if it.ends %}{# 故事 30：拍卖中的货——当前出价与结束时间（北京时间） #}
+  <p class="price"><span class="mono big">{{ money(it.price_eur, cur) }}</span> <span class="muted">当前出价</span></p>
+  <p class="ends">拍卖中 · {{ auction_end_text(it.ends) }}</p>
+  {% else %}
   <p class="price"><span class="mono big">{{ money(it.price_eur, cur) }}</span> <span class="muted">卖家原价</span></p>
+  {% endif %}
 
   <section class="ns" aria-labelledby="h-cond">
     <h2 id="h-cond"><span class="ix mono" aria-hidden="true">01</span>品相</h2>

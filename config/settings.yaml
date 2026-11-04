@@ -25,3 +25,7 @@ ai_budget:
 goodcustomer:
   db: ~/Desktop/goodcustomerDB
   gcdb: ~/Desktop/goodcustomer-plugin/skills/gc-schema/scripts/gcdb.py
+# 故事 30：发布快照版本。1 = snapshot.v1（现状）；2 = snapshot.v2（多带拍卖榜 R12_auction 与拍卖货结束时间，
+# 客人页普通榜下出现「拍卖中」一栏）。服务器部署能读 v2 的版本之前保持 1。
+publish:
+  snapshot_version: 1

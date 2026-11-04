@@ -387,6 +387,7 @@ class Store:
             c.execute('BEGIN IMMEDIATE')
             if c.execute("UPDATE items SET status='gone',gone_at=?,checked_at=? WHERE item_id=? AND status='active'",(now(),now(),iid)).rowcount:
                 publish.reconcile(c,iid)
+                publish.drop_auction_rank(c,triage.code(c,iid))     # 故事 30：判下架的货同一事务从拍卖榜撤下
                 return True
             return False   # 已不在售（并发已改），没有改动
     def archive(self):
@@ -569,7 +570,8 @@ class Store:
                         counts=triage.auction_counts(c,at))
     def auction_convert(self,iid,on,request_id,root=ROOT):
         """转为普通货（on=True）/ 改回拍卖（on=False）。同一 request_id 重放返回首次结果；重复点击幂等。
-        返回 dict(item_id, converted, auction（当前是否按纯拍卖处理）, state, on_rank（是否在 R12 上）, counts, card)。"""
+        返回 dict(item_id, converted, auction（当前是否按纯拍卖处理）, state, on_rank（是否在 R12 上）,
+        on_auction_rank（本次之前是否在拍卖榜上；转为普通货时同一事务撤下，故事 30）, counts, card)。"""
         if not isinstance(iid,str) or not iid:raise ValueError('商品编号无效')
         if not isinstance(on,bool):raise ValueError('参数无效')
         if not isinstance(request_id,str) or not 1<=len(request_id)<=100:raise ValueError('请求编号无效')
@@ -584,8 +586,11 @@ class Store:
             item=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
             code=triage.code(c,iid)
             on_rank=bool(code) and c.execute('SELECT 1 FROM publish_rank WHERE code=?',(code,)).fetchone() is not None
+            on_auction_rank=bool(code) and code in publish.rank_auction(c)
+            if converted:publish.drop_auction_rank(c,code)      # 故事 30：转为普通货即从拍卖榜撤下
             result=dict(item_id=iid,converted=converted,auction=triage.is_pure_auction(c,iid),state=triage.state(c,iid),
-                        on_rank=on_rank,counts=backoffice_counts(c),card=card(c,item,root))
+                        on_rank=on_rank,on_auction_rank=on_auction_rank,left_auction_rank=bool(converted and on_auction_rank),
+                        counts=backoffice_counts(c),card=card(c,item,root))
             c.execute('INSERT INTO triage_requests VALUES(?,?,?,?)',(request_id,payload,json.dumps(result,ensure_ascii=False),now()))
             return result
     def item_detail(self,iid,root=ROOT):
@@ -769,10 +774,14 @@ def _owner_event(c,ev):
 
 def backoffice_counts(c):
     """01 计数与队列口径一致（不含 backlog、已下架与纯拍卖）；自动移出计全部当前处于该状态的货；
-    故事 20：auction 为拍卖新品件数，auction_soon 为其中 24 小时内结束的件数。"""
+    故事 20：auction 为拍卖新品件数，auction_soon 为其中 24 小时内结束的件数。
+    故事 30：auction_pool 为拍卖商品池（留下的纯拍卖）件数，auction_rank 为拍卖榜件数。"""
     new=c.execute('SELECT count(*) FROM triage t JOIN items i ON i.item_id=t.item_id WHERE '+triage.FEED_BASE).fetchone()[0]
     auto=c.execute("SELECT count(*) FROM triage WHERE state='auto_removed'").fetchone()[0]
-    return dict(new=new,auto_removed=auto,**triage.auction_counts(c))
+    pool=c.execute("SELECT count(*) FROM triage t JOIN items i ON i.item_id=t.item_id WHERE t.state='kept' AND "
+                   +triage.PURE_AUCTION).fetchone()[0]
+    return dict(new=new,auto_removed=auto,**triage.auction_counts(c),auction_pool=pool,
+                auction_rank=len(publish.rank_auction(c)))
 
 def price_label(amount,currency):
     """欧元显示 €185；非欧元显示原币 185 USD；无价格显示「价格待询」。"""

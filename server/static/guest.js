@@ -673,7 +673,7 @@
     // 点开单件：记下来自榜还是商品池，单件页据此填 item_open 的 from。
     document.addEventListener('click', function (e) {
       var a = e.target.closest ? e.target.closest('a.rk-a, a.card-a') : null;
-      var code = a ? itemCode(a) : null;
+      var code = a && !a.classList.contains('au-a') ? itemCode(a) : null;     // 拍卖中一栏（故事 30）不算榜，记为 link
       if (!code) return;
       try {
         window.sessionStorage.setItem(FROM, JSON.stringify({ code: code, from: a.classList.contains('rk-a') ? 'rank' : 'pool', at: Date.now() }));

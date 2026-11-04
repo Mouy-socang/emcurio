@@ -100,6 +100,10 @@ html{scroll-padding-top:128px}
 .pr{display:block;font-size:14px;margin-top:2px}
 
 .pool{padding-top:28px}
+/* 故事 30：拍卖中一栏（普通榜下）。 */
+.auc{padding-top:20px}
+.bid-l{color:var(--muted)}
+.ends{display:block;font-size:14px;line-height:1.4;color:var(--muted);margin-top:2px}
 .section{font-family:var(--serif);font-weight:600;font-size:26px;line-height:1.25;margin:4px 0 14px}
 .cnt{font-size:15px;font-weight:400;color:var(--muted)}
 .sticky{position:sticky;top:0;z-index:5;background:var(--surface)}

@@ -16,3 +16,13 @@
 <span class="pr mono">{{ money(it.price_eur, cur) }}</span>
 </a></li>
 {%- endmacro %}
+
+{# 故事 30：拍卖中一栏的卡片——当前出价与结束时间；不带名次、不带分数。 #}
+{% macro auction_card(it, cur=None) -%}
+<li class="rk"><a class="rk-a au-a" href="/item/{{ it.code }}" aria-label="{{ it.title }}，当前出价 {{ money_text(it.price_eur, cur) }}，{{ auction_end_text(it.ends) }}">
+<span class="ph sq">{% if it.images %}<img src="/img/{{ it.images[0].thumb }}" width="{{ it.images[0].tw }}" height="{{ it.images[0].th }}" alt="" decoding="async">{% else %}<span class="ph-none">图片未能加载</span>{% endif %}</span>
+<span class="rt"{% if it.title_lang %} lang="{{ it.title_lang }}"{% endif %}>{{ it.title }}</span>
+<span class="pr"><span class="bid-l">当前出价</span> <span class="mono">{{ money(it.price_eur, cur) }}</span></span>
+<span class="ends">{{ auction_end_text(it.ends) }}</span>
+</a></li>
+{%- endmacro %}

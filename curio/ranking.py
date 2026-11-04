@@ -10,9 +10,13 @@
 - 写接口带 request_id（表 triage_requests，与故事 7 共用）：同一 request_id 重放返回首次结果。
 - 预览（AD-28）：publish.candidate 生成候选快照（不入发件箱、不分配编号），由 server/preview.py 用客人页同一份模板
   渲染；Mac 端不装 Jinja2，经 server/.venv 子进程调用（见 render_preview）。
+- 拍卖商品池与拍卖榜（故事 30）：kind='auction'。拍卖池 = 留下（kept）且纯拍卖（triage.PURE_AUCTION）的货，
+  按结束时间近到远、已结束的在最后；普通池（kind='normal'）去掉纯拍卖。不是新的拣选状态：转为普通货 / 改回拍卖
+  后自动换边。拍卖榜存 publish_rank_auction（publish.set_rank_auction 校验）；移出、标记售出同一事务撤下。
 """
 import json
 import subprocess
+import time
 from pathlib import Path
 
 from . import exposure, publish, triage
@@ -23,6 +27,13 @@ SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 RENDER_TIMEOUT = 60
 REASON_KA = 'Kleinanzeigen 的货不能加入 R12'
 REASON_FULL = f'R12 已满 {publish.RANK_SIZE} 件，请先移出一件'
+KINDS = ('normal', 'auction')
+
+
+def _kind(kind):
+    if kind not in KINDS:
+        raise ValueError('kind 只能是 normal 或 auction')
+    return kind
 
 
 class PreviewError(RuntimeError):
@@ -44,21 +55,36 @@ def rank_reason(c, item, code):
     return None
 
 
-def _scored(c, state, exp):
+def _scored(c, state, exp, kind='normal'):
     # 故事 27：按综合分高到低，没有综合分的退回旧分数，都没有的在后。
     # 故事 28：实际按排序键（综合分 − 曝光扣分）高到低；同键按进入该状态的时间新到旧、再按 item_id。显示的分数不变。
+    # 故事 30：kind='normal' 去掉纯拍卖；kind='auction' 只取纯拍卖，按结束时间近到远（无结束时间的其后），已结束的
+    # 排最后（结束时间新到旧）。
+    auction = (' AND ' if kind == 'auction' else ' AND NOT ') + triage.PURE_AUCTION
     rows = [dict(r) for r in c.execute('''SELECT i.*, COALESCE(cs.score, s.score) sort_score, t.updated_at state_at FROM triage t
         JOIN items i ON i.item_id=t.item_id LEFT JOIN composite_scores cs ON cs.item_id=i.item_id
-        LEFT JOIN scores s ON s.item_id=i.item_id WHERE t.state=?''', (state,))]
+        LEFT JOIN scores s ON s.item_id=i.item_id WHERE t.state=?''' + auction, (state,))]
     for r in rows:
         r['sort_key'] = exposure.sort_key(r['sort_score'], exposure.penalty_of(exp, r['item_id']))
     rows.sort(key=lambda r: r['item_id'])
     rows.sort(key=lambda r: r['state_at'] or '', reverse=True)
     rows.sort(key=lambda r: (r['sort_key'] is None, -(r['sort_key'] or 0)))
+    if kind == 'auction':
+        rows.sort(key=_ends_key)
     return rows
 
 
-def _pool_row(c, item, ranked, root, exp):
+def _ends_key(row, now=None):
+    """拍卖池排序键：(0 未结束 / 1 已结束, 未结束按结束时间近到远、无结束时间的排未结束组最后, 已结束按新到旧)。"""
+    end = publish.ends_dt(row['ends'])
+    now = time.time() if now is None else now
+    if end is None:
+        return (0, float('inf'))
+    t = end.timestamp()
+    return (0, t) if t > now else (1, -t)
+
+
+def _pool_row(c, item, ranked, root, exp, auction_ranked=()):
     out = card(c, item, root)
     code = out['code']
     # 故事 28：曝光（累计挂牌天数与扣分；没挂过为 0）与排序键（02"按分数"用它排，显示的分数不变）。
@@ -78,27 +104,46 @@ def _pool_row(c, item, ranked, root, exp):
     tag = auction_tag(c, item)
     if tag:
         out['tags'] = out['tags'] + [tag]
+    # 故事 30：拍卖池卡片——当前出价、是否已结束、在拍卖榜的名次、不能加入拍卖榜的原因（界面用语）。
+    if out['auction']:
+        out['bid'] = out['price']
+        out['ended'] = publish.is_ended(item['ends'])
+        out['auction_rank_pos'] = auction_ranked.index(code) + 1 if code and code in auction_ranked else None
+        out['auction_rank_reason'] = auction_rank_reason(c, item, code)
     return out
 
 
-def pool(store, root=ROOT):
-    """02 商品池：留下的货与已移出商品池的货，以及当前的榜。"""
+def auction_rank_reason(c, item, code):
+    """这件货不能加入拍卖榜的原因（界面用语，去掉货号前缀）；能则 None。榜满由界面按当时件数判断。"""
+    if not code:
+        return '还没有货号，请先留下'
+    reason = publish.why_not_auction(c, code)
+    return reason[len(code) + 1:] if reason and reason.startswith(code + ' ') else reason
+
+
+def pool(store, root=ROOT, kind='normal'):
+    """02 商品池：留下的货与已移出商品池的货，以及当前的榜。kind='auction' 为拍卖商品池与拍卖榜（故事 30）。"""
+    _kind(kind)
     with store.connect() as c:
         ranked = publish.rank(c)
+        auction_ranked = publish.rank_auction(c)
         exp = exposure.by_item(c, exposure.params_for(root))
-        kept = [_pool_row(c, r, ranked, root, exp) for r in _scored(c, 'kept', exp)]
-        out = [_pool_row(c, r, ranked, root, exp) for r in _scored(c, 'out_of_pool', exp)]
-    return dict(items=kept, out=out, rank=ranked, counts=dict(kept=len(kept), out=len(out), rank=len(ranked)))
+        kept = [_pool_row(c, r, ranked, root, exp, auction_ranked) for r in _scored(c, 'kept', exp, kind)]
+        out = [_pool_row(c, r, ranked, root, exp, auction_ranked) for r in _scored(c, 'out_of_pool', exp, kind)]
+    shown = auction_ranked if kind == 'auction' else ranked
+    size = publish.RANK_AUCTION_SIZE if kind == 'auction' else publish.RANK_SIZE
+    return dict(kind=kind, items=kept, out=out, rank=shown, size=size, normal_rank=len(ranked),
+                counts=dict(kept=len(kept), out=len(out), rank=len(shown)))
 
 
-def publish_status(c, fees=None):
+def publish_status(c, fees=None, root=ROOT):
     """{published_at, publish_no, dirty, orders}：最近一次入队的发布，与其后是否有未发布的修改（内容指纹不同）；
     orders 为该次发布为几位客人（账号）排好了个性化顺序（故事 18）。"""
     last = publish.last_publish(c)
     if last is None:
         return dict(published_at=None, publish_no=None, dirty=bool(publish.rank(c)), orders=0)
     if last.get('status_fp'):
-        dirty = publish.status_fingerprint(c, fees) != last['status_fp']
+        dirty = publish.status_fingerprint(c, fees, root) != last['status_fp']
     else:                       # 故事 11 之前的发布没有指纹：只比较榜
         dirty = json.loads(last['rank']) != publish.rank(c)
     return dict(published_at=last['created_at'], publish_no=last['publish_no'], dirty=dirty,
@@ -118,8 +163,11 @@ def detail_rank_reason(store, iid):
         return rank_reason(c, item, triage.code(c, iid))
 
 
-def rank_state(store, root=ROOT):
-    """03 榜：行（名次、缩略图、货号、名称、价格、是否已下架 / 不能发布）、件数与发布状态。"""
+def rank_state(store, root=ROOT, kind='normal'):
+    """03 榜：行（名次、缩略图、货号、名称、价格、是否已下架 / 不能发布）、件数与发布状态。
+    kind='auction'：拍卖榜 R12_auction（故事 30）。"""
+    if _kind(kind) == 'auction':
+        return auction_rank_state(store, root)
     with store.connect() as c:
         rows = []
         params = exposure.params_for(root)
@@ -142,8 +190,36 @@ def rank_state(store, root=ROOT):
             sold = item is not None and triage.is_sold(c, item['item_id'])
             row.update(days_on_rank=n, stale_hint=live and n >= params['hint_days'] and not sold)
             rows.append(row)
-        status = publish_status(c, publish._fees(root))
+        status = publish_status(c, publish._fees(root), root)
     return dict(rows=rows, count=len(rows), size=publish.RANK_SIZE, status=status)
+
+
+def auction_rank_state(store, root=ROOT):
+    """03 拍卖榜：行（名次、缩略图、货号、名称、当前出价、结束时间、是否已结束 / 不能发布）、件数与发布状态。
+    不能上拍卖榜的行（已结束、下架等）标 off 并写明原因；发布时跳过，从不阻止发布。"""
+    with store.connect() as c:
+        rows = []
+        for pos, code in enumerate(publish.rank_auction(c), 1):
+            item = c.execute('SELECT i.* FROM item_codes k JOIN items i ON i.item_id=k.item_id WHERE k.code=?',
+                             (code,)).fetchone()
+            row = card(c, item, root) if item else dict(item_id=None, name=code, code=code, price='', tags=[],
+                                                        image=None, platform='', status=None)
+            if item is not None:
+                tag = auction_tag(c, item)
+                if tag:
+                    row['tags'] = row['tags'] + [tag]
+            reason = publish.why_not_auction(c, code)
+            ended = item is not None and publish.is_ended(item['ends'])
+            row.update(pos=pos, code=code, off=reason is not None, reason=reason, ended=ended,
+                       gone=item is not None and item['status'] != 'active',
+                       bid=row.get('price', ''), ends=(item['ends'] or None) if item is not None else None,
+                       days_on_rank=0, stale_hint=False)
+            rows.append(row)
+        status = publish_status(c, publish._fees(root), root)
+        normal = len(publish.rank(c))
+    from .config import snapshot_version
+    return dict(kind='auction', rows=rows, count=len(rows), size=publish.RANK_AUCTION_SIZE, status=status, normal_rank=normal,
+                snapshot_version=snapshot_version(root))
 
 
 # ---------- 写：幂等（triage_requests） ----------
@@ -168,14 +244,18 @@ def _once(store, request_id, payload, fn, mark_replay=False):
         return result
 
 
-def save_rank(store, codes, request_id):
-    """保存榜（按名次的货号列表）。返回 dict(rank=…)。校验失败抛 PublishError（ValueError）。"""
+def save_rank(store, codes, request_id, kind='normal'):
+    """保存榜（按名次的货号列表）。返回 dict(rank=…)。校验失败抛 PublishError（ValueError）。
+    kind='auction'：保存拍卖榜 R12_auction（故事 30）。"""
+    _kind(kind)
     if not isinstance(codes, list) or not all(isinstance(x, str) for x in codes):
-        raise ValueError('R12 须为货号列表')
+        raise ValueError(('拍卖榜' if kind == 'auction' else 'R12') + ' 须为货号列表')
 
     def work(c):
+        if kind == 'auction':
+            return dict(rank=publish.set_rank_auction(c, codes, keep_stale=True))
         return dict(rank=publish.set_rank(c, codes, keep_stale=True))
-    return _once(store, request_id, ['rank', codes], work)
+    return _once(store, request_id, ['rank_auction' if kind == 'auction' else 'rank', codes], work)
 
 
 POOL_ACTIONS = ('out_of_pool', 'back_to_pool', 'mark_sold', 'undo_sold')
@@ -191,13 +271,14 @@ def pool_action(store, action, iid, request_id):
         raise ValueError('商品编号无效')
 
     def work(c):
+        before = set(publish.rank_auction(c))
         if action == 'undo_sold':
             if not triage.is_sold(c, iid):
                 raise triage.TriageError('这件货没有标记售出，不能撤销')
             r = triage.undo(c, iid, actions=('mark_sold',))
         else:
             r = triage.transition(c, iid, action, source='backoffice')
-        dropped = False
+        dropped = dropped_auction = False
         if action in ('out_of_pool', 'mark_sold') and r['code']:
             ranked = publish.rank(c)
             if r['code'] in ranked:
@@ -205,7 +286,10 @@ def pool_action(store, action, iid, request_id):
                 c.execute('DELETE FROM publish_rank')
                 c.executemany('INSERT INTO publish_rank(pos,code) VALUES(?,?)', list(enumerate(ranked, 1)))
                 dropped = True
+            publish.drop_auction_rank(c, r['code'])      # 故事 30：同一事务从拍卖榜撤下（拣选变更时通常已撤下）
+            dropped_auction = r['code'] in before
         return dict(item_id=iid, state=r['state'], code=r['code'], left_rank=dropped, rank=publish.rank(c),
+                    left_auction_rank=dropped_auction, rank_auction=publish.rank_auction(c),
                     sold=triage.is_sold(c, iid), hidden_queued=bool(r.get('reconciled')))
     return _once(store, request_id, ['pool', action, iid], work, mark_replay=True)
 

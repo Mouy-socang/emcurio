@@ -192,6 +192,15 @@ def updated_text(received_at):
     return t.strftime('%Y.%m.%d · %H:%M')
 
 
+def auction_end_text(ends):
+    """拍卖结束时间（故事 30）：按北京时间（客人在中国，同更新时间）显示为「11月5日 21:05 结束（北京时间）」；读不出时空。"""
+    try:
+        t = datetime.fromisoformat(ends.replace('Z', '+00:00')).astimezone(CN_TZ)
+    except (AttributeError, ValueError):
+        return ''
+    return '%d月%d日 %02d:%02d 结束（北京时间）' % (t.month, t.day, t.hour, t.minute)
+
+
 def chosen_filters(params, options):
     """只认商品池里实际有的取值；其它忽略。"""
     out = {}
@@ -292,7 +301,7 @@ def make_env():
     """客人页模板环境（server/templates）。Mac 预览经 server/preview.py 用同一个环境渲染。"""
     env = Environment(loader=FileSystemLoader(str(TEMPLATES)), autoescape=select_autoescape(['html']))
     env.globals.update(price_text=price_text, filter_href=filter_href, money=money, money_text=money_text,
-                       fee_labels=FEE_LABELS)
+                       fee_labels=FEE_LABELS, auction_end_text=auction_end_text)
     return env
 
 
@@ -321,6 +330,7 @@ def home_page(env, view, params, cur=None, stale=False, track=False):
     more = filter_query(chosen)
     more = (more + '&' if more else '') + f'n={len(first) + PAGE_SIZE}'
     return render_page(env, 'home.html', 'MyR12', view=view, rank=view.rank, pool_total=len(view.pool),
+                       rank_auction=getattr(view, 'rank_auction', []),
                        options=options, chosen=chosen, cards=first, shown_total=len(shown), labels=labels,
                        next_offset=len(first) if len(first) < min(len(shown), MAX_SHOWN) else None,
                        query=filter_query(chosen),
@@ -686,7 +696,7 @@ def register_guest_routes(app, db_path, connect, clock=None, mailer=None, cookie
     def load_view():
         c = db()
         try:
-            return snapshot.current_view(c, db_path)
+            return snapshot.current_view(c, db_path, clock())
         finally:
             c.close()
 

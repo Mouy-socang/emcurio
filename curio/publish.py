@@ -19,6 +19,10 @@
   随快照下发（账号编号 → 货号前缀）；不进内容指纹（预览按墨墨顺序，AD-28）。客户数记在 publishes.orders，
   03 发布状态显示"已为 N 位客人排好顺序"。超过 SNAPSHOT_MAX 字节时从最长的顺序开始去掉（记警告）；
   准备或排序出错只记警告、本次不带顺序，发布照常。
+- 拍卖榜（故事 30）：`publish_rank_auction` 表（与 publish_rank 同形）里 0 到 RANK_AUCTION_SIZE（12）件，只收拍卖商品池
+  （留下、纯拍卖）里在售、欧元有价、结束时间可读且未过的货。`publish.snapshot_version`（config/settings.yaml，默认 1）
+  为 2 时发 snapshot.v2：多带 rank_auction 与这些货（items 里、不在 pool 里，带 ends）；结束时间已过的发布时跳过。
+  为 1 时快照与故事 30 之前完全一致（拍卖榜不发）。
 """
 import hashlib
 import ipaddress
@@ -43,6 +47,7 @@ from .config import ROOT
 log = logging.getLogger(__name__)
 
 RANK_SIZE = 12
+RANK_AUCTION_SIZE = 12
 TOMBSTONE_DAYS = 90
 LOCK_SECONDS = 1800
 SIZES = ((1600, 'full'), (600, 'thumb'))
@@ -87,6 +92,8 @@ def now_z():
 def ensure(c):
     c.executescript('''
     CREATE TABLE IF NOT EXISTS publish_rank(pos INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE);
+    -- 故事 30：拍卖榜 R12_auction（只放拍卖商品池里的货）。
+    CREATE TABLE IF NOT EXISTS publish_rank_auction(pos INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE);
     CREATE TABLE IF NOT EXISTS publish_images(source TEXT NOT NULL, size INTEGER NOT NULL, name TEXT NOT NULL,
         width INTEGER NOT NULL, height INTEGER NOT NULL, made_at TEXT NOT NULL, PRIMARY KEY(source,size));
     -- 可能在客人页上的货（已送达快照 ∪ 待送达快照）：hidden / hide_seq 记录之后推送过的隐藏状态。
@@ -172,6 +179,118 @@ def set_rank(c, codes, keep_stale=False):
     c.execute('DELETE FROM publish_rank')
     c.executemany('INSERT INTO publish_rank(pos,code) VALUES(?,?)', list(enumerate(codes, 1)))
     return codes
+
+
+# ---------- 故事 30：拍卖榜 R12_auction ----------
+
+NOT_AUCTION = '不是拍卖中的货'
+_TS = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z')
+
+
+def ends_dt(text):
+    """拍卖结束时间（items.ends，ISO）→ UTC datetime；空或读不出时 None。"""
+    try:
+        end = datetime.fromisoformat((text or '').strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end.astimezone(timezone.utc)
+
+
+def ends_z(text):
+    """快照里的结束时间：UTC、毫秒、Z（同契约的时间格式）；读不出时 None。"""
+    end = ends_dt(text)
+    return None if end is None else end.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def is_ended(text, now=None):
+    """结束时间已过（now 为 Unix 秒，None 为现在）；读不出结束时间的不算已结束。"""
+    end = ends_dt(text)
+    return end is not None and end.timestamp() <= (time.time() if now is None else now)
+
+
+def rank_auction(c):
+    return [r[0] for r in c.execute('SELECT code FROM publish_rank_auction ORDER BY pos')]
+
+
+def why_not_auction(c, code, now=None):
+    """货号不能上拍卖榜的原因（中文）；可以则 None。now：Unix 秒（判断是否已结束；None 为现在）。"""
+    row = c.execute('''SELECT i.*, t.state FROM item_codes k JOIN items i ON i.item_id=k.item_id
+        LEFT JOIN triage t ON t.item_id=k.item_id WHERE k.code=?''', (code,)).fetchone()
+    if row is None:
+        return f'{code} 不存在'
+    if not triage.is_pure_auction(c, row['item_id']):
+        return f'{code} {NOT_AUCTION}'
+    if row['state'] != 'kept':
+        return f'{code} 当前是「{triage.LABELS.get(row["state"], row["state"])}」，不在拍卖商品池'
+    if row['status'] != 'active':
+        return f'{code} 原平台已下架'
+    if not _priced(row):
+        return f'{code} 没有欧元标价，暂不能发布'
+    if ends_dt(row['ends']) is None:
+        return f'{code} 没有可读的结束时间'
+    if is_ended(row['ends'], now):
+        return f'{code} 拍卖已结束'
+    return None
+
+
+def _write_rank_auction(c, codes):
+    c.execute('DELETE FROM publish_rank_auction')
+    c.executemany('INSERT INTO publish_rank_auction(pos,code) VALUES(?,?)', list(enumerate(codes, 1)))
+
+
+def set_rank_auction(c, codes, keep_stale=False, now=None):
+    """设置拍卖榜（按名次，至多 RANK_AUCTION_SIZE 件，须都能上拍卖榜）。不提交。keep_stale 同 set_rank。"""
+    codes = [str(x).strip().upper() for x in codes]
+    stale = set(rank_auction(c)) if keep_stale else set()
+    if len(codes) > RANK_AUCTION_SIZE:
+        raise PublishError(f'拍卖榜最多 {RANK_AUCTION_SIZE} 件')
+    for code in codes:
+        if not CODE_RE.fullmatch(code):
+            raise PublishError(f'货号格式不对：{code[:20]}')
+    if len(set(codes)) != len(codes):
+        raise PublishError('拍卖榜里有重复的货号')
+    for code in codes:
+        reason = None if code in stale else why_not_auction(c, code, now)
+        if reason:
+            raise PublishError(reason)
+    _write_rank_auction(c, codes)
+    return codes
+
+
+def drop_auction_rank(c, code):
+    """把货号从拍卖榜撤下（转为普通货、移出、标记售出、判下架时同一事务调用）。返回是否在榜上。不提交。"""
+    ranked = rank_auction(c) if code else []
+    if code not in ranked:
+        return False
+    ranked.remove(code)
+    _write_rank_auction(c, ranked)
+    return True
+
+
+def leave_auction_rank(c, iid):
+    """拣选状态变更后（同一事务）：这件货已不是留下，就从拍卖榜撤下。返回是否撤下。不提交。"""
+    if not _has_table(c, 'publish_rank_auction') or triage.state(c, iid) == 'kept':
+        return False
+    return drop_auction_rank(c, triage.code(c, iid))
+
+
+def check_rank_auction(c, now=None):
+    """发布用的拍卖榜：不能上拍卖榜的（已结束、下架、转为普通货等）一律跳过，从不阻止发布。
+    返回 (货号按名次, 对应的 items 行（带 code）)。"""
+    codes, rows = [], []
+    for code in rank_auction(c):
+        if why_not_auction(c, code, now):
+            continue
+        row = c.execute('''SELECT i.*, k.code, k.seq code_seq FROM item_codes k JOIN items i ON i.item_id=k.item_id
+            WHERE k.code=?''', (code,)).fetchone()
+        codes.append(code)
+        rows.append(dict(row))
+    return codes, rows
+
+
+def snapshot_version(root):
+    from .config import snapshot_version as version
+    return version(root)
 
 
 # ---------- 卖家原文清洗与筛选字段 ----------
@@ -491,6 +610,8 @@ def _item_payload(c, item, root, out_dir, attempted, fees=None):
     lang = _lang(out['seller_text'])
     if lang and out['seller_text']:
         out['seller_lang'] = lang
+    if item.get('auction_ends'):          # 故事 30：拍卖榜里的货（v2）带结束时间
+        out['ends'] = item['auction_ends']
     comment = c.execute('SELECT text FROM comments WHERE item_id=?', (iid,)).fetchone()
     if comment and comment[0].strip():
         out['comment'] = comment[0][:5000]
@@ -580,17 +701,20 @@ def check_rank(c):
     return ranked
 
 
-def content_fingerprint(rank_, pool, items):
-    """候选快照的内容指纹（榜、商品池与每件货的全部快照字段；不含发布编号、水位、墓碑与时间）。"""
-    text = json.dumps({'rank': rank_, 'pool': pool, 'items': items}, ensure_ascii=False, sort_keys=True,
-                      separators=(',', ':'))
+def content_fingerprint(rank_, pool, items, rank_auction_=None):
+    """候选快照的内容指纹（榜、商品池与每件货的全部快照字段；不含发布编号、水位、墓碑与时间）。
+    rank_auction_：v2 快照的拍卖榜（v1 为 None，指纹与故事 30 之前相同）。"""
+    data = {'rank': rank_, 'pool': pool, 'items': items}
+    if rank_auction_ is not None:
+        data['rank_auction'] = rank_auction_
+    text = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-def status_fingerprint(c, fees=None):
+def status_fingerprint(c, fees=None, root=ROOT):
     """"有未发布的修改"用的轻量指纹（不转码图片）：榜、入选的货号（含顺序）、欧元价、点评与替代文字原文、
     生效的预估费用档位（故事 12：手动改档或推断变化都算修改）。汇率不算（每天会变，不该让榜显示有修改）。"""
-    fees = fees or _fees(ROOT)
+    fees = fees or _fees(root)
     rows = c.execute("""SELECT e.*,
         (SELECT text FROM comments m WHERE m.item_id=e.item_id) comment,
         (SELECT json_group_array(json_array(a.image_key, a.text)) FROM
@@ -601,6 +725,8 @@ def status_fingerprint(c, fees=None):
         fee = fee_info(c, r, fees)
         pool.append([r['code'], r['listed_price'], r['comment'], r['alts'], fee['tier'], fee['amount'], fee['label']])
     data = {'rank': rank(c), 'pool': pool}
+    if snapshot_version(root) == 2:     # 故事 30：发 v2 时拍卖榜有变化也算未发布的修改（v1 不发拍卖榜，不算）
+        data['rank_auction'] = rank_auction(c)
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
 
 
@@ -620,6 +746,14 @@ def check_orders(payload):
             raise PublishError('个性化顺序里的货号格式不对')
         if len(set(codes)) != len(codes) or not set(codes) <= pool:
             raise PublishError('个性化顺序里有重复或不在商品池的货号')
+
+
+def _auction_rows(c, now):
+    """v2 快照的拍卖榜与其货（每行带 auction_ends，供 _item_payload 写 ends）。"""
+    codes, rows = check_rank_auction(c, now)
+    for r in rows:
+        r['auction_ends'] = ends_z(r['ends'])
+    return codes, rows
 
 
 def _size(payload):
@@ -658,15 +792,21 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=
     items = eligible(c)
     codes = [it['code'] for it in items]
     ranked = check_rank(c)
+    version = snapshot_version(root)
+    auction_codes, auction_items = _auction_rows(c, now) if version == 2 else (None, [])
     fees = fees or _fees(root)
-    payload_items = [_item_payload(c, it, root, out_dir, attempted, fees) for it in items]
-    if expect_fingerprint is not None and content_fingerprint(ranked, codes, payload_items) != expect_fingerprint:
+    payload_items = [_item_payload(c, it, root, out_dir, attempted, fees) for it in items + auction_items]
+    if (expect_fingerprint is not None
+            and content_fingerprint(ranked, codes, payload_items, auction_codes) != expect_fingerprint):
         raise PublishStale('内容在预览后有变化，请重新预览')
     at = _iso(now)
-    tombstones = _tombstones(c, set(codes), now)
+    all_items = items + auction_items
+    tombstones = _tombstones(c, {it['code'] for it in all_items}, now)
     publish_no = sync.next_publish_seq(c)
-    payload = {'schema_version': 1, 'publish_no': publish_no, 'hide_watermark': publish_no,
+    payload = {'schema_version': version, 'publish_no': publish_no, 'hide_watermark': publish_no,
                'rank': ranked, 'pool': codes, 'items': payload_items, 'tombstones': tombstones, **fx_fields(c)}
+    if version == 2:
+        payload['rank_auction'] = auction_codes
     from . import personalize
     try:
         got, owner = personalize.orders(c, items, personal)
@@ -679,17 +819,20 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=
     event_id = sync.enqueue(c, 'snapshot', payload)
     # 待送达快照里的货也算"可能在客人页上"：之后的下架、去掉照样推隐藏。
     c.executemany('INSERT OR IGNORE INTO published(code,item_id,publish_no,changed_at) VALUES(?,?,?,?)',
-                  [(it['code'], it['item_id'], publish_no, at) for it in items])
+                  [(it['code'], it['item_id'], publish_no, at) for it in all_items])
     c.executemany('INSERT INTO publish_items(publish_no,code,item_id) VALUES(?,?,?)',
-                  [(publish_no, it['code'], it['item_id']) for it in items])
+                  [(publish_no, it['code'], it['item_id']) for it in all_items])
     images = sum(len(i['images']) for i in payload_items)
     no_images = [i['code'] for i in payload_items if not i['images']]
     c.execute('INSERT INTO publishes(publish_no,event_id,created_at,rank,pool_size,tombstones,images,status,tomb_json,'
               "status_fp,orders) VALUES(?,?,?,?,?,?,?,'pending',?,?,?)",
               (publish_no, event_id, at, json.dumps(ranked), len(codes), len(tombstones), images,
-               json.dumps(tombstones, ensure_ascii=False), status_fingerprint(c, fees), n_orders))
-    return dict(publish_no=publish_no, event_id=event_id, rank=len(ranked), pool=len(codes),
-                tombstones=len(tombstones), images=images, no_images=no_images, published_at=at, orders=n_orders)
+               json.dumps(tombstones, ensure_ascii=False), status_fingerprint(c, fees, root), n_orders))
+    out = dict(publish_no=publish_no, event_id=event_id, rank=len(ranked), pool=len(codes),
+               tombstones=len(tombstones), images=images, no_images=no_images, published_at=at, orders=n_orders)
+    if version == 2:
+        out['rank_auction'] = len(auction_codes)
+    return out
 
 
 def _prune(c):
@@ -740,26 +883,32 @@ def discard_pending(c, publish_no):
 def candidate(store, root=ROOT, fetch=None, sips='sips'):
     """预览用的候选快照（AD-28）：与发布同样的入选、榜校验、字段白名单与图片（Mac 本地转码，必要时先转码），
     但不分配发布编号、不写发件箱、不改 published / publishes，也不取发布锁。
-    返回 (payload, 转码失败张数)；payload 的结构同 snapshot.v1（publish_no、hide_watermark 为 0，无墓碑）。"""
+    返回 (payload, 转码失败张数)；payload 的结构同 snapshot.v1 / v2（按 publish.snapshot_version；
+    publish_no、hide_watermark 为 0，无墓碑）。"""
+    version = snapshot_version(root)
     with store.connect() as c:
         check_rank(c)
-        items = eligible(c)
+        items = eligible(c) + (_auction_rows(c, time.time())[1] if version == 2 else [])
     attempted, failures = prepare_images(store, items, root, fetch, sips)
     with store.connect() as c:
         ranked = check_rank(c)
         items = eligible(c)
+        auction_codes, auction_items = _auction_rows(c, time.time()) if version == 2 else (None, [])
         fees = _fees(root)
-        payload_items = [_item_payload(c, it, root, sync.image_dir(store), attempted, fees) for it in items]
+        payload_items = [_item_payload(c, it, root, sync.image_dir(store), attempted, fees)
+                         for it in items + auction_items]
         fx = fx_fields(c)
-    payload = {'schema_version': 1, 'publish_no': 0, 'hide_watermark': 0, 'rank': ranked,
+    payload = {'schema_version': version, 'publish_no': 0, 'hide_watermark': 0, 'rank': ranked,
                'pool': [it['code'] for it in items], 'items': payload_items, 'tombstones': [], **fx}
+    if version == 2:
+        payload['rank_auction'] = auction_codes
     check_fees(payload)
     return payload, failures
 
 
 def payload_fingerprint(payload):
     """候选快照（candidate 的 payload）的内容指纹，与发布时 build_and_enqueue 的比较口径相同。"""
-    return content_fingerprint(payload['rank'], payload['pool'], payload['items'])
+    return content_fingerprint(payload['rank'], payload['pool'], payload['items'], payload.get('rank_auction'))
 
 
 def last_publish(c):
@@ -830,6 +979,8 @@ def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_r
     try:
         with store.connect() as c:
             items = eligible(c)
+            if snapshot_version(root) == 2:
+                items += _auction_rows(c, clock())[1]
         attempted, failures = prepare_images(store, items, root, fetch, sips,
                                              heartbeat=lambda: _refresh(store, owner, clock))
         from . import personalize

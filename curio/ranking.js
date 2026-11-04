@@ -1,7 +1,10 @@
 /* 后台 02 商品池与 03 R12（故事 11，CAP-7）：分区切换（#new / #pool / #rank …… #agree）、商品池列表（加入榜、移出 / 放回商品池、
    标记售出（需确认）/ 撤销售出（故事 13）、货详情）、排榜（把手长按拖动、上移 / 下移 / 移出榜、播报）、排序即时保存与重试、预览入口与发布状态。
    原生 JS，无构建、无外部库；与 triage.js 共用 $、rid、get、post、say、shout、setNet、openDetail、viewTitle。
-   发布不在这里：只从预览横条（/preview/，preview-bar.js）发起。 */
+   发布不在这里：只从预览横条（/preview/，preview-bar.js）发起。
+   故事 30：02 / 03 顶部「普通 / 拍卖」切换（kind，记在 localStorage）。拍卖模式下 02 为拍卖商品池（留下的纯拍卖，
+   按结束时间近到远），卡片显示当前出价、结束时间与剩余时间、「加入拍卖榜」；03 编辑拍卖榜 R12_auction。
+   预览与发布只在「普通」里发起（拍卖榜随同一份快照发布）。 */
 (function () {
   'use strict';
   const SIZE = 12;
@@ -18,6 +21,16 @@
   let rankLoaded = false, unsaved = false, saving = false, again = false, saveError = '';
   let selected = null, dragging = false, previewing = false, cancelDrag = null;
   let poolSort = 'score';       // 02 排序：score（按分数，服务端顺序 = sort_key：综合分 − 曝光扣分）/ time（按进池时间，新到旧）
+  // 故事 30：normal（普通商品池与 R12）/ auction（拍卖商品池与拍卖榜）。拍卖模式下 score 为服务端顺序（按结束时间）。
+  const KIND_KEY = 'curio.poolKind';
+  let kind = 'normal', kindGen = 0;
+  let normalN = null;           // 03 导航计数始终是普通 R12 的件数（拍卖模式下取服务端返回的 normal_rank）
+  let snapVer = null;           // 拍卖榜读取时带回的 publish.snapshot_version（1 时拍卖榜暂不上客人页）
+  try { if (localStorage.getItem(KIND_KEY) === 'auction') kind = 'auction'; } catch (e) { /* 无痕或禁用存储：用普通 */ }
+  const isAuc = () => kind === 'auction';
+  const RL = () => isAuc() ? '拍卖榜' : 'R12';
+  const RL_ = () => isAuc() ? '拍卖榜' : ' R12';      // 接在中文动词后（"加入 R12" / "加入拍卖榜"）
+  const fullReason = () => isAuc() ? '拍卖榜已满 ' + SIZE + ' 件，请先撤下一件' : REASON_FULL;
 
   const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
   const two = n => String(n).padStart(2, '0');
@@ -104,47 +117,80 @@
   /* ---------- 读取 ---------- */
   let poolSeq = 0;               // 商品池读取序号：较早发出的读取晚到时丢弃，不覆盖之后的操作
   async function loadPool(anchor, top) {
-    const seq = ++poolSeq;
+    const seq = ++poolSeq, gen = kindGen;
     try {
-      const d = await get('/api/pool');
-      if (seq !== poolSeq) return false;
+      const d = await get('/api/pool?kind=' + kind);
+      if (seq !== poolSeq || gen !== kindGen) return false;
       pool = d;
+      if (isAuc() && d.normal_rank != null) normalN = d.normal_rank;
       d.items.concat(d.out).forEach(c => { if (c.code) cards.set(c.code, c); });
       if (!rankLoaded && !unsaved && !saving) { order = d.rank.slice(); saved = d.rank.slice(); }
       $('poolErr').hidden = true;
     } catch (e) {
-      if (seq !== poolSeq) return false;
+      if (seq !== poolSeq || gen !== kindGen) return false;
       if (view === 'pool') { $('poolErr').hidden = false; shout('未能读取商品池'); }
     }
     renderPool(anchor, top); counts();
     return true;
   }
   function absorb(d) {
-    d.rows.forEach(r => { cards.set(r.code, Object.assign({}, cards.get(r.code) || {}, r)); info.set(r.code, {off: r.off, gone: r.gone, reason: r.reason, days: r.days_on_rank || 0, stale: !!r.stale_hint}); });
+    d.rows.forEach(r => { cards.set(r.code, Object.assign({}, cards.get(r.code) || {}, r)); info.set(r.code, {off: r.off, gone: r.gone, reason: r.reason, days: r.days_on_rank || 0, stale: !!r.stale_hint, ended: !!r.ended}); });
     status = d.status;
+    if (d.normal_rank != null) normalN = d.normal_rank;
+    if (d.snapshot_version != null) snapVer = d.snapshot_version;
   }
   async function loadRank(force) {
     if (dragging) return;
+    const gen = kindGen;
     try {
-      const d = await get('/api/rank');
+      const d = await get('/api/rank?kind=' + kind);
+      if (gen !== kindGen) return;
       absorb(d);
       if (force || (!unsaved && !saving)) { order = d.rows.map(r => r.code); saved = order.slice(); }
       rankLoaded = true;
     } catch (e) {
-      if (view === 'rank') { showRankErr('未能读取 R12', loadRank); }
+      if (gen !== kindGen) return;
+      if (view === 'rank') { showRankErr('未能读取' + RL_(), loadRank); }
       return;
     }
     renderRank(); counts();
   }
   function counts() {
     $('cPool').textContent = pool ? pool.counts.kept : '—';
-    $('cRank').textContent = (rankLoaded || pool ? order.length : '—') + ' / ' + SIZE;
+    if (!isAuc() && (rankLoaded || pool)) normalN = order.length;
+    $('cRank').textContent = (normalN == null ? '—' : normalN) + ' / ' + SIZE;
+  }
+
+  /* ---------- 故事 30：普通 / 拍卖切换 ---------- */
+  function renderKind() {
+    document.querySelectorAll('.kindsw [data-kind]').forEach(b => b.setAttribute('aria-pressed', b.dataset.kind === kind ? 'true' : 'false'));
+    $('poolL').textContent = isAuc() ? '拍卖池' : '已留下';
+    $('poolRankL').textContent = RL();
+    $('sortScore').textContent = isAuc() ? '按结束时间' : '按分数';
+    $('poolEmptyH').textContent = isAuc() ? '拍卖商品池还没有货' : '商品池还没有货';
+    $('poolEmptyP').textContent = isAuc() ? '在 01「拍卖新品」里留下的货会出现在这里。' : '在 01 新货里留下的货会出现在这里。';
+    $('rankEmptyH').textContent = isAuc() ? '拍卖榜还是空的' : 'R12 还是空的';
+    $('rankEmptyP').textContent = isAuc() ? '从 02「拍卖」商品池"加入拍卖榜"（最多 ' + SIZE + ' 件）；客人页普通榜下「拍卖中」一栏。'
+      : '从 02 商品池"加入 R12"（最多 12 件，不必排满）；空着也可以预览、发布。';
+    $('rankList').setAttribute('aria-label', RL() + '，按名次');
+  }
+  function setKind(k) {
+    if (k === kind) return;
+    if (saveError && unsaved) { say('上次保存没成功，请先重试'); return; }
+    if (saving || unsaved || dragging) { say(RL() + '的排序正在保存，请稍候再切换'); return; }
+    kind = k; kindGen++; poolSeq++;
+    try { localStorage.setItem(KIND_KEY, k); } catch (e) { /* 存不了只是不记住 */ }
+    pool = null; info.clear(); order = []; saved = []; rankLoaded = false; selected = null; saveError = '';
+    $('poolList').textContent = ''; $('outList').textContent = ''; $('rankList').textContent = '';
+    renderKind(); renderMeta(); counts();
+    say(k === 'auction' ? '已切换到拍卖' : '已切换到普通');
+    loadPool(); loadRank();
   }
 
   /* ---------- 02 商品池 ---------- */
   function rankReason(c) {
     if (order.includes(c.code)) return null;
-    return c.rank_reason || (order.length >= SIZE ? REASON_FULL : null);
+    return (isAuc() ? c.auction_rank_reason : c.rank_reason) || (order.length >= SIZE ? fullReason() : null);
   }
   function poolRow(c, out) {
     const li = el('li', 'prow' + (c.on_sale ? '' : ' gone')); li.dataset.id = c.item_id;
@@ -158,8 +204,17 @@
     const p = el('p', 'p'); p.append(el('span', 'mono', c.price), ' · 来源 ' + c.platform);
     const st = el('p', 'st', out && c.sold ? '已售出' : c.on_sale ? '在售' : '已下架');
     const pos = order.indexOf(c.code);
-    if (!out && pos >= 0) st.append(' · R12 第 ', el('span', 'mono', String(pos + 1)), ' 名');
-    if (c.auction) st.append(' · ', el('span', 'auc', '拍卖中' + (endsText(c.ends) ? ' · 结束于 ' + endsText(c.ends) : '')));
+    if (!out && pos >= 0) st.append(' · ' + RL() + ' 第 ', el('span', 'mono', String(pos + 1)), ' 名');
+    if (c.auction && !isAuc()) st.append(' · ', el('span', 'auc', '拍卖中' + (endsText(c.ends) ? ' · 结束于 ' + endsText(c.ends) : '')));
+    // 故事 30：拍卖池卡片——当前出价、结束时间（柏林时间）、剩余时间。
+    let when = null;
+    if (isAuc()) {
+      p.textContent = ''; p.append('当前出价 ', el('span', 'mono', c.bid || c.price), ' · 来源 ' + c.platform);
+      const left = aucLeft(c);
+      when = el('p', 'when');
+      when.append(el('span', left.ended ? 'ended' : 'left' + (left.soon ? ' soon' : ''), left.ended ? '已结束' : left.text));
+      if (endsText(c.ends)) when.append(' · 结束于 ' + endsText(c.ends) + '（柏林时间）');
+    }
     const why = el('p', 'reason'); why.id = 'why-' + c.item_id.replace(/[^\w-]/g, '_'); why.hidden = true;
     const msg = el('p', 'im'); msg.hidden = true; msg.setAttribute('role', 'alert');
     const acts = el('div', 'acts2');
@@ -174,7 +229,7 @@
       acts.append(back); acts.style.gridTemplateColumns = '1fr';
     } else {
       const inRank = pos >= 0;
-      const rb = el('button', 'btn', inRank ? '移出 R12' : '加入 R12'); rb.type = 'button'; rb.dataset.k = c.item_id + ':rank';
+      const rb = el('button', 'btn', (inRank ? (isAuc() ? '撤下拍卖榜' : '移出 R12') : '加入' + RL_())); rb.type = 'button'; rb.dataset.k = c.item_id + ':rank';
       disable(rb, inRank ? null : rankReason(c), why);
       rb.onclick = () => {
         if (rb.getAttribute('aria-disabled') === 'true') { say(why.textContent); return; }
@@ -206,6 +261,7 @@
       conv = el('div', 'acts2'); conv.style.gridTemplateColumns = '1fr'; conv.append(cb);
     }
     body.append(code, t, p, st);
+    if (when) body.append(when);
     const sc = scoreEl(c, true); if (sc) body.append(sc);
     // 故事 21：看图识别的功能 · 器型 · 图案。
     if (c.vision_line) body.append(el('p', 'vis', c.vision_line));
@@ -247,7 +303,8 @@
     $('poolRankN').textContent = order.length;
     const list = $('poolList'); list.textContent = '';
     sortedPool().forEach(c => list.append(poolRow(c, false)));
-    list.setAttribute('aria-label', poolSort === 'time' ? '已留下的货，最近进池的在前' : '已留下的货，按分数高到低');
+    list.setAttribute('aria-label', poolSort === 'time' ? '已留下的货，最近进池的在前'
+      : isAuc() ? '拍卖商品池，即将结束的在前' : '已留下的货，按分数高到低');
     $('sortScore').setAttribute('aria-pressed', poolSort === 'score' ? 'true' : 'false');
     $('sortTime').setAttribute('aria-pressed', poolSort === 'time' ? 'true' : 'false');
     list.classList.add('grid');
@@ -269,12 +326,14 @@
     const src = fromKept ? pool.items : pool.out, dst = fromKept ? pool.out : pool.items;
     const i = src.findIndex(x => x.item_id === c.item_id);
     const row = Object.assign({}, i >= 0 ? src[i] : c, {sold: !!d.sold});
-    if (d.left_rank) {
+    if (isAuc() ? d.left_auction_rank : d.left_rank) {
       row.rank_pos = null;
       order = order.filter(x => x !== c.code); saved = saved.filter(x => x !== c.code);
       $('poolRankN').textContent = order.length;
     }
     if (i >= 0) src.splice(i, 1);
+    // 拍卖模式：放回 / 撤销售出的货按结束时间排，以随后重读的拍卖池为准，这里不按分数插入。
+    if (isAuc() && !fromKept) { pool.counts.kept = pool.items.length; pool.counts.out = pool.out.length; loadPool(c.item_id); return; }
     if (!dst.some(x => x.item_id === c.item_id)) {
       // 与服务端同序：排序键（综合分 − 曝光扣分）高到低、无分在后；同键时刚处理的在前。
       const at = dst.findIndex(x => sortKey(x) <= sortKey(row));
@@ -306,7 +365,7 @@
     setNet(false);
     const d = res.data;
     // 不用响应里的榜覆盖本地（可能是重放的旧结果）：只拿掉移出商品池的那件（moveLocal），其余以重新读取的榜为准。
-    const rankNote = d.left_rank ? '，并已移出 R12' : '';
+    const rankNote = (isAuc() ? d.left_auction_rank : d.left_rank) ? '，并已移出' + RL_() : '';
     const next = {out_of_pool: '已移出商品池' + rankNote, mark_sold: '已标记售出' + rankNote,
                   undo_sold: '已撤销售出', back_to_pool: '已放回商品池'}[action];
     // 原位：这一件淡出，页面以下一行为锚不跳动；焦点移到下一行的同一个按钮（不滚动），没有则到列表标题。
@@ -353,7 +412,11 @@
     delete btn.dataset.rid; setNet(false);
     // 改回拍卖的货仍在 R12 上：下次发布会被拒，先提示（重画后写在这一行的消息里）。
     const warn = !on && res.data.on_rank ? '这件在 R12 上，发布前请移出或再转为普通货' : '';
-    if (warn) shout(warn); else say(on ? '已转为普通货，可以加入 R12' : '已改回拍卖，拍卖中不能加入 R12');
+    // 故事 30：转为普通货即从拍卖榜撤下、回到普通商品池；改回拍卖移到拍卖商品池。
+    if (on && res.data.left_auction_rank && isAuc()) { order = order.filter(x => x !== c.code); saved = saved.filter(x => x !== c.code); }
+    if (warn) shout(warn);
+    else say(on ? '已转为普通货' + (res.data.left_auction_rank ? '，已从拍卖榜撤下' : '') + '，回到普通商品池，可以加入 R12'
+      : '已改回拍卖，移到拍卖商品池，不能加入 R12');
     await loadPool(c.item_id);
     loadRank();
     if (warn) {
@@ -366,19 +429,19 @@
   /* ---------- 03 R12 ---------- */
   function addToRank(code) {
     if (order.includes(code)) return;
-    if (order.length >= SIZE) { say(REASON_FULL); return; }
+    if (order.length >= SIZE) { say(fullReason()); return; }
     order.push(code); selected = null;
-    say('已加入 R12，第 ' + order.length + ' 名');
+    say('已加入' + RL_() + '，第 ' + order.length + ' 名');
     changed();
-    return '已加入 R12，第 ' + order.length + ' 名';
+    return '已加入' + RL_() + '，第 ' + order.length + ' 名';
   }
   function dropFromRank(code) {
     const i = order.indexOf(code); if (i < 0) return;
     order.splice(i, 1);
     if (selected === code) selected = null;
-    say('已移出 R12');
+    say('已移出' + RL_());
     changed();
-    return '已移出 R12';
+    return '已移出' + RL_();
   }
   function move(code, to, focusPart) {
     const from = order.indexOf(code);
@@ -406,10 +469,11 @@
     let reload = false;
     for (;;) {
       again = false;
-      const codes = order.slice();
+      const codes = order.slice(), gen = kindGen;
       let res = null;
-      try { res = await post('/api/rank', {codes, request_id: rid()}); }
+      try { res = await post('/api/rank', {codes, request_id: rid(), kind}); }
       catch (e) { setNet(true); }
+      if (gen !== kindGen) break;
       if (res && res.ok) {
         setNet(false); saveError = '';
         saved = res.data.saved; absorb(res.data);
@@ -433,19 +497,27 @@
     const c = cards.get(code) || {code, name: code, tags: [], price: ''};
     const st = info.get(code) || {off: !!c.rank_reason, gone: c.on_sale === false, reason: c.rank_reason || null};
     const li = el('li', 'rr' + (st.off ? ' off' : '')); li.dataset.code = code;
+    const plate = st.ended ? '已结束' : '已下架';
     const line = el('div', 'line');
     const ix = el('span', 'ix', two(i + 1)); ix.setAttribute('aria-hidden', 'true');
     const th = el('span', 'th');
-    if (st.off) th.append(el('span', 'plate', '已下架'));
+    if (st.off) th.append(el('span', 'plate', plate));
     if (c.image) { const im = el('img'); im.src = c.image; im.alt = ''; th.append(im); }
     th.addEventListener('contextmenu', e => e.preventDefault());
     const sel = el('button', 'sel'); sel.type = 'button'; sel.dataset.k = code + ':sel';
     sel.setAttribute('aria-expanded', selected === code ? 'true' : 'false');
     const h3 = nameEl('h3', c);
-    const vis = el('span', 'vh', '第 ' + (i + 1) + ' 名，' + (st.off ? '已下架，' : ''));
+    const vis = el('span', 'vh', '第 ' + (i + 1) + ' 名，' + (st.off ? plate + '，' : ''));
     h3.prepend(vis);
-    const rp = el('p', 'rp', code + (c.price ? ' · ' + c.price : ''));
+    const rp = el('p', 'rp', code + (c.price ? ' · ' + (isAuc() ? '当前出价 ' : '') + c.price : ''));
     sel.append(h3, rp);
+    if (isAuc() && c.ends) {
+      const left = aucLeft(c);
+      const w = el('p', 'when');
+      w.append(el('span', left.ended ? 'ended' : 'left' + (left.soon ? ' soon' : ''), left.ended ? '已结束' : left.text));
+      if (endsText(c.ends)) w.append(' · 结束于 ' + endsText(c.ends) + '（柏林时间）');
+      sel.append(w);
+    }
     const sc = scoreEl(c); if (sc) sel.append(sc);
     if (st.off && st.reason && !st.gone) sel.append(el('p', 'why', st.reason));
     // 故事 28：已在已发布 R12 上累计挂了几天；挂满提示天数且未售出时提示可考虑换下（不自动移出）。
@@ -455,14 +527,14 @@
       sel.append(xp);
     }
     const hd = el('button', 'hd', '≡'); hd.type = 'button'; hd.dataset.k = code + ':hd';
-    hd.setAttribute('aria-label', '拖动 ' + (c.name || code) + '，第 ' + (i + 1) + ' 名' + (st.off ? '，已下架' : ''));
+    hd.setAttribute('aria-label', '拖动 ' + (c.name || code) + '，第 ' + (i + 1) + ' 名' + (st.off ? '，' + plate : ''));
     line.append(ix, th, sel, hd);
     li.append(line);
     if (selected === code) {
       const mv = el('div', 'mv');
       const up = el('button', 'btn', '上移'); up.type = 'button'; up.dataset.k = code + ':up';
       const down = el('button', 'btn', '下移'); down.type = 'button'; down.dataset.k = code + ':down';
-      const rm = el('button', 'btn', '移出 R12'); rm.type = 'button'; rm.dataset.k = code + ':rm';
+      const rm = el('button', 'btn', isAuc() ? '撤下拍卖榜' : '移出 R12'); rm.type = 'button'; rm.dataset.k = code + ':rm';
       const det = el('button', 'lnk lnk-pad', '查看详情'); det.type = 'button'; det.dataset.k = code + ':det';
       up.onclick = () => move(code, order.indexOf(code) - 1, 'up');
       down.onclick = () => move(code, order.indexOf(code) + 1, 'down');
@@ -512,11 +584,18 @@
     // 补位提示
     const off = offRows();
     const offMsg = $('rankOff');
-    if (off.length) { offMsg.textContent = '第 ' + off.map(([, i]) => i + 1).join('、') + ' 名已下架或不能发布，请移出（或从 02 商品池换一件）'; offMsg.hidden = false; }
-    else offMsg.hidden = true;
+    if (off.length) {
+      offMsg.textContent = '第 ' + off.map(([, i]) => i + 1).join('、') + ' 名' + (isAuc()
+        ? '已结束或不能发布（已结束的发布时自动跳过，客人页也不显示），请撤下（或从 02「拍卖」换一件）'
+        : '已下架或不能发布，请移出（或从 02 商品池换一件）');
+      offMsg.hidden = false;
+    } else offMsg.hidden = true;
+    // 故事 30：快照仍是 v1 时拍卖榜不上客人页，提示一行。
+    $('aucNote').hidden = !(isAuc() && snapVer === 1);
     // 预览
     let reason = null;
-    if (order.length > SIZE) reason = 'R12 最多 ' + SIZE + ' 件';
+    if (isAuc()) reason = '预览与发布在「普通」里进行，拍卖榜随同一次发布';
+    else if (order.length > SIZE) reason = 'R12 最多 ' + SIZE + ' 件';
     else if (unsaved || saving) reason = '排序尚未保存';
     else if (off.length) reason = 'R12 里有已下架或不能发布的货，请先移出或换一件';
     disable($('btnPreview'), reason, $('whyPreview'));
@@ -633,16 +712,18 @@
     // d：/api/triage/item 的结果；rank_reason 由服务端判定（null 为可以上榜），榜满按当前件数判断。
     primary(d) {
       const code = d.code;
-      if (code && order.includes(code)) return {label: '移出 R12', reason: null};
+      if (code && order.includes(code)) return {label: '移出' + RL_(), reason: null};
+      // 故事 30：拍卖模式下加入拍卖榜（只收拍卖中的货；其余条件由服务端保存时再校验）。
+      if (isAuc()) return {label: '加入拍卖榜', reason: !d.auction ? '不是拍卖中的货' : order.length >= SIZE ? fullReason() : null};
       return {label: '加入 R12', reason: d.rank_reason || (order.length >= SIZE ? REASON_FULL : null)};
     },
     async fromDetail(d) {
-      if (!d.code) return '未能加入 R12：这件货还没有货号';
+      if (!d.code) return '未能加入' + RL_() + '：这件货还没有货号';
       if (!order.includes(d.code) && !cards.has(d.code)) {
         cards.set(d.code, {item_id: d.item_id, code: d.code, name: d.name, name_lang: d.name_lang, image: d.image,
                            price: d.price, tags: d.tags || [], on_sale: d.status === 'active', rank_reason: d.rank_reason});
       }
-      return (order.includes(d.code) ? dropFromRank(d.code) : addToRank(d.code)) || '未能加入 R12';
+      return (order.includes(d.code) ? dropFromRank(d.code) : addToRank(d.code)) || '未能加入' + RL_();
     }
   };
 
@@ -651,6 +732,8 @@
   $('poolReload').onclick = loadPool;
   $('sortScore').onclick = () => setPoolSort('score');
   $('sortTime').onclick = () => setPoolSort('time');
+  document.querySelectorAll('.kindsw [data-kind]').forEach(b => { b.onclick = () => setKind(b.dataset.kind); });
+  renderKind();
   window.addEventListener('hashchange', () => show(fromHash(), true));
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && cancelDrag) { e.preventDefault(); cancelDrag(); } });
   window.addEventListener('curio:detail-closed', () => {

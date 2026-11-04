@@ -2,6 +2,7 @@
 
 覆盖 I/O 矩阵的服务器一侧：首次发布、缺图拒收、隐藏即时、隐藏晚于快照、旧快照、未登录、筛选、续载、白名单。
 """
+import calendar
 import hashlib
 import json
 import os
@@ -479,3 +480,116 @@ def test_load_more_stops_at_max_shown(client, monkeypatch):
     last = client.get('/api/pool?offset=20').json()
     assert last['count'] == 10 and last['next_offset'] is None
     assert client.get('/api/pool?offset=30').json()['count'] == 0
+
+
+# ---------- 故事 30：snapshot.v2 拍卖榜 ----------
+
+def _z(epoch):
+    return time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(epoch))
+
+
+def build_v2(client, clock, publish_no, n_normal=3, ends_hours=(5, 30, -1)):
+    """v2 快照：n_normal 件普通货（都在 pool、前两件上榜）+ 每个 ends_hours 一件拍卖货（在 rank_auction，带 ends）。"""
+    items = []
+    for n in range(1, n_normal + len(ends_hours) + 1):
+        items.append(make_item(n, [(put_image(client, f'v2b{n}-{publish_no}'), put_image(client, f'v2t{n}-{publish_no}'))]))
+    normal, auction = items[:n_normal], items[n_normal:]
+    for it, h in zip(auction, ends_hours):
+        it['ends'] = _z(clock.now + h * 3600)
+    payload = build(publish_no, items, rank=[it['code'] for it in normal[:2]])
+    payload.update(schema_version=2, pool=[it['code'] for it in normal], rank_auction=[it['code'] for it in auction])
+    return payload, normal, auction
+
+
+def test_v2_snapshot_accepted_and_auction_column_shown(client, clock):
+    payload, normal, auction = build_v2(client, clock, 7)
+    r = send(client, 'snapshot', payload)
+    assert r.status_code == 200 and r.json()['applied'] is True, r.text
+    sign_in(client)
+    html = client.get('/').text
+    assert rank_codes(html) == [it['code'] for it in normal[:2]]
+    assert pool_codes(html) == [it['code'] for it in normal]                  # 拍卖货不进全部藏品
+    assert '全部藏品 <span class="mono cnt">3</span>' in html
+    shown = re.findall(r'<a class="rk-a au-a" href="/item/(CO-\d+)"', html)
+    assert shown == [auction[0]['code'], auction[1]['code']]                  # 已结束的（-1 小时）即时不显示
+    assert '拍卖中 <span class="mono cnt">2</span>' in html and '当前出价' in html and '结束（北京时间）' in html
+    assert not re.search(r'\bscore|综合分|分数|理由', html, re.I)
+    clock.now += 6 * 3600                                                     # 第一件（5 小时后结束）也过了
+    html = client.get('/').text
+    assert re.findall(r'<a class="rk-a au-a" href="/item/(CO-\d+)"', html) == [auction[1]['code']]
+    clock.now += 30 * 3600                                                    # 都结束：整栏不出现
+    assert 'id="h-auc"' not in client.get('/').text
+
+
+def test_v2_hidden_auction_not_shown(client, clock):
+    payload, _, auction = build_v2(client, clock, 8, ends_hours=(5, 30))
+    assert send(client, 'snapshot', payload).status_code == 200
+    assert hide(client, auction[0]['code'], 9).status_code == 200
+    sign_in(client)
+    html = client.get('/').text
+    assert re.findall(r'<a class="rk-a au-a" href="/item/(CO-\d+)"', html) == [auction[1]['code']]
+
+
+def test_v1_snapshot_has_no_auction_column(client):
+    publish(client, 3, n_items=5)
+    sign_in(client)
+    assert 'id="h-auc"' not in client.get('/').text
+
+
+@pytest.mark.parametrize('mutate, detail', [
+    (lambda p, n, a: p['pool'].append(a[0]['code']), '拍卖榜里有在商品池的货'),
+    (lambda p, n, a: p['rank_auction'].append('CO-9999'), '不是同一组货'),
+    (lambda p, n, a: a[0].pop('ends'), '须带结束时间'),
+    (lambda p, n, a: n[0].update(ends='2026-11-05T10:00:00.000Z'), '须带结束时间'),
+    (lambda p, n, a: a[0].update(ends='2026-11-05 10:00'), '契约'),
+    (lambda p, n, a: p['rank'].append(a[0]['code']), '榜里有不在商品池的货'),
+    (lambda p, n, a: p.pop('rank_auction'), '契约'),
+    (lambda p, n, a: p.update(rank_auction=[it['code'] for it in a] * 5), '契约'),
+    (lambda p, n, a: p.update(rank_auction=[a[0]['code'], a[0]['code']]), '契约'),
+])
+def test_bad_v2_snapshot_rejected(client, clock, mutate, detail):
+    payload, normal, auction = build_v2(client, clock, 4)
+    mutate(payload, normal, auction)
+    r = send(client, 'snapshot', payload)
+    assert r.status_code == 400 and detail in r.text, r.text
+
+
+def test_v1_snapshot_with_auction_fields_rejected(client, clock):
+    payload, _, _ = build_v2(client, clock, 4)
+    payload['schema_version'] = 1
+    r = send(client, 'snapshot', payload)
+    assert r.status_code == 400 and '契约' in r.text
+
+
+def test_view_rank_auction_filters_ended_and_hidden():
+    items = [make_item(n, []) for n in (1, 2, 3)]
+    items[1]['ends'] = '2026-11-05T10:00:00.000Z'
+    items[2]['ends'] = '2026-11-04T10:00:00.000Z'
+    payload = {'schema_version': 2, 'publish_no': 1, 'hide_watermark': 1, 'rank': [], 'pool': ['CO-0001'],
+               'rank_auction': ['CO-0002', 'CO-0003'], 'items': items, 'tombstones': []}
+    snapshot.check_snapshot(payload)
+    now = calendar.timegm((2026, 11, 4, 12, 0, 0))
+    assert [it['code'] for it in snapshot.View(1, None, payload, {}, now=now).rank_auction] == ['CO-0002']
+    assert snapshot.View(1, None, payload, {'CO-0002': 'sold'}, now=now).rank_auction == []
+    assert [it['code'] for it in snapshot.View(1, None, payload, {}, now=now).pool] == ['CO-0001']
+
+
+def test_check_snapshot_rejects_duplicate_rank_auction():
+    items = [make_item(n, []) for n in (1, 2)]
+    items[1]['ends'] = '2026-11-05T10:00:00.000Z'
+    payload = {'schema_version': 2, 'publish_no': 1, 'hide_watermark': 1, 'rank': [], 'pool': ['CO-0001'],
+               'rank_auction': ['CO-0002', 'CO-0002'], 'items': items, 'tombstones': []}
+    with pytest.raises(snapshot.BadSnapshot, match='重复'):
+        snapshot.check_snapshot(payload)
+
+
+def test_auction_item_page_shows_bid_and_end_then_closes(client, clock):
+    payload, _, auction = build_v2(client, clock, 11, ends_hours=(5,))
+    assert send(client, 'snapshot', payload).status_code == 200
+    sign_in(client)
+    code = auction[0]['code']
+    r = client.get('/item/' + code)
+    assert r.status_code == 200 and '当前出价' in r.text and '结束（北京时间）' in r.text and '卖家原价' not in r.text
+    clock.now += 6 * 3600                                                 # 结束时间已过：不在展出
+    r = client.get('/item/' + code)
+    assert r.status_code == 404 and '当前出价' not in r.text

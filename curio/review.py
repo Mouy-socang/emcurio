@@ -264,7 +264,12 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 return self.reply(200,(ROOT/'curio/triage.js').read_text(),'application/javascript; charset=utf-8')
             if url.path=='/ranking.js':
                 return self.reply(200,(ROOT/'curio/ranking.js').read_text(),'application/javascript; charset=utf-8')
-            if url.path=='/api/pool':return self.reply(200,ranking.pool(store,root))
+            if url.path in ('/api/pool','/api/rank'):
+                # 故事 30：kind=auction 为拍卖商品池 / 拍卖榜 R12_auction；缺省 normal。
+                kind=parse_qs(url.query).get('kind',['normal'])[0]
+                if kind not in ranking.KINDS:return self.reply(400,{'error':'kind 只能是 normal 或 auction'})
+                if url.path=='/api/pool':return self.reply(200,ranking.pool(store,root,kind))
+                return self.reply(200,ranking.rank_state(store,root,kind))
             if url.path=='/api/guests':
                 # 06 客人：refresh=1（打开分区时）先拉一次账号名单；失败只记下，照常返回上次的名单。
                 q=parse_qs(url.query);pulled=None
@@ -286,7 +291,6 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
             if url.path=='/api/guests/search':
                 try:return self.reply(200,{'results':guests.search(gc_settings(),parse_qs(url.query).get('q',[''])[0])})
                 except guests.GuestError as e:return self.reply(400,{'error':str(e)})
-            if url.path=='/api/rank':return self.reply(200,ranking.rank_state(store,root))
             if url.path=='/api/auctions':
                 # 故事 20：拍卖新品（纯拍卖新货）：未结束的按结束时间近到远，已结束的在后；游标续载。
                 q=parse_qs(url.query)
@@ -368,8 +372,10 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 data=json.loads(self.rfile.read(length))
                 if not isinstance(data,dict):raise ValueError('请求格式无效')
                 if self.path=='/api/rank':
-                    result=ranking.save_rank(store,data['codes'],data['request_id']);drop_preview()
-                    return self.reply(200,dict(ranking.rank_state(store,root),saved=result['rank']))
+                    kind=data.get('kind','normal')
+                    if kind not in ranking.KINDS:raise ValueError('kind 只能是 normal 或 auction')
+                    result=ranking.save_rank(store,data['codes'],data['request_id'],kind);drop_preview()
+                    return self.reply(200,dict(ranking.rank_state(store,root,kind),saved=result['rank']))
                 if self.path=='/api/pool/action':
                     result=ranking.pool_action(store,data['action'],data['item_id'],data['request_id'])
                     drop_preview()

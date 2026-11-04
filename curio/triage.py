@@ -137,7 +137,8 @@ def _baseline_if_new(c, iid):
 
 def _reconcile(c, iid):
     """AD-5：已发布的货离开 / 回到在售时，同一事务入发件箱隐藏 / 取消隐藏（curio/publish）。"""
-    from .publish import reconcile  # 延迟导入：publish 依赖本模块
+    from .publish import leave_auction_rank, reconcile  # 延迟导入：publish 依赖本模块
+    leave_auction_rank(c, iid)      # 故事 30：离开留下（移出、售出、去掉、撤销……）同一事务从拍卖榜撤下
     return reconcile(c, iid)
 
 

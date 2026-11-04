@@ -20,6 +20,7 @@ contract/
 | 指令：停用账号 `disable_account`（AD-2、AD-8、AD-24；`command_id` + 按账号单调的 `target_seq`，与 `reset_password` 共用计数器 `account:<account_id>`；停用使全部会话与重设链接失效，不可恢复） | Mac → 服务器 | `disable_account.v1.schema.json` |
 | 指令：重置密码 `reset_password`（AD-24；Mac 生成 12 位临时密码，服务器只存哈希、`events` 表存 HMAC；重置使全部会话与重设链接失效；Mac 发件箱明文在确认后抹掉） | Mac → 服务器 | `reset_password.v1.schema.json` |
 | 发布快照 `snapshot`（AD-5、AD-6、AD-22；字段即 AD-6 白名单；可选 `orders`：账号编号 → 该账号的商品池货号顺序，AD-11 / 故事 18，旧快照没有此字段时全员墨墨顺序） | Mac → 服务器 | `snapshot.v1.schema.json` |
+| 发布快照 v2（故事 30；= v1 + 必带 `rank_auction`：拍卖榜 0–12 个货号，都在 `items`、不在 `pool`；`items` = `pool` ∪ `rank_auction`；拍卖榜的货必带 `ends`（UTC 毫秒 Z），别的货不带。服务器同时读 v1 / v2；Mac 由 `config/settings.yaml` 的 `publish.snapshot_version` 决定发哪版，服务器部署前保持 1） | Mac → 服务器 | `snapshot.v2.schema.json` |
 | 隐藏推送 `hide`（含 `action: unhide`；`hide_seq` 与快照 `publish_no` 同一计数器；`reason: sold` 含原平台下架与墨墨标记售出） | Mac → 服务器 | `hide.v1.schema.json` |
 | 心跳 `heartbeat`（AD-10；每轮直接发送、不进发件箱；各平台已发布货下架检查最近成功时间，服务器只留 `sent_at` 最新的一份、不存入事件表） | Mac → 服务器 | `heartbeat.v1.schema.json` |
 | 账号名单（`GET /admin/accounts` 的响应；只有账号编号、用户名、微信名/称呼、状态、注册时间、`account_rev`，不含邮箱与任何哈希；Mac 按 `account_id` 覆盖写，服务器没有的账号不删） | 服务器 → Mac（Mac 拉取） | `accounts_list.v1.schema.json` |

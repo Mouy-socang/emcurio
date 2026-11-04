@@ -11,6 +11,8 @@
   集合里不在顺序中的按墨墨顺序排在末尾）。榜、单件页与筛选项不变。
 - 心跳（AD-10）：只留 sent_at 最新的一份；heartbeat_stale() 判断已发布货下架检查是否超过 2 小时未成功
   （从未发布过快照时不提示；发布过但从未收到心跳、或某平台没有成功时间时提示）。
+- 拍卖榜（故事 30，snapshot.v2）：rank_auction 为拍卖榜货号，这些货在 items 里、不在 pool 里、带 ends；
+  View.rank_auction 去掉隐藏的与结束时间已过的（按读取时的服务器时间即时判断，不等下一次发布）。v1 快照没有拍卖榜。
 """
 import copy
 import datetime
@@ -21,6 +23,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 CODE_RE = re.compile(r'CO-[0-9]{4,8}')
@@ -94,10 +97,25 @@ def check_snapshot(payload):
     _codes(codes, 'items')
     _codes(payload['pool'], 'pool')
     _codes(payload['rank'], 'rank')
-    if sorted(codes) != sorted(payload['pool']):
-        raise BadSnapshot('pool 与 items 不是同一组货')
-    if not set(payload['rank']) <= set(codes):
+    # 故事 30（v2）：items = pool ∪ rank_auction，两者不相交；拍卖榜的货都带 ends，别的货不带。v1 没有拍卖榜。
+    auction = payload.get('rank_auction') or []
+    _codes(auction, 'rank_auction')
+    if set(auction) & set(payload['pool']):
+        raise BadSnapshot('拍卖榜里有在商品池的货')
+    if sorted(codes) != sorted(payload['pool'] + auction):
+        raise BadSnapshot('pool（与拍卖榜）与 items 不是同一组货')
+    if not set(payload['rank']) <= set(payload['pool']):
         raise BadSnapshot('榜里有不在商品池的货')
+    for item in payload['items']:
+        if (item['code'] in auction) != ('ends' in item):
+            raise BadSnapshot('拍卖榜的货须带结束时间，别的货不带')
+        if 'ends' in item:
+            if not TS_RE.fullmatch(item['ends']):
+                raise BadSnapshot('结束时间格式不对')
+            try:
+                _epoch(item['ends'])
+            except ValueError:
+                raise BadSnapshot('结束时间无效') from None
     tomb = [t['code'] for t in payload['tombstones']]
     _codes(tomb, 'tombstones')
     if set(tomb) & set(codes):
@@ -318,7 +336,7 @@ _lock = threading.Lock()
 class View:
     """当前快照减去隐藏集合。"""
 
-    def __init__(self, publish_no, received_at, payload, hidden, hidden_at=None):
+    def __init__(self, publish_no, received_at, payload, hidden, hidden_at=None, now=None):
         self.publish_no = publish_no
         self.received_at = received_at
         self.items = {it['code']: it for it in payload['items']} if payload else {}
@@ -327,6 +345,10 @@ class View:
         self.tombstones = {t['code']: t for t in payload['tombstones']} if payload else {}
         self.rank = [self.items[c] for c in (payload['rank'] if payload else []) if c not in hidden]
         self.pool = [self.items[c] for c in (payload['pool'] if payload else []) if c not in hidden]
+        # 故事 30：拍卖中（v2）——去掉隐藏的与结束时间已过的（now：Unix 秒，None 为现在）；v1 快照为空。
+        now = time.time() if now is None else now
+        self.rank_auction = [self.items[c] for c in ((payload.get('rank_auction') or []) if payload else [])
+                             if c not in hidden and _live(self.items[c].get('ends'), now)]
         self.fx_rate = payload.get('fx_rate') if payload else None
         self.fx_date = payload.get('fx_date') if payload else None
         self.orders = (payload.get('orders') or {}) if payload else {}
@@ -346,6 +368,10 @@ class View:
     def item_state(self, code, now=None):
         """'show' / 'sold' / 'removed' / None（不在快照里，或隐藏、离开已超过 90 天）。now：Unix 秒，None 时不判保留期。"""
         if code in self.items:
+            # 故事 30：拍卖货结束时间已过即不在展出（与不在快照里一样，不等下一次发布）。
+            ends = self.items[code].get('ends')
+            if ends is not None and not _live(ends, time.time() if now is None else now):
+                return None
             if code not in self.hidden:
                 return 'show'
             if _expired(self.hidden_at.get(code), now):
@@ -355,6 +381,14 @@ class View:
             t = self.tombstones[code]
             return None if _expired(t['at'], now) else t['status']
         return None
+
+
+def _live(ends, now):
+    """拍卖还没结束（结束时间读不出的不显示）。"""
+    try:
+        return _epoch(ends) > now
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _expired(at, now):
@@ -367,15 +401,15 @@ def _expired(at, now):
     return now - t > TOMBSTONE_DAYS * 86400
 
 
-def current_view(c, db_key=''):
-    """db_key：库的标识（路径），解析缓存按 (库, 编号, 接收时间) 区分。"""
+def current_view(c, db_key='', now=None):
+    """db_key：库的标识（路径），解析缓存按 (库, 编号, 接收时间) 区分。now：Unix 秒（拍卖是否已结束；None 为现在）。"""
     row = c.execute('SELECT publish_no, payload, received_at FROM snapshots ORDER BY publish_no DESC LIMIT 1'
                     ).fetchone()
     hides = c.execute('SELECT code, reason, at FROM hides WHERE hidden=1').fetchall()
     hidden = {r[0]: r[1] for r in hides}
     hidden_at = {r[0]: r[2] for r in hides}
     if row is None:
-        return View(0, None, None, hidden, hidden_at)
+        return View(0, None, None, hidden, hidden_at, now)
     no = row[0]
     key = (str(db_key), no, row[2])
     with _lock:
@@ -385,7 +419,7 @@ def current_view(c, db_key=''):
             if len(_cache) > 8:
                 _cache.clear()
             _cache[key] = payload
-    return View(no, row[2], payload, hidden, hidden_at)
+    return View(no, row[2], payload, hidden, hidden_at, now)
 
 
 def filter_options(pool):

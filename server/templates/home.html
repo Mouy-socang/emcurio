@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "_macros.html" import site_head, site_foot %}
-{% from "_pool.html" import card, rank_card %}
+{% from "_pool.html" import card, rank_card, auction_card %}
 {% block body %}
 <span hidden data-signed-in></span>
 {# 故事 15（AD-25）：行为事件标记；预览（AD-28）与停用页不带，guest.js 见不到就不上报。 #}
@@ -10,7 +10,7 @@
   <p class="eb" aria-hidden="true">Today's Twelve</p>
   <h1 class="display">MyR12</h1>
 </div>
-{% if not rank and not pool_total %}
+{% if not rank and not pool_total and not rank_auction %}
 <div class="empty">
   <p>墨墨正在准备今天的藏品，请稍后再来。</p>
 </div>
@@ -19,6 +19,16 @@
 <ol class="rank" aria-label="MyR12，{{ rank|length }} 件">
 {% for it in rank %}{{ rank_card(loop.index, it, cur) }}
 {% endfor %}</ol>
+{% endif %}
+{# 故事 30：拍卖中（快照 v2 的拍卖榜）；结束时间已过的服务器端即时不显示，为空时整栏不出现。不显示分数。 #}
+{% if rank_auction %}
+<section class="auc" id="auction" aria-labelledby="h-auc">
+  <p class="eb" aria-hidden="true">On Auction</p>
+  <h2 class="section" id="h-auc">拍卖中 <span class="mono cnt">{{ rank_auction|length }}</span></h2>
+  <ol class="rank" aria-label="拍卖中，{{ rank_auction|length }} 件">
+  {% for it in rank_auction %}{{ auction_card(it, cur) }}
+  {% endfor %}</ol>
+</section>
 {% endif %}
 <section class="pool" id="pool" aria-labelledby="h-pool">
   <p class="eb" aria-hidden="true">All Objects</p>

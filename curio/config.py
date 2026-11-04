@@ -66,7 +66,28 @@ def load(root=ROOT):
     defaults['fee_tiers']=fee_tiers(root)
     # CAP-14：GoodCustomer 资料库与 gcdb.py 路径（展开 ~；不存在时不报错，06 客人提示找不到资料库）。
     defaults['goodcustomer']=goodcustomer(settings.get('goodcustomer'))
+    # 故事 30：发布快照版本（1 = snapshot.v1；2 = snapshot.v2，带拍卖榜）。服务器部署能读 v2 之前保持 1。
+    defaults['publish']=publish_settings(settings.get('publish'))
     return defaults
+
+SNAPSHOT_VERSIONS=(1,2)
+
+def publish_settings(value):
+    """校验 settings.yaml 的 publish 段：{snapshot_version: 1 或 2}（缺省 1）。"""
+    if value is None:value={}
+    if not isinstance(value,dict):raise ValueError('publish 必须为映射（snapshot_version）')
+    unknown=set(value)-{'snapshot_version'}
+    if unknown:raise ValueError('publish 含未知键：'+','.join(sorted(map(str,unknown))))
+    version=value.get('snapshot_version',1)
+    if type(version) is not int or version not in SNAPSHOT_VERSIONS:
+        raise ValueError('publish.snapshot_version 必须为 1 或 2')
+    return dict(snapshot_version=version)
+
+def snapshot_version(root=ROOT):
+    """发布快照版本（config/settings.yaml 的 publish.snapshot_version；缺省 1）。只读这一段，不做 load() 的全部校验。"""
+    try:settings=yaml.safe_load((Path(root)/'config/settings.yaml').read_text()) or {}
+    except FileNotFoundError:return 1
+    return publish_settings(settings.get('publish') if isinstance(settings,dict) else None)['snapshot_version']
 
 DEFAULT_GC_DB='~/Desktop/goodcustomerDB'
 DEFAULT_GCDB='~/Desktop/goodcustomer-plugin/skills/gc-schema/scripts/gcdb.py'

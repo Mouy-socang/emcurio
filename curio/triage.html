@@ -93,7 +93,7 @@ img{display:block}
 .arlist .t{font-family:var(--serif);font-weight:600;font-size:14px;line-height:1.35;text-align:left;background:none;border:0;padding:0;cursor:pointer;min-height:var(--tap);display:flex;align-items:center;overflow-wrap:anywhere}
 .arlist .p{font-size:14px}
 .arlist .r{color:var(--muted);overflow-wrap:anywhere}
-.arlist .when{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.arlist .when,#poolView .when,#rankView .when{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .arlist .btn{margin-top:8px;width:100%}
 .arlist .acts2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .kline{font-size:14px;min-height:var(--tap);display:flex;align-items:center;flex-wrap:wrap;gap:0 4px}
@@ -291,9 +291,9 @@ img{display:block}
 .agsw .btn[aria-pressed="true"]{background:var(--inv);color:var(--inv-ink)}
 .prow .th.static{cursor:default}
 .prow p.t{min-height:0;cursor:default}
-.arlist .left{font-weight:600}
-.arlist .left.soon{background:var(--inv);color:var(--inv-ink);padding:0 6px}
-.arlist .ended{color:var(--muted)}
+.arlist .left,#poolView .left,#rankView .left{font-weight:600}
+.arlist .left.soon,#poolView .left.soon,#rankView .left.soon{background:var(--inv);color:var(--inv-ink);padding:0 6px}
+.arlist .ended,#poolView .ended,#rankView .ended{color:var(--muted)}
 .st .auc{font-weight:600}
 
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
@@ -346,7 +346,7 @@ img{display:block}
 </section>
 <section id="aucView" hidden aria-labelledby="aucTitle">
   <div class="arhead"><button class="lnk lnk-pad" id="aucBack" type="button">返回</button><h1 id="aucTitle" tabindex="-1">拍卖新品 <span class="mono" id="aucN2"></span></h1></div>
-  <p class="reason muted">eBay 纯拍卖的新货，不进新货瀑布流。即将结束的在前；已过结束时间的在后，待复查。留下后进 02 商品池（拍卖中不能上 R12），拍下后可「转为普通货」。</p>
+  <p class="reason muted">eBay 纯拍卖的新货，不进新货瀑布流。即将结束的在前；已过结束时间的在后，待复查。留下后进 02 的「拍卖」商品池（可加入拍卖榜，不能上普通 R12），拍下后可「转为普通货」。</p>
   <p class="im" id="aucMsg" role="alert" hidden></p>
   <ul class="arlist" id="aucList" aria-label="拍卖新品，即将结束的在前"></ul>
   <div class="empty" id="aucEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>没有拍卖新品</h2></div>
@@ -355,22 +355,27 @@ img{display:block}
 </section>
 <section id="poolView" hidden aria-labelledby="h02">
   <h1 class="vh" id="h02" tabindex="-1">商品池</h1>
-  <p class="poolsum">已留下 <span class="mono" id="poolN">—</span> 件 · R12 <span class="mono" id="poolRankN">—</span> / <span class="mono">12</span></p>
+  <div class="psort kindsw" role="group" aria-label="普通 / 拍卖">
+    <button class="btn" type="button" data-kind="normal" aria-pressed="true">普通</button><button class="btn" type="button" data-kind="auction" aria-pressed="false">拍卖</button></div>
+  <p class="poolsum"><span id="poolL">已留下</span> <span class="mono" id="poolN">—</span> 件 · <span id="poolRankL">R12</span> <span class="mono" id="poolRankN">—</span> / <span class="mono">12</span></p>
   <p class="im" id="poolErr" role="alert" hidden>未能读取商品池 · <button class="lnk lnk-pad" id="poolReload" type="button">重试</button></p>
   <div class="psort" role="group" aria-label="商品池排序">
     <button class="btn" id="sortScore" type="button" aria-pressed="true">按分数</button><button class="btn" id="sortTime" type="button" aria-pressed="false">按进池时间</button></div>
   <ol class="plist" id="poolList" aria-label="已留下的货，按分数高到低"></ol>
-  <div class="empty" id="poolEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>商品池还没有货</h2><p class="muted">在 01 新货里留下的货会出现在这里。</p></div>
+  <div class="empty" id="poolEmpty" hidden><p class="big" aria-hidden="true">0</p><h2 id="poolEmptyH">商品池还没有货</h2><p class="muted" id="poolEmptyP">在 01 新货里留下的货会出现在这里。</p></div>
   <h2 class="sub" id="outH" hidden>已移出商品池 <span class="mono" id="outN"></span></h2>
   <ol class="plist" id="outList" aria-labelledby="outH" hidden></ol>
 </section>
 <section id="rankView" hidden aria-labelledby="h03">
   <h1 class="vh" id="h03" tabindex="-1">R12</h1>
+  <div class="psort kindsw" role="group" aria-label="普通 / 拍卖">
+    <button class="btn" type="button" data-kind="normal" aria-pressed="true">普通</button><button class="btn" type="button" data-kind="auction" aria-pressed="false">拍卖</button></div>
   <p class="pub" id="pubLine" aria-live="polite"></p>
+  <p class="im" id="aucNote" hidden>客人页暂不显示拍卖榜：服务器更新并把 snapshot_version 改为 2 后开启</p>
   <p class="im" id="rankErr" role="alert" hidden></p>
   <p class="im" id="rankOff" hidden></p>
   <ol class="rl" id="rankList" aria-label="R12，按名次"></ol>
-  <div class="empty" id="rankEmpty" hidden><p class="big" aria-hidden="true">0</p><h2>R12 还是空的</h2><p class="muted">从 02 商品池"加入 R12"（最多 12 件，不必排满）；空着也可以预览、发布。</p><p><a class="btn" href="/#pool">去 02 商品池</a></p></div>
+  <div class="empty" id="rankEmpty" hidden><p class="big" aria-hidden="true">0</p><h2 id="rankEmptyH">R12 还是空的</h2><p class="muted" id="rankEmptyP">从 02 商品池"加入 R12"（最多 12 件，不必排满）；空着也可以预览、发布。</p><p><a class="btn" href="/#pool">去 02 商品池</a></p></div>
   <div class="foot"><button class="btn primary" id="btnPreview" type="button">预览</button><p class="reason" id="whyPreview" hidden></p></div>
   <p class="im" id="previewMsg" role="alert" hidden></p>
 </section>
