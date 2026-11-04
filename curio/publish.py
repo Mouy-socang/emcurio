@@ -101,7 +101,9 @@ def ensure(c):
     # 故事 11：发布当时的内容指纹（status_fingerprint），用于"有未发布的修改"。
     # 故事 18：这份快照里有个性化顺序的账号数（orders）。
     cols = {r[1] for r in c.execute('PRAGMA table_info(publishes)')}
-    for col, decl in (('status_fp', 'TEXT'), ('orders', 'INTEGER NOT NULL DEFAULT 0')):
+    # 早期建的库缺 status / tomb_json（只写在 CREATE TABLE 里），老库在这里补上。
+    for col, decl in (('status', "TEXT NOT NULL DEFAULT 'pending'"), ('tomb_json', "TEXT NOT NULL DEFAULT '[]'"),
+                      ('status_fp', 'TEXT'), ('orders', 'INTEGER NOT NULL DEFAULT 0')):
         if col not in cols:
             try:
                 c.execute(f'ALTER TABLE publishes ADD COLUMN {col} {decl}')

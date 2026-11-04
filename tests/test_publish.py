@@ -927,3 +927,14 @@ def test_tombstone_window_uses_clock(db, cfg):
             c.execute('INSERT INTO publish_history(code,item_id,first_no,last_no,left_at,left_status) VALUES(?,?,?,?,?,?)',
                       (code, 'x' + code, 1, 1, publish._iso(now - days * 86400), 'sold'))
         assert [t['code'] for t in publish._tombstones(c, set(), now)] == ['CO-0902']
+
+
+def test_old_publishes_table_gets_missing_columns(tmp_path):
+    # 早期建的库：publishes 没有 status / tomb_json / status_fp / orders，ensure 补齐后可正常读写。
+    c = sqlite3.connect(tmp_path / 'old.db')
+    c.execute('''CREATE TABLE publishes(publish_no INTEGER PRIMARY KEY, event_id TEXT NOT NULL, created_at TEXT NOT NULL,
+        rank TEXT NOT NULL, pool_size INTEGER NOT NULL, tombstones INTEGER NOT NULL, images INTEGER NOT NULL)''')
+    publish.ensure(c)
+    cols = {r[1] for r in c.execute('PRAGMA table_info(publishes)')}
+    assert {'status', 'tomb_json', 'status_fp', 'orders'} <= cols
+    publish.ensure(c)          # 再跑一次不报错
