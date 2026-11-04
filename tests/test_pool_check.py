@@ -250,6 +250,28 @@ def test_kleinanzeigen_pool_items_checked(db, cfg):
     assert summary['gone'] == 1 and status(db, ka) == 'gone'
 
 
+
+def test_kleinanzeigen_sold_listing_with_disabled_contact_is_gone(db, cfg):
+    # 卖掉没删的广告：HTTP 200，"发消息"按钮被禁用（CO-0360 实测页面的写法）。
+    ka = add(db, cfg, 1, platform='kleinanzeigen', checked_hours_ago=8, image='')
+    page = ('<h1 id="viewad-title" data-soldlabel="Verkauft">Vase</h1>'
+            '<button disabled id="viewad-contact-button" class="button full-width taller" type="button">'
+            '<i class="button-icon-disabled icon-mail-disabled"></i></button>')
+    with patch('curio.curio_monitor.ka_curl', return_value=(200, page, 'https://www.kleinanzeigen.de/s-anzeige/x/1', None)):
+        summary = curio_monitor.check_pool(db, None, cfg)
+    assert summary['gone'] == 1 and status(db, ka) == 'gone'
+
+
+def test_kleinanzeigen_active_listing_with_soldlabel_attribute_stays_active(db, cfg):
+    # 在售页面也带 data-soldlabel="Verkauft"（模板属性）和登录用的 viewad-contact-button-login：不能误判。
+    ka = add(db, cfg, 1, platform='kleinanzeigen', checked_hours_ago=8, image='')
+    page = ('<h1 id="viewad-title" data-soldlabel="Verkauft">Tasse</h1>'
+            '<button id="viewad-contact-button-login" class="viewad-contact-button-login" type="button"></button>'
+            '<h2 id="viewad-price">50 € VB</h2>')
+    with patch('curio.curio_monitor.ka_curl', return_value=(200, page, 'https://www.kleinanzeigen.de/s-anzeige/x/1', None)):
+        summary = curio_monitor.check_pool(db, None, cfg)
+    assert summary['gone'] == 0 and status(db, ka) == 'active'
+
 # ---------- 存档 ----------
 
 def test_archive_pool_snapshots_twelve_local_images(db, cfg, root):

@@ -281,6 +281,7 @@ def _apply_etsy(store,row,outcome,evidence,listing,config):
     except Exception:outcome,evidence='error','status update failed; state retained'
     return outcome,evidence
 
+KA_SOLD=re.compile(r'<button\b[^>]*\bdisabled\b[^>]*\bid="viewad-contact-button"|<button\b[^>]*\bid="viewad-contact-button"[^>]*\bdisabled\b')
 def _check_one(store,row,api,config,budget=None):
     """单平台（eBay / Kleinanzeigen）判定一件货当前是否在售，并落库（下架 mark_gone、在售刷新价格）。
     返回 (outcome, evidence)：active / gone / paused / error。预算用完时抛 BudgetExhausted（未发出请求、不应写记录）。
@@ -306,6 +307,8 @@ def _check_one(store,row,api,config,budget=None):
             elif status in (404,410):outcome='gone';evidence='HTTP '+str(status)
             elif re.search(r'Anzeige ist nicht mehr verfügbar|Anzeige wurde gelöscht',raw,re.I):outcome='gone';evidence='explicit unavailable/deleted text; sale unknown'
             elif '/s-anzeige/' not in url or row['item_id'].removeprefix('ka:') not in url:evidence='redirect; original listing not verified'
+            # 卖掉但没删的广告照样 HTTP 200，只是"发消息"按钮被禁用（2026-11-04 CO-0360）。
+            elif KA_SOLD.search(raw):outcome='gone';evidence='contact button disabled; sold'
             else:
                 match=re.search(r'id="viewad-price"[^>]*>([\s\S]*?)</',raw)
                 if match:
