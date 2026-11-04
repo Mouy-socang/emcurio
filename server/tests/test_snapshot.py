@@ -314,6 +314,24 @@ def test_no_origin_platform_urls_anywhere(client):
     assert 'style=' not in html and '<script>' not in html
 
 
+@pytest.mark.parametrize('extra', [{'score': 87.5}, {'reason': '综合分理由：口味 55'},
+                                   {'match_reason': '对上：品牌 · 图案 · 器型'}])
+def test_snapshot_with_score_or_reason_rejected(client, extra):
+    """故事 29：快照里不能带分数、理由、匹配原因（白名单拒收整份），客人页因而不可能显示它们。"""
+    items = [make_item(n, [(put_image(client, f'sb{n}'), put_image(client, f'st{n}'))]) for n in range(1, 4)]
+    items[1].update(extra)
+    assert send(client, 'snapshot', build(1, items)).status_code == 400
+
+
+def test_guest_pages_never_show_score_or_reason(client):
+    """故事 29：客人页（首页、续载接口、单件页）不出现分数、理由、匹配原因。"""
+    publish(client, 1, n_items=30)
+    sign_in(client)
+    pages = [client.get('/').text, client.get('/api/pool?offset=20').text, client.get('/item/CO-0001').text]
+    for text in pages:
+        assert not re.search(r'\bscore|\breason|综合分|对上：|分数|理由|匹配', text, re.I), text[:200]
+
+
 # ---------- 筛选与续载 ----------
 
 def test_filter_by_form_updates_summary_and_list(client):

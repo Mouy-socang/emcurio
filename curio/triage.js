@@ -1638,14 +1638,16 @@ window.curioGuests = (function () {
 })();
 
 /* ---------- 04 匹配（故事 16，CAP-5） ----------
-   按客人一行（称呼 + 配上件数；有"明说想要"的在前，再按待处理件数），点开展开逐件列表：缩略图、货号、标准名称、价格、
-   分级与理由；每件"确认"或"不合适"（带 request_id；网络或服务端失败行内"未保存 · 重试"，重试沿用同一个 request_id；
+   按客人一行（称呼 + 配上件数；按待处理件数排），点开展开逐件列表：缩略图、货号、标准名称、价格、
+   "对上：品牌 · 图案 · 器型"与需求一句（故事 29：只用近一年的需求，按一致性排）；点"看原话"展开这条需求的客人原话
+   （证据摘录原文，带日期，客人说的在前，最多 5 条；没有时显示"没有找到原话"）；每件"确认"或"不合适"（带 request_id；网络或服务端失败行内"未保存 · 重试"，重试沿用同一个 request_id；
    400 类拒绝只显示原因并重新读取）。不合适之后该行变成"已标不合适 · 撤销"，直到下一次读取。确认后出现
    "复制单件页链接"：链接 = 站点地址 + /item/CO-NNNN（不按人区分）；该件不在已送达的客人页上（未发布或已隐藏）时
    aria-disabled，原因"请先发布这件货"。剪贴板失败时显示已全选的只读输入框。 */
 window.curioMatches = (function () {
   let data = null, active = false, inflight = null, again = false, lastJson = '';
   const expanded = new Set();  // 展开的客人 customer_id
+  const quoted = new Set();    // 展开了原话的 客人|货
   const msgs = new Map();      // 客人|货 -> {text, retry, input}
   const busy = new Set();      // 客人|货：写入中
   const rids = new Map();      // 客人|货|决定 -> request_id（失败重试沿用）
@@ -1708,7 +1710,7 @@ window.curioMatches = (function () {
     const open = expanded.has(c.customer_id);
     const h = btn('mhead', null, c.customer_id + ':head');
     h.setAttribute('aria-expanded', String(open));
-    const n = el('span', 'mn', c.name); if (c.has_need) n.append(tagEl('明说想要'));
+    const n = el('span', 'mn', c.name);
     const cnt = el('span', 'mc'); cnt.append('配上 ', el('span', 'mono', c.total), ' 件');
     if (!c.pending) cnt.append(' · 已处理');
     else if (c.pending !== c.total) cnt.append(' · 待处理 ', el('span', 'mono', c.pending));
@@ -1758,8 +1760,30 @@ window.curioMatches = (function () {
     if (!it.on_sale) p.append(' · 原平台已下架');
     const why = el('p', 'why');
     if (it.decision === 'confirmed') why.append(tagEl('已确认'));
-    why.append(it.reasons.join('；'));
-    body.append(t, p, why);
+    why.append('对上：' + (it.dims || []).join(' · '));
+    const need = el('p', 'why mneed', '需求：' + (it.need_text || ''));
+    const qOpen = quoted.has(k);
+    const qb = btn('lnk lnk-pad', qOpen ? '收起原话' : '看原话', k + ':quotes');
+    const qid = 'mQ-' + k.replace(/[^A-Za-z0-9_-]/g, '_');
+    qb.setAttribute('aria-expanded', String(qOpen)); if (qOpen) qb.setAttribute('aria-controls', qid);  // 收起时原话不在页面上
+    qb.onclick = () => { if (quoted.has(k)) quoted.delete(k); else quoted.add(k); render(); };
+    need.append(' · ', qb);
+    body.append(t, p, why, need);
+    if (qOpen) {
+      const qs = it.quotes || [];
+      if (!qs.length) { const none = el('p', 'why mquotes', '没有找到原话'); none.id = qid; body.append(none); }
+      else {
+        const ol = el('ul', 'mquotes'); ol.id = qid; ol.setAttribute('aria-label', '客人原话');
+        qs.forEach(q => {
+          const li2 = el('li');
+          if (q.date) li2.append(el('span', 'mono', q.date), ' ');
+          if (!q.customer) li2.append((q.who || '对方') + '：');
+          li2.append(q.text);
+          ol.append(li2);
+        });
+        body.append(ol);
+      }
+    }
     const acts = el('div', 'acts2');
     const no = btn('btn', '不合适', k + ':reject'); no.onclick = () => decide(c, it, 'rejected');
     let w = null;

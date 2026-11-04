@@ -5,6 +5,9 @@
 # 比较一律小写、去变音（è→e、ß→ss）、全角转半角；中文词按包含比较，外文词按整词比较
 # （货的卖家标题一侧允许德语复合词词尾，如 Kaffeetasse 命中 Tasse）。
 
+# 注意（故事 29）：后台 04 匹配现在只用近 need_recent_days 天内 open 的需求（见下），按对上的品牌 / 图案 / 器型排；
+# 下面的 grades（明说想要 / 明说喜欢 / 推算口味）、explicit / inferred 与 sources 只影响千人千面排序
+# （judge.match_customer），不再决定 04 显示什么。detail_required 里的 need 对 04 与千人千面都生效。
 # 分级（大者在前）：need = needs.jsonl 里 open 的需求；explicit = preferences.jsonl 里 explicit 来源的喜好；
 # inferred = 其它来源（purchase / behavioral / inferred …）推算的喜好。
 grades:
@@ -16,6 +19,11 @@ grades:
 # 原来一件梅森杯会推给约 87 位客户）。列在这里的分级，品牌对上之外还须图案或器型也对上：
 # 明说想要 = 需求写的图案或器型对上；明说喜欢 / 推算口味 = 有一条图案或器型的喜好对上。想放宽就从列表里去掉。
 detail_required: [need, explicit, inferred]
+
+# 04 匹配只用最近这么多天内提过的需求（故事 29，墨墨 2026-11-04"先只保留最近一年的需求"）：
+# 需求的 last_seen_at（缺或解析不了则用 first_seen_at）≥ 今天 − 这么多天；两个都解析不了的当作不在近期。
+# 喜好（preferences.jsonl）暂不进 04；千人千面排序不受这项影响。
+need_recent_days: 365
 
 # 推算口味理由里附注的来源（未列出的来源照原文写）。
 sources:

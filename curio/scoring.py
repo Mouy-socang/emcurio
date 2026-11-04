@@ -129,6 +129,8 @@ def load_items(c):
 
 
 def version(params):
+    # 故事 28：曝光衰减参数只影响排序键、不影响综合分，不进综合分的版本指纹。
+    params = {k: v for k, v in params.items() if k != 'exposure'}
     return 'C:' + hashlib.sha1(json.dumps(dict(algo=ALGO, params=params), sort_keys=True).encode()).hexdigest()[:8]
 
 

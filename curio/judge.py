@@ -180,6 +180,7 @@ LABEL = {"want": "要", "probe": "询市", "skip": "不要"}
 # 生成结果全部是据卖家描述的候选，不是正式商品标题。
 import csv
 import hashlib
+import datetime
 import json
 import logging
 import os
@@ -912,8 +913,9 @@ def _cut(text):
     return text if len(text) <= MATCH_REASON_MAX else text[:MATCH_REASON_MAX] + '…'
 
 
-def _need_hit(need, facts, rules):
-    """一条需求是否对上这件货；对上时返回理由文字（不含分级前缀）。"""
+def _need_detail(need, facts, rules):
+    """一条需求与这件货：不对上返回 None；对上返回 (理由文字, 对上的维度, 需求说到的维度数)。
+    维度为 品牌 / 图案 / 器型；门槛：品牌必须对上，写了图案须对上，写了器型不能与货的器型冲突。"""
     if not isinstance(need, dict) or need.get('status') != 'open':
         return None
     makers = _strs(need.get('maker'))
@@ -933,10 +935,81 @@ def _need_hit(need, facts, rules):
     want = _form_groups(words, rules)
     if want and facts['forms'] and not (want & facts['forms']):
         return None
+    form_ok = bool(want & facts['forms'])
     # 只说了品牌（"想要梅森的东西"）不够：须再对上图案或器型（detail_required 含 need 时）。
-    if 'need' in rules['detail_required'] and not (pat_ok or (want & facts['forms'])):
+    if 'need' in rules['detail_required'] and not (pat_ok or form_ok):
         return None
-    return _cut(desc[0] if desc else '、'.join(pats + makers) or '、'.join(filters) or '需求')
+    dims = ['品牌'] + (['图案'] if pat_ok else []) + (['器型'] if form_ok else [])
+    named = 1 + bool(pats) + bool(want)
+    return _cut(desc[0] if desc else '、'.join(pats + makers) or '、'.join(filters) or '需求'), dims, named
+
+
+def _need_hit(need, facts, rules):
+    """一条需求是否对上这件货；对上时返回理由文字（不含分级前缀）。"""
+    d = _need_detail(need, facts, rules)
+    return d[0] if d else None
+
+
+def _when(value):
+    """GoodCustomer 的时间字段 → 日期（取时间自身时区的日期）；解析不了返回 None。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(('Z', 'z')):
+        text = text[:-1] + '+00:00'
+    try:
+        return datetime.datetime.fromisoformat(text).date()
+    except ValueError:
+        return None
+
+
+def berlin_today():
+    """今天（Europe/Berlin 日期，与主机时区无关）。"""
+    from zoneinfo import ZoneInfo
+    return datetime.datetime.now(ZoneInfo('Europe/Berlin')).date()
+
+
+def need_recent(need, rules, today=None):
+    """需求是否在近期内（matching.yaml 的 need_recent_days）：last_seen_at，缺或解析不了用 first_seen_at；
+    都解析不了的当作不在近期。today：datetime.date，缺省为 Europe/Berlin 的今天。"""
+    if not isinstance(need, dict):
+        return False
+    today = today or berlin_today()
+    seen = _when(need.get('last_seen_at')) or _when(need.get('first_seen_at'))
+    return seen is not None and seen >= today - datetime.timedelta(days=rules['need_recent_days'])
+
+
+def need_match(need, facts, rules, today):
+    """04 匹配（故事 29）：一条近期 open 的需求与一件货。不匹配返回 None；匹配返回
+    dict(dims=[对上的 品牌/图案/器型], named=需求说到的维度数, text=需求一句)。门槛与 _need_hit 相同。"""
+    if not facts.get('brand') or not need_recent(need, rules, today):
+        return None
+    d = _need_detail(need, facts, rules)
+    if not d:
+        return None
+    return dict(dims=d[1], named=d[2], text=d[0])
+
+
+def best_need_match(facts, needs, prefs, rules, today):
+    """一位客人与一件货在 04 的匹配：只看近期 open 的需求（喜好不构成匹配；不喜欢的维度对上仍排除，与 match_customer
+    一致）。几条需求都对上时取一致性最高的（对上项数多、全部对上的在前，同等取先出现的）。
+    不匹配返回 None；匹配返回 need_match 的结果加 need（那条需求的原行）。"""
+    if not facts.get('brand'):
+        return None
+    prefs = [p for p in prefs if isinstance(p, dict) and p.get('status') == 'active']
+    if customer_dislikes(facts, prefs, rules):
+        return None
+    best = None
+    for n in needs:
+        m = need_match(n, facts, rules, today)
+        if m and (best is None or consistency_key(m) < consistency_key(best)):
+            best = dict(m, need=n)
+    return best
+
+
+def consistency_key(m):
+    """一致性排序键（小者在前）：对上项数多的在前；同项数时需求说到的全部对上的在前。"""
+    return (-len(m['dims']), len(m['dims']) < m['named'])
 
 
 def _pref_dim(pref, rules):
@@ -1371,3 +1444,34 @@ def composite_scores(items, demand, names, params):
         out[iid] = dict(parts, score=composite_total(parts, params),
                         reason=composite_reason(parts, why, names, demand is not None))
     return out
+
+
+# ---------------------------------------------------------------- 曝光衰减（故事 28；AD-15）
+# 时间不进综合分：按发布历史累计"在已发布 R12 上挂了几天"，换算成排序扣分。参数在 config/scoring.yaml 的 exposure 段。
+
+def exposure_days(publishes, now):
+    """累计挂牌天数 {货号: 天}。publishes：[(发布时刻 datetime（带时区）, [货号…])]（非 dropped、已按发布顺序排好）；
+    now：带时区的当前时刻，其时区即计日的时区（柏林）。每次发布从发布时刻挂到下一次发布（最后一次挂到 now），
+    这一段计"结束日期 − 开始日期"天（按 now 的时区取日期）；连续上榜的各段首尾相接，合起来就是首尾日期之差，
+    下榜后再上榜另起一段累加。下榜后不扣回。"""
+    tz = now.tzinfo
+    out = {}
+    pubs = sorted(publishes, key=lambda p: p[0])
+    for k, (at, codes) in enumerate(pubs):
+        end = pubs[k + 1][0] if k + 1 < len(pubs) else now
+        if end <= at:
+            continue
+        days = (end.astimezone(tz).date() - at.astimezone(tz).date()).days
+        for code in dict.fromkeys(codes or []):
+            out[code] = out.get(code, 0) + days
+    return {code: d for code, d in out.items() if d > 0}
+
+
+def exposure_penalty(days, params):
+    """曝光扣分：每天 per_day 分，最多 max 分。params 为 scoring.yaml 的 exposure 段。"""
+    return min(max(days or 0, 0) * params['per_day'], params['max'])
+
+
+def exposure_sort_key(score, penalty):
+    """排序键（大者在前）：综合分 − 曝光扣分；没有分数时 None（排在最后）。"""
+    return None if score is None else score - (penalty or 0)

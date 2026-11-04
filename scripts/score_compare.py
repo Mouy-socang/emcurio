@@ -4,14 +4,18 @@
     uv run python scripts/score_compare.py --set value=35
     uv run python scripts/score_compare.py --set momo=50,value=30 --set trend_pattern=2
 
+    uv run python scripts/score_compare.py --set exposure.per_day=10
+
 可改的参数名：momo、value、trend、customer（权重）、trend_brand、trend_pattern、trend_function、
-customer_k、customer_max、smoothing、ai_share、min_peers、half_life_days。未知参数名报错退出。
+customer_k、customer_max、smoothing、ai_share、min_peers、half_life_days，
+以及曝光衰减（故事 28）exposure.per_day、exposure.max、exposure.hint_days。未知参数名报错退出。
 
 输出（当前参数 config/scoring.yaml 对比 --set 之后的参数）：
 1. 回测：已有标签（墨墨留下 / 去掉或看过没选）的货里，综合分前 100 的命中数（留下数）与随机基线（100 × 留下率）。
    口味用留一法，一件货自己的标签不计入自己的分数。
-2. 当前 R12 候选（商品池里能上 R12 的货）前 12、商品池前 20 的名次变化。
-3. 各已封存日按两组参数重算 07 进池符合度（同一份封存列表、同样的 K 与 V，只换排序；封存本身不动）。
+2. 当前 R12 候选（商品池里能上 R12 的货）前 12、商品池前 20 的名次变化（按排序键 = 综合分 − 曝光扣分，同 02 / 07）。
+3. 各已封存日按两组参数重算 07 进池符合度（同一份封存列表、同样的 K 与 V，只换排序；封存本身不动），
+   以及 07 R12 符合度（封存的 R12 候选按两组参数的排序键重排，曝光算到封存时刻，与当天的 R12 比前 12 的重合数）。
 
 真实库以 immutable=1 只读打开；GoodCustomer 订单只读。
 """
@@ -25,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from curio import agreement, publish, scoring  # noqa: E402
+from curio import agreement, exposure, publish, scoring  # noqa: E402
 from curio.config import scoring_override, scoring_rules_for  # noqa: E402
 
 TOP_BACKTEST = 100
@@ -83,6 +87,16 @@ def order_by(ids, scores, first_seen):
     return out
 
 
+def keyed(scores, exp):
+    """排序键 {item_id: dict(score=综合分 − 曝光扣分)}（故事 28；exp 为 exposure.by_item 的结果），供 order_by 用。"""
+    out = {}
+    for i, r in scores.items():
+        k = exposure.sort_key(r.get('score') if r else None, exposure.penalty_of(exp, i))
+        if k is not None:           # 没有分数的不进排序键（order_by 把它排在最后）
+            out[i] = dict(score=k)
+    return out
+
+
 def candidates(c, sql):
     return [r[0] for r in c.execute(sql)]
 
@@ -95,7 +109,8 @@ def names(c):
 
 
 def rank_changes(ids, a, b, first_seen, top):
-    """[(新名次, 旧名次或 None, item_id)]：按新参数的前 top 件；旧名次为当前参数下在同一候选里的名次。"""
+    """[(新名次, 旧名次或 None, item_id)]：按新参数的前 top 件；旧名次为当前参数下在同一候选里的名次。
+    a、b 为排序键（见 keyed）。"""
     old = {i: n for n, i in enumerate(order_by(ids, a, first_seen), 1)}
     new = order_by(ids, b, first_seen)[:top]
     return [(n, old.get(i), i) for n, i in enumerate(new, 1)]
@@ -120,6 +135,24 @@ def sealed_agreement(c, day, scores, first_seen):
     return dict(n=n, seen=len(seen), hits=hits, agreement=hits / n, baseline=n / len(seen))
 
 
+def sealed_rank_overlap(c, day, scores, first_seen, params):
+    """用给定分数与曝光参数重排当天封存的 rank 列表（曝光算到封存时刻），与当天的 R12 比前 12 的重合数。
+    scores 为 None 时用封存时的原排序。当天没有封存或没有 R12 时 None。"""
+    pred = agreement._prediction(c, day, 'rank')
+    if pred is None:
+        return None
+    got = agreement._day_rank(c, day, day == agreement.today())
+    if got is None:
+        return None
+    if scores is None:
+        order = pred['items']
+    else:
+        exp = exposure.by_item(c, params, exposure._when(pred['sealed_at']))
+        order = order_by(pred['items'], keyed(scores, exp), first_seen)
+    mine = set(agreement._codes_to_ids(c, got[1]))
+    return len(mine & set(order[:TOP_RANK]))
+
+
 def _fmt_rank(old):
     return '—' if old is None else str(old)
 
@@ -133,7 +166,7 @@ def shares(params):
     return ' · '.join('%s %.1f%%' % (zh, 100 * w[k] / total) for k, zh in WEIGHT_LABELS)
 
 
-def report(c, cur, new, sets, out=print):
+def report(c, cur, new, sets, out=print, now=None):
     out('综合评分对比：当前参数 %s  vs  %s' % (cur['version'], ', '.join('%s=%g' % kv for kv in sets.items())))
     out('权重是相对的（各自 ÷ 权重和）。实际占比：')
     for label, data in (('当前', cur), ('对比', new)):
@@ -147,6 +180,13 @@ def report(c, cur, new, sets, out=print):
         lift = b['hits'] / b['baseline'] if b['baseline'] else 0
         out('%s：前 %d 命中 %d 件，随机基线 %.1f 件（%.1f 倍；有标签 %d 件）' % (label, b['top'], b['hits'], b['baseline'], lift, b['n']))
     fs, nm = _first_seen(c), names(c)
+    exp_cur = exposure.by_item(c, cur['params']['exposure'], now)
+    exp_new = exposure.by_item(c, new['params']['exposure'], now)
+    key_cur, key_new = keyed(cur['scores'], exp_cur), keyed(new['scores'], exp_new)
+    ep = lambda p: '每天 %g 分、最多 %g 分、挂满 %d 天提示' % (p['per_day'], p['max'], p['hint_days'])
+    out('')
+    out('曝光扣分（排序键 = 综合分 − 扣分）：当前 %s；对比 %s；挂过 R12 的货 %d 件' % (
+        ep(cur['params']['exposure']), ep(new['params']['exposure']), len(exp_cur)))
     for title, sql, top in (('2a. R12 候选前 %d' % TOP_RANK, publish.ELIGIBLE_SQL, TOP_RANK),
                             ("2b. 商品池前 %d" % TOP_POOL, "SELECT item_id FROM triage WHERE state='kept'", TOP_POOL)):
         out('')
@@ -155,10 +195,12 @@ def report(c, cur, new, sets, out=print):
         if not ids:
             out('（没有货）')
             continue
-        for n, old, iid in rank_changes(ids, cur['scores'], new['scores'], fs, top):
+        for n, old, iid in rank_changes(ids, key_cur, key_new, fs, top):
             mark = '' if old == n else ('  新进' if old is None or old > top else '  ↑' if old > n else '  ↓')
-            out('%2d ← %3s  %5.1f → %5.1f  %s%s' % (n, _fmt_rank(old), cur['scores'][iid]['score'],
-                                                 new['scores'][iid]['score'], nm.get(iid, iid)[:60], mark))
+            pen = lambda exp: exposure.penalty_of(exp, iid)
+            out('%2d ← %3s  %5.1f%s → %5.1f%s  %s%s' % (
+                n, _fmt_rank(old), cur['scores'][iid]['score'], ' −%g' % pen(exp_cur) if pen(exp_cur) else '',
+                new['scores'][iid]['score'], ' −%g' % pen(exp_new) if pen(exp_new) else '', nm.get(iid, iid)[:60], mark))
     out('')
     out('== 3. 已封存日重算的 07 进池符合度（封存时 / 当前参数 / 对比参数）==')
     out('（注意：重算的两栏用的是今天的标签，已含当天及之后的挑选，比"封存时"偏乐观；只拿"当前参数"与"对比参数"两栏互相比较。）')
@@ -173,6 +215,16 @@ def report(c, cur, new, sets, out=print):
         r = sealed_agreement(c, d, None, fs)
         extra = '（留下 %d、看到 %d，随机基线 %.0f%%）' % (r['n'], r['seen'], 100 * r['baseline']) if r and r['n'] else ''
         out('%s：%s / %s / %s %s' % (d.isoformat(), *parts, extra))
+    out('')
+    out('== 3b. 已封存日重算的 07 R12 符合度（与当天 R12 前 %d 的重合数：封存时 / 当前参数 / 对比参数）==' % TOP_RANK)
+    out('（注意：重算的两栏用的是今天的综合分与标签，比"封存时"偏乐观；只拿"当前参数"与"对比参数"两栏互相比较。）')
+    rdays = [date.fromisoformat(r[0]) for r in c.execute("SELECT day FROM daily_predictions WHERE kind='rank' ORDER BY day")]
+    if not rdays:
+        out('（还没有封存的日子）')
+    for d in rdays:
+        parts = [sealed_rank_overlap(c, d, scores, fs, p) for scores, p in
+                 ((None, None), (cur['scores'], cur['params']['exposure']), (new['scores'], new['params']['exposure']))]
+        out('%s：%s' % (d.isoformat(), ' / '.join('无数据' if x is None else '%d/%d' % (x, TOP_RANK) for x in parts)))
 
 
 def main(argv=None, out=print):

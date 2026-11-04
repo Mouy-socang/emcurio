@@ -15,7 +15,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from . import publish, triage
+from . import exposure, publish, triage
 from .config import ROOT
 from .store import auction_tag, card, now
 
@@ -44,17 +44,28 @@ def rank_reason(c, item, code):
     return None
 
 
-def _scored(c, state):
+def _scored(c, state, exp):
     # 故事 27：按综合分高到低，没有综合分的退回旧分数，都没有的在后。
-    return c.execute('''SELECT i.*, COALESCE(cs.score, s.score) sort_score, t.updated_at state_at FROM triage t
+    # 故事 28：实际按排序键（综合分 − 曝光扣分）高到低；同键按进入该状态的时间新到旧、再按 item_id。显示的分数不变。
+    rows = [dict(r) for r in c.execute('''SELECT i.*, COALESCE(cs.score, s.score) sort_score, t.updated_at state_at FROM triage t
         JOIN items i ON i.item_id=t.item_id LEFT JOIN composite_scores cs ON cs.item_id=i.item_id
-        LEFT JOIN scores s ON s.item_id=i.item_id
-        WHERE t.state=? ORDER BY sort_score IS NULL, sort_score DESC, t.updated_at DESC, i.item_id''', (state,)).fetchall()
+        LEFT JOIN scores s ON s.item_id=i.item_id WHERE t.state=?''', (state,))]
+    for r in rows:
+        r['sort_key'] = exposure.sort_key(r['sort_score'], exposure.penalty_of(exp, r['item_id']))
+    rows.sort(key=lambda r: r['item_id'])
+    rows.sort(key=lambda r: r['state_at'] or '', reverse=True)
+    rows.sort(key=lambda r: (r['sort_key'] is None, -(r['sort_key'] or 0)))
+    return rows
 
 
-def _pool_row(c, item, ranked, root):
+def _pool_row(c, item, ranked, root, exp):
     out = card(c, item, root)
     code = out['code']
+    # 故事 28：曝光（累计挂牌天数与扣分；没挂过为 0）与排序键（02"按分数"用它排，显示的分数不变）。
+    e = exp.get(item['item_id']) or {}
+    out['exposure_days'] = e.get('days', 0)
+    out['exposure_penalty'] = e.get('penalty', 0)
+    out['sort_key'] = None if item['sort_key'] is None else round(item['sort_key'], 3)
     out['on_sale'] = item['status'] == 'active'
     out['rank_pos'] = ranked.index(code) + 1 if code in ranked else None
     out['rank_reason'] = rank_reason(c, item, code)
@@ -74,8 +85,9 @@ def pool(store, root=ROOT):
     """02 商品池：留下的货与已移出商品池的货，以及当前的榜。"""
     with store.connect() as c:
         ranked = publish.rank(c)
-        kept = [_pool_row(c, r, ranked, root) for r in _scored(c, 'kept')]
-        out = [_pool_row(c, r, ranked, root) for r in _scored(c, 'out_of_pool')]
+        exp = exposure.by_item(c, exposure.params_for(root))
+        kept = [_pool_row(c, r, ranked, root, exp) for r in _scored(c, 'kept', exp)]
+        out = [_pool_row(c, r, ranked, root, exp) for r in _scored(c, 'out_of_pool', exp)]
     return dict(items=kept, out=out, rank=ranked, counts=dict(kept=len(kept), out=len(out), rank=len(ranked)))
 
 
@@ -110,6 +122,8 @@ def rank_state(store, root=ROOT):
     """03 榜：行（名次、缩略图、货号、名称、价格、是否已下架 / 不能发布）、件数与发布状态。"""
     with store.connect() as c:
         rows = []
+        params = exposure.params_for(root)
+        days = exposure.days_by_code(c)
         for pos, code in enumerate(publish.rank(c), 1):
             item = c.execute('SELECT i.* FROM item_codes k JOIN items i ON i.item_id=k.item_id WHERE k.code=?',
                              (code,)).fetchone()
@@ -122,6 +136,11 @@ def rank_state(store, root=ROOT):
             reason = publish.why_not(c, code)
             row.update(pos=pos, code=code, off=reason is not None, reason=reason,
                        gone=item is not None and item['status'] != 'active')
+            # 故事 28：已在已发布 R12 上累计挂了几天（没挂过为 0、不显示）；挂满 hint_days 天且未售出时提示（不自动移出）。
+            n = days.get(code, 0)
+            live = item is not None and item['status'] == 'active' and reason is None    # 缺失、下架、不能发布的不提示
+            sold = item is not None and triage.is_sold(c, item['item_id'])
+            row.update(days_on_rank=n, stale_hint=live and n >= params['hint_days'] and not sold)
             rows.append(row)
         status = publish_status(c, publish._fees(root))
     return dict(rows=rows, count=len(rows), size=publish.RANK_SIZE, status=status)

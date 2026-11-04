@@ -110,7 +110,7 @@ def test_seal_once_and_immutable(db):
         assert json.loads(row['items']) == ['a', 'd', 'b', 'c']     # 分数高到低，无分最后；不含后来入库的
         assert json.loads(row['scores']) == [90, 50, 10, None]
         assert json.loads(row['source']) == dict(table='composite_scores', fallback='scores', counts={'ai': 3, 'none': 1})
-        assert json.loads(row['version']) == dict(method=2, rule_versions=[1], composite_versions=[])
+        assert json.loads(row['version']) == dict(method=3, rule_versions=[1], composite_versions=[])
         with pytest.raises(Exception, match='不可修改'):
             c.execute("UPDATE daily_predictions SET items='[]' WHERE day=?", (TODAY.isoformat(),))
 

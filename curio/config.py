@@ -194,7 +194,7 @@ def _words(value,where):
 
 def match_rules(root=ROOT):
     """读取并校验 config/matching.yaml（故事 16，按文件修改时间缓存）。返回已规范化（小写、去变音）的词表：
-    grades{need,explicit,inferred: {label, weight}}、detail_required（须再对上图案或器型的分级）、sources、dim_of{GC 维度: brand/pattern/form}、
+    grades{need,explicit,inferred: {label, weight}}、detail_required（须再对上图案或器型的分级）、need_recent_days（04 只用近这么多天的需求）、sources、dim_of{GC 维度: brand/pattern/form}、
     brands{规范化品牌: [别名…]}、negations、negations_before、patterns[{ids, terms, brands}]、forms{组名: [词…]}。格式不对时报错（中文）。"""
     path=Path(root)/'config/matching.yaml'
     st=path.stat()
@@ -234,6 +234,9 @@ def match_rules(root=ROOT):
     dr=raw.get('detail_required',[])
     if not isinstance(dr,list) or any(x not in MATCH_GRADES for x in dr):raise ValueError('matching.detail_required 只能列 need、explicit、inferred')
     out['detail_required']=frozenset(dr)
+    days=raw.get('need_recent_days',365)
+    if type(days) is not int or days<1:raise ValueError('matching.need_recent_days 必须为正整数（天）')
+    out['need_recent_days']=days
     out['negations']=[_norm(x) for x in _words(raw.get('negations') or [],'matching.negations')]
     out['negations_before']=[_norm(x) for x in _words(raw.get('negations_before') or [],'matching.negations_before')]
     out['exclusions_before']=[_norm(x) for x in _words(raw.get('exclusions_before') or [],'matching.exclusions_before')]
@@ -334,6 +337,8 @@ SCORING_WEIGHTS=('momo','value','trend','customer')
 SCORING_TREND=('brand','pattern','function')
 # 可用 scripts/score_compare.py --set 覆盖的参数名（扁平）：四个权重、trend_brand / trend_pattern / trend_function 与下列标量。
 SCORING_SCALARS=('customer_k','customer_max','smoothing','ai_share','min_peers','half_life_days')
+# 故事 28：曝光衰减参数（scoring.yaml 的 exposure 段）；score_compare.py 用 --set exposure.per_day=… 覆盖。
+SCORING_EXPOSURE=('per_day','max','hint_days')
 
 def scoring_rules_for(root=ROOT):
     """按调用方的 root 读综合评分参数：root 下有 config/scoring.yaml 就用它，否则用仓库里的那份。"""
@@ -349,7 +354,7 @@ def _nonneg(value,where,integer=False,positive=False):
 def scoring_validate(raw):
     """校验综合评分参数（dict，同 scoring.yaml 的结构），返回规范化的副本。格式不对时报错（中文）。"""
     if not isinstance(raw,dict):raise ValueError('scoring.yaml 必须为映射')
-    unknown=set(raw)-{'weights','trend_weights','price_edges',*SCORING_SCALARS}
+    unknown=set(raw)-{'weights','trend_weights','price_edges','exposure',*SCORING_SCALARS}
     if unknown:raise ValueError('scoring.yaml 含未知键：'+','.join(sorted(map(str,unknown))))
     w=raw.get('weights')
     if not isinstance(w,dict) or set(w)!=set(SCORING_WEIGHTS):raise ValueError('scoring.weights 必须恰好有 momo、value、trend、customer')
@@ -372,6 +377,12 @@ def scoring_validate(raw):
     out['ai_share']=float(share)
     out['min_peers']=_nonneg(raw.get('min_peers'),'scoring.min_peers',integer=True,positive=True)
     out['half_life_days']=float(_nonneg(raw.get('half_life_days'),'scoring.half_life_days',positive=True))
+    e=raw.get('exposure')
+    if not isinstance(e,dict) or set(e)!=set(SCORING_EXPOSURE):raise ValueError('scoring.exposure 必须恰好有 per_day、max、hint_days')
+    hint=_nonneg(e['hint_days'],'scoring.exposure.hint_days',integer=True)
+    if hint<1:raise ValueError('scoring.exposure.hint_days 必须为不小于 1 的整数（天）')
+    out['exposure']=dict(per_day=float(_nonneg(e['per_day'],'scoring.exposure.per_day')),
+                         max=float(_nonneg(e['max'],'scoring.exposure.max')),hint_days=hint)
     return out
 
 def scoring_rules(root=ROOT):
@@ -385,7 +396,7 @@ def scoring_rules(root=ROOT):
     return out
 
 def scoring_override(params,sets):
-    """在已校验的参数上套用扁平覆盖 {名: 数}（名见 SCORING_WEIGHTS、trend_*、SCORING_SCALARS），返回新的已校验参数。
+    """在已校验的参数上套用扁平覆盖 {名: 数}（名见 SCORING_WEIGHTS、trend_*、SCORING_SCALARS、exposure.*），返回新的已校验参数。
     未知参数名报错。"""
     import copy
     raw=copy.deepcopy(params)
@@ -393,5 +404,7 @@ def scoring_override(params,sets):
         if name in SCORING_WEIGHTS:raw['weights'][name]=value
         elif name.startswith('trend_') and name[6:] in SCORING_TREND:raw['trend_weights'][name[6:]]=value
         elif name in SCORING_SCALARS:raw[name]=int(value) if name=='min_peers' and float(value).is_integer() else value
+        elif name.startswith('exposure.') and name[9:] in SCORING_EXPOSURE:
+            raw['exposure'][name[9:]]=int(value) if name=='exposure.hint_days' and float(value).is_integer() else value
         else:raise ValueError('未知参数：'+name)
     return scoring_validate(raw)

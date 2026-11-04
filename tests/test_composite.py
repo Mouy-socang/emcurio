@@ -267,7 +267,7 @@ def test_seal_uses_composite_with_fallback(db):
             row = c.execute("SELECT * FROM daily_predictions WHERE kind='pool'").fetchone()
     assert json.loads(row['items']) == ['b', 'c', 'a']
     assert json.loads(row['source'])['counts'] == {'composite': 2, 'rule': 1}
-    assert json.loads(row['version']) == dict(method=2, rule_versions=[1], composite_versions=['C:v1'])
+    assert json.loads(row['version']) == dict(method=3, rule_versions=[1], composite_versions=['C:v1'])
 
 
 def test_seal_rank_uses_composite(db):
@@ -424,7 +424,7 @@ def test_ui_wiring():
     html = (ROOT / 'curio/triage.html').read_text()
     assert 'id="sortScore"' in html and 'id="sortTime"' in html and '.fsc.veil{visibility:hidden}' in html
     rk = (ROOT / 'curio/ranking.js').read_text()
-    assert 'function scoreEl(c)' in rk and "setPoolSort('time')" in rk
+    assert 'function scoreEl(c, exposure)' in rk and "setPoolSort('time')" in rk
 
 
 # ---------- 对比脚本 ----------

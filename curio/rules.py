@@ -224,6 +224,26 @@ def match_customer(facts,needs,prefs,rules):
     """一位客人与一件货：None（不匹配）或 dict(grade, label, weight, reasons)。"""
     return judge.match_customer(facts,needs,prefs,rules)
 
+def berlin_today():
+    """今天（Europe/Berlin 日期）。"""
+    return judge.berlin_today()
+
+def need_recent(need,rules,today=None):
+    """需求是否在近 need_recent_days 天内（见 judge.need_recent）。"""
+    return judge.need_recent(need,rules,today)
+
+def need_match(need,facts,rules,today):
+    """04 匹配（故事 29）：一条近期 open 的需求与一件货：None 或 dict(dims, named, text)（见 judge.need_match）。"""
+    return judge.need_match(need,facts,rules,today)
+
+def best_need_match(facts,needs,prefs,rules,today):
+    """04 匹配：一位客人与一件货一致性最高的近期需求：None 或 dict(dims, named, text, need)。"""
+    return judge.best_need_match(facts,needs,prefs,rules,today)
+
+def consistency_key(m):
+    """04 一致性排序键（小者在前）。"""
+    return judge.consistency_key(m)
+
 # ---- CAP-12 千人千面商品池（AD-11，故事 18）：打分与排序在 judge.personal_order，参数在 config/personalize.yaml。
 def personal_order(pool,needs,prefs,seen,rejected,rules,params):
     """一位客户的商品池货号顺序与"需求/喜好是否对上"（见 judge.personal_order）。"""
@@ -333,3 +353,16 @@ def gc_demand(orders,aliases,patterns,functions,today,params):
 def customer_weights(n,params):
     """客人喜好按数据量加权：(口味权重, 客人权重)（见 judge.customer_weights；本故事无调用方）。"""
     return judge.customer_weights(n,params)
+
+# ---- 故事 28 曝光衰减（AD-15）：天数与扣分在 judge.exposure_*，参数在 config/scoring.yaml 的 exposure 段，读发布历史在 curio/exposure.py。
+def exposure_days(publishes,now):
+    """累计挂牌天数 {货号: 天}（见 judge.exposure_days）。"""
+    return judge.exposure_days(publishes,now)
+
+def exposure_penalty(days,params):
+    """曝光扣分（见 judge.exposure_penalty）。"""
+    return judge.exposure_penalty(days,params)
+
+def exposure_sort_key(score,penalty):
+    """排序键：综合分 − 曝光扣分（见 judge.exposure_sort_key）。"""
+    return judge.exposure_sort_key(score,penalty)

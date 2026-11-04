@@ -3,7 +3,8 @@
 - 封存（`daily_predictions`）：每个柏林日期每种类型一条、写入后不可改（只用 INSERT OR IGNORE；触发器禁止 UPDATE / DELETE）。
   pool = 01 候选（口径同 triage.feed：新货、非 backlog、在售、未被「看过即不要」排除）按当前综合分（`composite_scores`，
   故事 27、METHOD=2；没有综合分的退回 `scores`）高到低的完整排序，
-  前 100 件为"系统进池"；rank = 商品池（口径同 publish.eligible / 02）按分数高到低的完整排序，前 12 件为"系统 MyR12"。
+  前 100 件为"系统进池"；rank = 商品池（口径同 publish.eligible / 02）按排序键（综合分 − 曝光扣分，故事 28、METHOD=3；
+  扣分见 curio/exposure.py）高到低的完整排序，前 12 件为"系统 MyR12"；封存的 scores 仍是综合分本身。
   同分按 first_seen 新到旧、再按 item_id；无分的排最后。两种触发都只在柏林 05:00 之后：采集调度当天第一轮
   （有工作的轮次在抓取入库与打分之后），或墨墨先打开 01 时的首个（不带游标的）feed 请求——后者带本次打开的
   session，本次打开里刚看到的货不被「看过即不要」排除。
@@ -21,13 +22,13 @@
 import json
 from datetime import date, datetime, timedelta, timezone
 
-from . import publish, triage
+from . import exposure, publish, triage
 from .config import ROOT
 from .schedule import BERLIN
 
 POOL_TOP = 100
 RANK_TOP = publish.RANK_SIZE
-METHOD = 2                  # 预测口径版本（排序规则变了再加 1；2 = 综合分，故事 27）
+METHOD = 3                  # 预测口径版本（排序规则变了再加 1；2 = 综合分，故事 27；3 = R12 按综合分 − 曝光扣分，故事 28）
 SEAL_HOUR = 5               # 柏林 05:00 起才封存（采集与 feed 两种触发相同）
 FREEZE_AFTER = 2            # 今天 − 2 天及更早的结果写入 daily_agreement
 HISTORY_MAX = 90
@@ -100,15 +101,28 @@ ORDER = ("ORDER BY COALESCE(cs.score, s.score) IS NULL, COALESCE(cs.score, s.sco
          "x.item_id")
 POOL_SQL = ('SELECT x.item_id, x.rule_version, ' + SCORE_COLS + ''' FROM (SELECT i.* FROM triage t JOIN items i ON i.item_id=t.item_id
     WHERE ''' + triage.FEED_BASE + ' AND ' + triage.SEEN_ELSEWHERE + ' IS NULL) x' + SCORE_JOIN + ORDER)
-RANK_SQL = ('SELECT x.item_id, x.rule_version, ' + SCORE_COLS + ' FROM (' + publish.ELIGIBLE_SQL + ') x' + SCORE_JOIN + ORDER)
+RANK_SQL = ('SELECT x.item_id, x.rule_version, x.first_seen, ' + SCORE_COLS + ' FROM (' + publish.ELIGIBLE_SQL + ') x' +
+            SCORE_JOIN + ORDER)
 
 
-def prediction_rows(c, kind, session=None):
+def order_by_exposure(rows, exp):
+    """故事 28：按排序键（综合分 − 曝光扣分）重排，口径同 ORDER：无分的在后，同键 first_seen 新到旧（空的在最后）、
+    再按 item_id。rows 为带 item_id、score、first_seen 的行；exp 为 exposure.by_item 的结果。"""
+    key = lambda r: exposure.sort_key(r['score'], exposure.penalty_of(exp, r['item_id']))
+    out = sorted(rows, key=lambda r: r['item_id'])
+    out.sort(key=lambda r: r['first_seen'] or '', reverse=True)
+    out.sort(key=lambda r: (key(r) is None, -(key(r) or 0)))
+    return out
+
+
+def prediction_rows(c, kind, session=None, exposure_params=None, now=None):
     """当前分数下的完整预测排序（不写库）：[(item_id, rule_version, score, source)]。
-    session：由 feed 触发时为本次打开的 session（本次里看到的不排除）；否则任何一次打开里看过即排除。"""
+    session：由 feed 触发时为本次打开的 session（本次里看到的不排除）；否则任何一次打开里看过即排除。
+    rank 按综合分 − 曝光扣分排（exposure_params 缺省读 scoring.yaml 的 exposure 段；now 缺省为现在）。"""
     if kind == 'pool':
         return c.execute(POOL_SQL, (session or '',)).fetchall()
-    return c.execute(RANK_SQL).fetchall()
+    params = exposure_params or exposure.params_for(ROOT)
+    return order_by_exposure(c.execute(RANK_SQL).fetchall(), exposure.by_item(c, params, now))
 
 
 def seal(c, day=None, trigger=None, session=None):
@@ -119,7 +133,8 @@ def seal(c, day=None, trigger=None, session=None):
     for kind in ('pool', 'rank'):
         if kind in have:
             continue
-        rows = prediction_rows(c, kind, session)
+        params = exposure.params_for(ROOT) if kind == 'rank' else None     # 只有 rank 读曝光参数
+        rows = prediction_rows(c, kind, session, params)
         sources = {}
         for r in rows:
             k = r['source'] or 'none'
@@ -130,7 +145,8 @@ def seal(c, day=None, trigger=None, session=None):
                         'VALUES(?,?,?,?,?,?,?,?)',
                         (day, kind, json.dumps([r['item_id'] for r in rows], ensure_ascii=False),
                          json.dumps([r['score'] for r in rows]), json.dumps(dict(table='composite_scores', fallback='scores', counts=sources), sort_keys=True),
-                         json.dumps(dict(method=METHOD, rule_versions=versions, composite_versions=composite)), _now(), trigger))
+                         json.dumps(dict(method=METHOD, rule_versions=versions, composite_versions=composite,
+                                         **(dict(exposure=params) if kind == 'rank' else {}))), _now(), trigger))
         if cur.rowcount:
             wrote.append(kind)
     return wrote

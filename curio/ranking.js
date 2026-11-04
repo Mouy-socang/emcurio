@@ -11,13 +11,13 @@
   let view = 'new';
   let pool = null;              // /api/pool 的结果
   const cards = new Map();      // 货号 -> 卡片字段（名称、图、价格、标签、rank_reason …）
-  const info = new Map();       // 货号 -> {off, gone, reason}（服务端判定的榜行状态）
+  const info = new Map();       // 货号 -> {off, gone, reason, days, stale}（服务端判定的榜行状态；days/stale 见故事 28）
   let order = [];               // 本地的榜（货号按名次）
   let saved = [];               // 服务端已保存的榜
   let status = null;            // 发布状态 {published_at, dirty}
   let rankLoaded = false, unsaved = false, saving = false, again = false, saveError = '';
   let selected = null, dragging = false, previewing = false, cancelDrag = null;
-  let poolSort = 'score';       // 02 排序：score（按分数，服务端顺序）/ time（按进池时间，新到旧）
+  let poolSort = 'score';       // 02 排序：score（按分数，服务端顺序 = sort_key：综合分 − 曝光扣分）/ time（按进池时间，新到旧）
 
   const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
   const two = n => String(n).padStart(2, '0');
@@ -39,12 +39,15 @@
     return h;
   }
   // 故事 27：分数与理由一行（02 每张卡、03 每行）；没有分数时不显示。
-  function scoreEl(c) {
+  // 故事 28：02 卡片在分数旁显示"曝光 −N"（挂过 R12 的扣分，只影响排序，分数本身不变）。
+  function scoreEl(c, exposure) {
     if (c.score == null) return null;
     const p = el('p', 'sc'); p.append('分数 ', el('span', 'mono', String(c.score)));
+    if (exposure && c.exposure_penalty > 0) p.append(' · ', el('span', 'xp', '曝光 −' + c.exposure_penalty));
     if (c.score_reason) p.append(' · ' + c.score_reason);
     return p;
   }
+  const sortKey = x => x.sort_key == null ? -Infinity : x.sort_key;
   // 重绘后把焦点放回同一个控件（data-k = 货号:用途）。
   function keyOf() { const a = document.activeElement; return a && a.dataset ? a.dataset.k : null; }
   function refocus(k, fallback, keep) {
@@ -117,7 +120,7 @@
     return true;
   }
   function absorb(d) {
-    d.rows.forEach(r => { cards.set(r.code, Object.assign({}, cards.get(r.code) || {}, r)); info.set(r.code, {off: r.off, gone: r.gone, reason: r.reason}); });
+    d.rows.forEach(r => { cards.set(r.code, Object.assign({}, cards.get(r.code) || {}, r)); info.set(r.code, {off: r.off, gone: r.gone, reason: r.reason, days: r.days_on_rank || 0, stale: !!r.stale_hint}); });
     status = d.status;
   }
   async function loadRank(force) {
@@ -221,7 +224,7 @@
     for (const li of rows) { const r = li.getBoundingClientRect(); if (r.bottom > 0 && r.height) return li; }
     return null;
   }
-  // 02 排序切换：按分数为服务端顺序（综合分高到低）；按进池时间为最近进池的在前。
+  // 02 排序切换：按分数为服务端顺序（sort_key = 综合分 − 曝光扣分，高到低）；按进池时间为最近进池的在前。
   function sortedPool() {
     if (poolSort !== 'time') return pool.items;
     return pool.items.slice().sort((a, b) => (b.pool_at || '').localeCompare(a.pool_at || '') || a.item_id.localeCompare(b.item_id));
@@ -271,9 +274,8 @@
     }
     if (i >= 0) src.splice(i, 1);
     if (!dst.some(x => x.item_id === c.item_id)) {
-      // 与服务端同序：分数高到低、无分在后；同分时刚处理的在前。
-      const rank = x => x.score == null ? -Infinity : x.score;
-      const at = dst.findIndex(x => rank(x) <= rank(row));
+      // 与服务端同序：排序键（综合分 − 曝光扣分）高到低、无分在后；同键时刚处理的在前。
+      const at = dst.findIndex(x => sortKey(x) <= sortKey(row));
       dst.splice(at < 0 ? dst.length : at, 0, row);
     }
     pool.counts.kept = pool.items.length; pool.counts.out = pool.out.length;
@@ -444,6 +446,12 @@
     sel.append(h3, rp);
     const sc = scoreEl(c); if (sc) sel.append(sc);
     if (st.off && st.reason && !st.gone) sel.append(el('p', 'why', st.reason));
+    // 故事 28：已在已发布 R12 上累计挂了几天；挂满提示天数且未售出时提示可考虑换下（不自动移出）。
+    if (st.days > 0) {
+      const xp = el('p', 'xd', '已在 R12 ' + st.days + ' 天');
+      if (st.stale) xp.append(' · ', el('span', 'stale', '还没卖出，可考虑换下'));
+      sel.append(xp);
+    }
     const hd = el('button', 'hd', '≡'); hd.type = 'button'; hd.dataset.k = code + ':hd';
     hd.setAttribute('aria-label', '拖动 ' + (c.name || code) + '，第 ' + (i + 1) + ' 名' + (st.off ? '，已下架' : ''));
     line.append(ix, th, sel, hd);

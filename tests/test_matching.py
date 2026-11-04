@@ -1,9 +1,10 @@
-"""故事 16（CAP-5）：后台 04 匹配——规则（judge.match_customer）、按客人汇总、确认 / 不合适、单件页链接可达（AD-29）、
+"""故事 16（CAP-5）、故事 29：后台 04 匹配——规则（judge.match_customer）、按客人汇总、确认 / 不合适、单件页链接可达（AD-29）、
 坏数据与资料库不可用、后台接口。
 
 GoodCustomer 一律用临时资料库（tmp_path），从不读写真实 ~/Desktop/goodcustomerDB；站点地址只写进临时 .env，
 任何非 127.0.0.1 的请求直接失败。界面交互（展开、复制、390px 布局）见故事 Verification 的人工检查。
 """
+import datetime
 import json
 import logging
 import re
@@ -48,7 +49,7 @@ def fresh_cache():
 
 # ---------- 临时 GoodCustomer 资料库 ----------
 
-def customer(db, cid, name, needs=(), prefs=(), root='customers', status='active', raw_lines=()):
+def customer(db, cid, name, needs=(), prefs=(), root='customers', status='active', raw_lines=(), evidence=None):
     d = Path(db) / root / cid
     (d / '06_结构化结果').mkdir(parents=True, exist_ok=True)
     (d / 'customer.json').write_text(json.dumps({'customer_id': cid, 'display_name': name, 'aliases': [],
@@ -57,9 +58,16 @@ def customer(db, cid, name, needs=(), prefs=(), root='customers', status='active
     (d / '06_结构化结果' / 'needs.jsonl').write_text('\n'.join(lines) + '\n' if lines else '')
     (d / '06_结构化结果' / 'preferences.jsonl').write_text(
         ''.join(json.dumps(p, ensure_ascii=False) + '\n' for p in prefs))
+    if evidence is not None:
+        (d / '98_证据索引').mkdir(exist_ok=True)
+        (d / '98_证据索引' / 'evidence.jsonl').write_text(
+            ''.join(json.dumps(e, ensure_ascii=False) + '\n' for e in evidence))
 
 
-def need(desc, maker=(), patterns=(), status='open', filters=()):
+RECENT = (datetime.date.today() - datetime.timedelta(days=30)).isoformat() + 'T10:00:00+02:00'
+
+
+def need(desc, maker=(), patterns=(), status='open', filters=(), seen=RECENT, refs=()):
     out = {'need_type': 'active_search', 'status': status, 'additional_description': desc}
     if maker:
         out['maker'] = list(maker)
@@ -67,7 +75,16 @@ def need(desc, maker=(), patterns=(), status='open', filters=()):
         out['pattern_names_raw'] = list(patterns)
     if filters:
         out['object_filters'] = list(filters)
+    if seen:
+        out['last_seen_at'] = seen
+    if refs:
+        out['evidence_refs'] = list(refs)
     return out
+
+
+def evd(eid, text, at, role='customer', name='王姐', status='active'):
+    return {'evidence_id': eid, 'evidence_type': 'message', 'author_role': role, 'author_name': name,
+            'content_excerpt': text, 'occurred_at': at, 'status': status}
 
 
 def pref(dim, value, polarity='like', source='explicit', status='active'):
@@ -147,8 +164,8 @@ def deliver(store, *codes, hidden=()):
 
 @pytest.fixture
 def scene(store, cfg, gc):
-    """王姐明说想要塞弗尔蓝色杯碟；李先生从购买推出喜欢 Meissen；
-    赵女士喜欢 Meissen 但不喜欢蓝洋葱；钱先生只喜欢杯（没写品牌）。"""
+    """王姐想要塞弗尔蓝色杯碟；李先生想要梅森的东西（宽松口径下只说品牌也算）；
+    赵女士想要梅森但不喜欢蓝洋葱；钱先生只喜欢杯（没写品牌）；孙女士只有喜欢梅森的喜好（喜好不进 04）。"""
     codes = dict(
         sevres=add(store, cfg, 'it-sevres', 'Sèvres Tasse bleu céleste', 'Sèvres', function='杯', score=50),
         vase=add(store, cfg, 'it-vase', 'Meissen Vase Blumen', 'Meissen', function='花瓶', score=70),
@@ -157,9 +174,11 @@ def scene(store, cfg, gc):
         herend=add(store, cfg, 'it-herend', 'Herend Tasse', 'Herend', function='杯', score=40))
     db = gc['db']
     customer(db, 'GC000101', '王姐', needs=[need('塞弗尔蓝色系列的杯、碟、壶', maker=['Sèvres'], patterns=['塞弗尔蓝色系列'])])
-    customer(db, 'GC000102', '李先生', prefs=[pref('maker', 'Meissen', source='purchase')])
-    customer(db, 'GC000103', '赵女士', prefs=[pref('maker', 'Meissen'), pref('pattern', '蓝洋葱', polarity='dislike')])
+    customer(db, 'GC000102', '李先生', needs=[need('梅森的东西', maker=['Meissen'])])
+    customer(db, 'GC000103', '赵女士', needs=[need('梅森', maker=['梅森'])],
+             prefs=[pref('pattern', '蓝洋葱', polarity='dislike')])
     customer(db, 'GC000104', '钱先生', prefs=[pref('object_type', '杯碟')])
+    customer(db, 'GC000108', '孙女士', prefs=[pref('maker', 'Meissen'), pref('form', '花瓶')])
     return codes
 
 
@@ -173,30 +192,32 @@ def codes_of(row):
 
 # ---------- I/O 矩阵 ----------
 
-def test_need_beats_inferred_and_rows_grouped_by_customer(store, gc, root, scene):
+def test_needs_only_rows_grouped_by_customer(store, gc, root, scene):
     v = matching.view(store, gc, root)
     assert v['available'] is True
     names = [c['name'] for c in v['customers']]
-    assert names[0] == '王姐'                                   # 有明说想要的排前
+    assert names[0] == '李先生'                                 # 待处理件数多的在前
     rows = by_name(v)
     wang = rows['王姐']
-    assert codes_of(wang) == [scene['sevres']] and wang['has_need'] and wang['total'] == 1
+    assert codes_of(wang) == [scene['sevres']] and wang['total'] == 1
     it = wang['items'][0]
-    assert it['grade'] == 'need' and it['grade_label'] == '明说想要'
-    assert it['reasons'] == ['明说想要：塞弗尔蓝色系列的杯、碟、壶']
+    assert it['dims'] == ['品牌', '图案', '器型'] and it['consistency'] == 3
+    assert it['need_text'] == '塞弗尔蓝色系列的杯、碟、壶' and it['quotes'] == []
+    assert not {'grade', 'grade_label', 'weight', 'reasons'} & set(it) and 'has_need' not in wang
     li = rows['李先生']
-    assert set(codes_of(li)) == {scene['vase'], scene['onion']} and not li['has_need']
-    assert all(x['grade'] == 'inferred' and x['grade_label'] == '推算口味' for x in li['items'])
-    assert li['items'][0]['reasons'] == ['推算口味：Meissen（购买）']
-    assert codes_of(li) == [scene['vase'], scene['onion']]      # 同级按分数
+    assert all(x['dims'] == ['品牌'] for x in li['items'])
+    assert codes_of(li) == [scene['vase'], scene['onion']]      # 同一致性按分数
+    assert '孙女士' not in rows                                  # 只有喜好：不进 04
     assert v['count'] == 3                                      # 有未处理匹配的客人数
+    text = json.dumps(v, ensure_ascii=False)
+    assert not any(w in text for w in ('明说想要', '明说喜欢', '推算口味'))
 
 
 def test_dislike_pattern_excludes_and_form_only_never_matches(store, gc, root, scene):
     rows = by_name(matching.view(store, gc, root))
     zhao = rows['赵女士']
     assert codes_of(zhao) == [scene['vase']]                    # 蓝洋葱的货不匹配
-    assert zhao['items'][0]['grade'] == 'explicit' and zhao['items'][0]['reasons'] == ['明说喜欢：Meissen']
+    assert zhao['items'][0]['need_text'] == '梅森'
     assert '钱先生' not in rows                                  # 只对上器型（别的品牌的杯）不算
 
 
@@ -293,9 +314,9 @@ def test_gc_unavailable(store, root, tmp_path, scene):
 
 def test_skips_merged_archived_and_reads_potential_customers(store, gc, root, scene):
     db = gc['db']
-    customer(db, 'GC000105', '已合并', prefs=[pref('maker', 'Meissen')], status='merged')
-    customer(db, 'GC000106', '已归档', prefs=[pref('maker', 'Meissen')], status='archived')
-    customer(db, 'GC000107', '潜在', prefs=[pref('maker', '梅森')], root='潜在客户')
+    customer(db, 'GC000105', '已合并', needs=[need('梅森', maker=['Meissen'])], status='merged')
+    customer(db, 'GC000106', '已归档', needs=[need('梅森', maker=['Meissen'])], status='archived')
+    customer(db, 'GC000107', '潜在', needs=[need('梅森', maker=['梅森'])], root='潜在客户')
     names = set(by_name(matching.view(store, gc, root)))
     assert '潜在' in names and not names & {'已合并', '已归档'}
 
@@ -440,7 +461,7 @@ def test_backoffice_page_has_match_section(http):
 
 def test_api_match_and_decide(http, scene):
     status, v = http['get']('/api/match')
-    assert status == 200 and v['count'] == 3 and v['customers'][0]['name'] == '王姐'
+    assert status == 200 and v['count'] == 3 and v['customers'][0]['name'] == '李先生'
     body = {'customer_id': 'GC000102', 'item_id': 'it-vase', 'decision': 'rejected', 'request_id': 'h-1'}
     status, r = http['post']('/api/match/decide', body)
     assert status == 200 and r['decision'] == 'rejected'
@@ -456,16 +477,16 @@ def test_api_match_and_decide(http, scene):
 
 # ---------- 复查后补充 ----------
 
-def test_customer_order_need_then_pending_then_total(store, gc, root, scene):
+def test_customer_order_pending_then_total(store, gc, root, scene):
     db = gc['db']
-    customer(db, 'GC000201', 'A客人', prefs=[pref('pattern', 'Sèvres 蓝色系列')])                    # 1 件
-    customer(db, 'GC000202', 'B客人', prefs=[pref('maker', 'Meissen'), pref('maker', 'Sèvres')])   # 3 件
+    customer(db, 'GC000201', 'A客人', needs=[need('Sèvres 蓝色系列', maker=['Sèvres'])])                      # 1 件
+    customer(db, 'GC000202', 'B客人', needs=[need('梅森', maker=['Meissen']), need('塞弗尔', maker=['Sèvres'])])  # 3 件
     order = [c['name'] for c in matching.view(store, gc, root)['customers']]
-    assert order == ['王姐', 'B客人', '李先生', 'A客人', '赵女士']        # 件数顺序与名字顺序不一致
+    assert order == ['B客人', '李先生', 'A客人', '王姐', '赵女士']        # 件数顺序与名字顺序不一致
     for iid in ('it-sevres', 'it-vase', 'it-onion'):
         matching.decide(store, gc, 'GC000202', iid, 'confirmed', 'rq-o-' + iid, root=root)
     order = [c['name'] for c in matching.view(store, gc, root)['customers']]
-    assert order == ['王姐', '李先生', 'A客人', '赵女士', 'B客人']        # 处理完的不压在有待处理的前面
+    assert order == ['李先生', 'A客人', '王姐', '赵女士', 'B客人']        # 处理完的不压在有待处理的前面
 
 
 def test_title_only_detection_and_dislike(store, gc, root, cfg, vocab, scene):
@@ -475,7 +496,6 @@ def test_title_only_detection_and_dislike(store, gc, root, cfg, vocab, scene):
     assert rules.match_customer(f, [], likes, vocab)['grade'] == 'explicit'
     assert rules.match_customer(f, [], likes + [pref('pattern', '蓝洋葱', polarity='dislike')], vocab) is None
     code = add(store, cfg, 'it-z', 'Meissen Zwiebelmuster Teller', 'Meissen')     # 无图案、无功能
-    customer(gc['db'], 'GC000103', '赵女士', prefs=[pref('maker', 'Meissen'), pref('pattern', '蓝洋葱', polarity='dislike')])
     v = by_name(matching.view(store, gc, root))
     assert codes_of(v['赵女士']) == [scene['vase']] and code in codes_of(v['李先生'])
 
@@ -562,7 +582,7 @@ def test_invalid_utf8_and_unreadable_files(store, gc, root, scene, caplog):
     matching._cache.clear()
     with caplog.at_level(logging.WARNING, logger='curio.matching'):
         v = matching.view(store, gc, root)
-    assert v['unreadable'] == 1 and v['warnings'] == 0 and '李先生' not in by_name(v)
+    assert v['unreadable'] == 1 and v['warnings'] == 0 and '李先生' in by_name(v)    # 需求照常
     assert any('未能读取' in r.getMessage() for r in caplog.records)
 
 
@@ -646,3 +666,164 @@ def test_detail_required_validated(tmp_path):
                                                                    'detail_required: [brand]'))
     with pytest.raises(ValueError, match='detail_required'):
         match_rules(tmp_path)
+
+
+# ---------- 故事 29：近一年的需求、一致性排序、客人原话 ----------
+
+TODAY = datetime.date(2026, 11, 4)
+
+
+@pytest.fixture
+def strict_root(tmp_path):
+    """仓库里的 matching.yaml 原样（品牌只是门槛，need_recent_days: 365）。"""
+    r = tmp_path / 'strict'
+    (r / 'config').mkdir(parents=True)
+    (r / 'config' / 'matching.yaml').write_text((ROOT / 'config' / 'matching.yaml').read_text())
+    (r / '.env').write_text(f'CURIO_SERVER_URL={SITE}\n')
+    return r
+
+
+@pytest.fixture
+def roses(store, cfg, gc):
+    return dict(
+        tray=add(store, cfg, 'it-tray', 'Meissen rote Rose Teller', 'Meissen', function='盘', pattern='红玫瑰',
+                 pattern_id='MP-014', score=40),
+        cup=add(store, cfg, 'it-cup', 'Meissen Kaffeetasse', 'Meissen', function='杯', score=90),
+        rcup=add(store, cfg, 'it-rcup', 'Meissen rote Rose Tasse', 'Meissen', function='杯', pattern='红玫瑰',
+                 pattern_id='MP-014', score=10))
+
+
+def test_recent_need_matches_old_need_does_not(store, gc, strict_root, roses):
+    customer(gc['db'], 'GC000301', '周女士', needs=[
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen='2026-03-10T09:00:00+01:00')])
+    customer(gc['db'], 'GC000302', '吴先生', needs=[
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen='2022-10-01T09:00:00+02:00')])
+    rows = by_name(matching.view(store, gc, strict_root, today=TODAY))
+    assert '吴先生' not in rows                                     # 旧需求不出现
+    zhou = rows['周女士']
+    assert codes_of(zhou) == [roses['tray']]
+    assert zhou['items'][0]['dims'] == ['品牌', '图案', '器型']
+    with pytest.raises(ValueError, match='没有匹配'):                # 旧需求也不能确认
+        matching.decide(store, gc, 'GC000302', 'it-tray', 'confirmed', 'rq-old', root=strict_root, today=TODAY)
+    assert matching.decide(store, gc, 'GC000301', 'it-tray', 'confirmed', 'rq-new', root=strict_root,
+                           today=TODAY)['decision'] == 'confirmed'
+
+
+def test_consistency_order_full_matches_first(store, gc, strict_root, roses):
+    customer(gc['db'], 'GC000303', '郑女士', needs=[
+        need('梅森杯子', maker=['梅森'], seen='2026-09-01T09:00:00+02:00'),
+        need('红玫瑰杯', maker=['梅森'], patterns=['红玫瑰'], seen='2026-08-01T09:00:00+02:00')])
+    items = by_name(matching.view(store, gc, strict_root, today=TODAY))['郑女士']['items']
+    # 红玫瑰杯 3 项全对（分数最低也在前）；梅森杯子只说品牌 + 器型（2 项，全部对上）在后
+    assert [x['code'] for x in items] == [roses['rcup'], roses['cup']]
+    assert items[0]['dims'] == ['品牌', '图案', '器型'] and items[0]['need_text'] == '红玫瑰杯'
+    assert items[1]['dims'] == ['品牌', '器型'] and items[1]['consistency'] == 2
+
+
+def test_same_consistency_full_before_partial(vocab):
+    plain = facts(vocab, 'Meissen', 'Meissen rote Rose', pattern='红玫瑰', pattern_id='MP-014')   # 器型未知
+    full = rules.need_match(need('梅森红玫瑰', maker=['梅森'], patterns=['红玫瑰']), plain, vocab, datetime.date.today())
+    part = rules.need_match(need('梅森红玫瑰盘子', maker=['梅森'], patterns=['红玫瑰']), plain, vocab, datetime.date.today())
+    assert full['dims'] == part['dims'] == ['品牌', '图案']
+    assert (full['named'], part['named']) == (2, 3)
+    assert rules.consistency_key(full) < rules.consistency_key(part)
+    best = rules.best_need_match(plain, [need('梅森红玫瑰盘子', maker=['梅森'], patterns=['红玫瑰']),
+                                         need('梅森红玫瑰', maker=['梅森'], patterns=['红玫瑰'])], [], vocab,
+                                 datetime.date.today())
+    assert best['text'] == '梅森红玫瑰'
+
+
+def test_recent_dates(vocab):
+    f = facts(vocab, 'Meissen', 'Meissen Tasse', function='杯')
+    base = need('梅森杯', maker=['梅森'], seen=None)
+
+    def hit(**dates):
+        return rules.need_match(dict(base, **dates), f, vocab, TODAY) is not None
+    assert hit(last_seen_at='2025-11-04T00:00:00+01:00')                     # 恰好 365 天前
+    assert not hit(last_seen_at='2025-11-03T23:00:00+01:00')
+    assert hit(last_seen_at='2026-01-02T08:00:00Z')
+    assert hit(first_seen_at='2026-05-01')                                   # 缺 last_seen 用 first_seen
+    assert hit(last_seen_at='坏日期', first_seen_at='2026-05-01T00:00:00+02:00')
+    assert not hit(last_seen_at='坏日期', first_seen_at=12)                   # 都解析不了：不在近一年
+    assert not hit()
+    assert rules.need_match(dict(base, last_seen_at='2026-05-01', status='fulfilled'), f, vocab, TODAY) is None
+
+
+def test_quotes_customer_first_by_time_with_dates(store, gc, strict_root, roses):
+    ev = [evd('EVD-1', '还想要一个红玫瑰的托盘', '2026-03-10T09:05:00+01:00'),
+          evd('EVD-2', '好的我留意', '2026-03-10T09:01:00+01:00', role='merchant', name='墨墨'),
+          evd('EVD-3', '有红玫瑰的盘子吗', '2026-03-10T09:00:00+01:00'),
+          evd('EVD-4', '大一点的', '2026-03-11T10:00:00+01:00')]
+    customer(gc['db'], 'GC000304', '王姐', evidence=ev, needs=[
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen='2026-03-11T10:00:00+01:00',
+             refs=['EVD-2', 'EVD-1', 'EVD-4', 'EVD-3', 'EVT-9'])])
+    q = by_name(matching.view(store, gc, strict_root, today=TODAY))['王姐']['items'][0]['quotes']
+    assert [x['text'] for x in q] == ['有红玫瑰的盘子吗', '还想要一个红玫瑰的托盘', '大一点的', '好的我留意']
+    assert [x['date'] for x in q] == ['2026-03-10', '2026-03-10', '2026-03-11', '2026-03-10']
+    assert [x['customer'] for x in q] == [True, True, True, False] and q[3]['who'] == '墨墨'
+
+
+def test_quotes_at_most_five(store, gc, strict_root, roses):
+    ev = [evd('EVD-%d' % n, '第 %d 句' % n, '2026-03-1%dT09:00:00+01:00' % n) for n in range(7)]
+    customer(gc['db'], 'GC000305', '冯女士', evidence=ev, needs=[
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen='2026-03-11T10:00:00+01:00',
+             refs=['EVD-%d' % n for n in range(7)])])
+    q = by_name(matching.view(store, gc, strict_root, today=TODAY))['冯女士']['items'][0]['quotes']
+    assert [x['text'] for x in q] == ['第 %d 句' % n for n in range(2, 7)]     # 留最近的 5 条，从早到晚显示
+
+
+def test_quotes_mixed_offsets_undated_duplicates_retracted(store, gc, strict_root, roses):
+    ev = [evd('EVD-a', '柏林早上', '2026-03-10T09:00:00+01:00'),        # 08:00 UTC
+          evd('EVD-b', '北京下午', '2026-03-10T15:30:00+08:00'),        # 07:30 UTC：更早
+          evd('EVD-c', '没写时间', None),
+          evd('EVD-d', '撤回的话', '2026-03-09T09:00:00+01:00', status='retracted'),
+          evd('EVD-e', '墨墨回复', '2026-03-01T09:00:00+01:00', role='merchant', name='墨墨')]
+    customer(gc['db'], 'GC000308', '蒋女士', evidence=ev, needs=[
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen='2026-03-11T10:00:00+01:00',
+             refs=['EVD-c', 'EVD-a', 'EVD-a', 'EVD-d', 'EVD-e', 'EVD-b', 'EVD-b'])])
+    q = by_name(matching.view(store, gc, strict_root, today=TODAY))['蒋女士']['items'][0]['quotes']
+    assert [x['text'] for x in q] == ['北京下午', '柏林早上', '没写时间', '墨墨回复']
+    assert q[2]['date'] == ''
+
+
+def test_quotes_over_five_prefers_recent_customer_quotes(store, gc, strict_root, roses):
+    ev = [evd('EVD-%d' % n, '客人 %d' % n, '2026-03-1%dT09:00:00+01:00' % n) for n in range(6)]
+    ev.append(evd('EVD-m', '墨墨最新', '2026-03-19T09:00:00+01:00', role='merchant', name='墨墨'))
+    customer(gc['db'], 'GC000309', '韩女士', evidence=ev, needs=[
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen='2026-03-11T10:00:00+01:00',
+             refs=['EVD-m'] + ['EVD-%d' % n for n in range(6)])])
+    q = by_name(matching.view(store, gc, strict_root, today=TODAY))['韩女士']['items'][0]['quotes']
+    assert [x['text'] for x in q] == ['客人 %d' % n for n in range(1, 6)]
+
+
+def test_missing_evidence_still_matches_and_warns_once(store, gc, strict_root, roses, caplog):
+    customer(gc['db'], 'GC000306', '陈女士', needs=[      # 没有 evidence.jsonl
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen=RECENT, refs=['EVD-1'])])
+    customer(gc['db'], 'GC000307', '褚先生', evidence=[evd('EVD-8', '别的', '2026-03-10T09:00:00+01:00')], needs=[
+        need('红玫瑰杯', maker=['梅森'], patterns=['红玫瑰'], seen=RECENT, refs=['EVD-1'])])
+    customer(gc['db'], 'GC000310', '卫女士', needs=[        # 旧需求、没有引用的需求：不计入警告
+        need('红玫瑰托盘', maker=['梅森'], patterns=['红玫瑰'], seen='2022-03-11T10:00:00+01:00', refs=['EVD-1']),
+        need('红玫瑰杯', maker=['梅森'], patterns=['红玫瑰'])])
+    with caplog.at_level(logging.WARNING, logger='curio.matching'):
+        rows = by_name(matching.view(store, gc, strict_root))
+    assert rows['陈女士']['items'][0]['quotes'] == [] and rows['褚先生']['items'][0]['quotes'] == []
+    warns = [r for r in caplog.records if '找不到原话' in r.getMessage()]
+    assert len(warns) == 1 and '2 条' in warns[0].getMessage()
+
+
+def test_need_recent_days_validated(tmp_path):
+    (tmp_path / 'config').mkdir()
+    good = (ROOT / 'config' / 'matching.yaml').read_text()
+    f = tmp_path / 'config' / 'matching.yaml'
+    assert 'need_recent_days: 365' in good
+    assert match_rules(ROOT)['need_recent_days'] == 365
+    for bad in ('0', '-3', '1.5', 'yes', '"365"'):
+        f.write_text(good.replace('need_recent_days: 365', 'need_recent_days: ' + bad))
+        with pytest.raises(ValueError, match='need_recent_days'):
+            match_rules(tmp_path)
+
+
+def test_page_has_quotes_and_no_grade_labels(http):
+    js = urllib.request.urlopen(http['base'] + '/triage.js').read().decode()
+    assert "'对上：'" in js and '看原话' in js and '没有找到原话' in js
+    assert not any(w in js for w in ('明说想要', '明说喜欢', '推算口味'))
