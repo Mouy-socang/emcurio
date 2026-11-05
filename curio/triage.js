@@ -767,12 +767,19 @@ function aucRow(c) {
   cv.onclick = () => aucConvert(li);
   return li;
 }
+// 拍卖新品的来源切换：全部 / eBay / 拍卖行（拍卖行的货结束得晚，混排时排在很多 eBay 拍卖之后）。
+let aucSrc = '';
+function setAucSrc(src) {
+  aucSrc = src;
+  $('aucSrc').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.src === src)));
+  loadAuc(true);
+}
 async function loadAuc(reset) {
   if (reset) { aucGen++; aucCursor = null; $('aucList').textContent = ''; }
   const gen = aucGen;
   $('aucErr').hidden = true;
   try {
-    const d = await get('/api/auctions?limit=' + FEED_BATCH + (aucCursor ? '&cursor=' + encodeURIComponent(aucCursor) : ''));
+    const d = await get('/api/auctions?limit=' + FEED_BATCH + (aucSrc ? '&source=' + aucSrc : '') + (aucCursor ? '&cursor=' + encodeURIComponent(aucCursor) : ''));
     if (gen !== aucGen) return;
     const shown = new Set([...$('aucList').children].map(li => li.dataset.id));
     d.items.forEach(c => { if (!shown.has(c.item_id)) $('aucList').append(aucRow(c)); });
@@ -1245,6 +1252,7 @@ $('back').onclick = closeAr;
 $('openAuc').onclick = openAuc;
 $('aucBack').onclick = closeAuc;
 $('aucMore').onclick = () => loadAuc(false);
+$('aucSrc').querySelectorAll('button').forEach(b => { b.onclick = () => setAucSrc(b.dataset.src); });
 $('aucReload').onclick = () => loadAuc(false);
 $('arMore').onclick = () => loadAr(false);
 $('arReload').onclick = () => loadAr(false);

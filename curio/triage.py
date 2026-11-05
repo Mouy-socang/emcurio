@@ -526,19 +526,27 @@ AUCTION_SQL = ('SELECT * FROM (SELECT i.*, t.state triage_state, '
                'WHERE 1=1 %s ORDER BY k1, k2, item_id LIMIT ?')
 
 
-def auctions(c, limit=40, cursor=None, at=None):
+AUCTION_SOURCES = ('ebay', 'auction_house')
+
+
+def auctions(c, limit=40, cursor=None, at=None, source=None):
     """拍卖新品（故事 20）：未结束的按结束时间近到远在前，已过结束时间的在后（新到旧）；每行带 ended（是否已过结束时间）。
-    游标为上一批最后一件的 [k1, k2, item_id]。返回 (rows, next_cursor)。at 为"现在"（ISO，测试用）。"""
+    游标为上一批最后一件的 [k1, k2, item_id]。返回 (rows, next_cursor)。at 为"现在"（ISO，测试用）。
+    source：只看 eBay（'ebay'）或拍卖行（'auction_house'）的；缺省全部。"""
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('分页参数无效：limit 须为 1–100')
+    if source is not None and source not in AUCTION_SOURCES:
+        raise ValueError('来源无效')
     at = at or now()
     where, args = '', [at, at]
+    if source:
+        where, args = 'AND platform = ? ', args + [source]
     if cursor is not None:
         if (not isinstance(cursor, list) or len(cursor) != 3 or type(cursor[0]) is not int or cursor[0] not in (0, 1)
                 or isinstance(cursor[1], bool) or not isinstance(cursor[1], (int, float)) or not math.isfinite(cursor[1])
                 or not isinstance(cursor[2], str)):
             raise ValueError('游标无效')
-        where = 'AND (k1 > ? OR (k1 = ? AND (k2 > ? OR (k2 = ? AND item_id > ?))))'
+        where += 'AND (k1 > ? OR (k1 = ? AND (k2 > ? OR (k2 = ? AND item_id > ?))))'
         args += [cursor[0], cursor[0], cursor[1], cursor[1], cursor[2]]
     rows = [dict(r) for r in c.execute(AUCTION_SQL % where, args + [limit + 1])]
     more = len(rows) > limit
