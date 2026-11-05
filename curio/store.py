@@ -120,12 +120,13 @@ def _eval_item(r,human):
     """rules.evaluate 的输入：货的字段加 human_decided（已有人工决定的货不受已确认规律影响，AD-26）。"""
     return dict(r,human_decided=human)
 
-def rejudge(c,config,precomputed=None):
+def rejudge(c,config,precomputed=None,platform=None):
     """全量重判（屏蔽词与重判脚本共用）：理由或结论变化的货更新判断、rule_version+1，
     再经 triage.system_place 落位——只移动未经人工决定的货（AD-26）。调用方须已开写事务。
     precomputed：{item_id: ((_eval_sig, 是否有人工决定), evaluate 结果)}，签名一致时沿用，否则当场重算。
+    platform：只重判这一平台的货（故事 33 拍卖行口径改动后用）；缺省全部。
     返回 dict(checked, changed, blocked, moved, transitions={旧类别→新类别: 件数})。"""
-    rows=c.execute('SELECT * FROM items').fetchall()
+    rows=(c.execute('SELECT * FROM items WHERE platform=?',(platform,)) if platform else c.execute('SELECT * FROM items')).fetchall()
     human=humans(c)
     changed=matched=moved=0;transitions={}
     for r in rows:
@@ -440,7 +441,12 @@ class Store:
             row=c.execute('SELECT * FROM items WHERE item_id=?',(iid,)).fetchone()
             if not row or type(version) is not int or row['rule_version']!=version:
                 raise ValueError('商品已更新，请刷新后重试')
-            if not any(word.casefold() in (row[field] or '').casefold() for field in ('title','description')):
+            if row['platform']=='auction_house':
+                # 故事 33：拍卖行口径的屏蔽词只按整词看标题，从描述或词片段里选的词对其他拍卖行拍品不起作用。
+                from .rules import _whole_word
+                if not _whole_word(word,row['title']):
+                    raise ValueError('拍卖行的拍品只能从标题里选一个完整的词作屏蔽词')
+            elif not any(word.casefold() in (row[field] or '').casefold() for field in ('title','description')):
                 raise ValueError('屏蔽词必须来自这件商品的标题或描述')
             existing=c.execute('SELECT word FROM blocked_words').fetchall()
             if not any(r[0].casefold()==word.casefold() for r in existing):

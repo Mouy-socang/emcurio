@@ -132,9 +132,28 @@ def irrelevant_reason(title):
         if re.search(pattern,title or '',re.I):return reason
     return None
 
+NO_BRAND='标题里没有品牌/瓷器信号'
+
+def _whole_word(word,text):
+    """故事 33：整词匹配（前后不紧挨字母或数字），不区分大小写；复合词里的片段不算（Horn 不命中 Einhorn、Hornbecher）。"""
+    return re.search(r'(?<!\w)'+re.escape(word)+r'(?!\w)',text or '',re.I) is not None
+
 def evaluate(item,config):
     result=judge.judge(item.get('title',''),item.get('listed_price'),item.get('price_text',''),use_legacy_prices=False)
+    house=item.get('platform')=='auction_house'
+    if house and result['reason']==NO_BRAND:
+        # 故事 33：拍卖行标题常不写品牌（如"Doppelhenkelbecher mit Seladonfond"），描述里有品牌就当作标题带了它。
+        brand=judge.detect_brand(item.get('description',''))
+        if brand:
+            result=judge.judge(brand+' '+(item.get('title') or ''),item.get('listed_price'),item.get('price_text',''),use_legacy_prices=False)
+            if brand=='KPM' and judge._NOT_KPM_BERLIN.search(item.get('description') or ''):
+                result=dict(result,decision='probe',reason='注意：可能是 KPM Krister/Bavaria 等，不是 KPM Berlin',fair='')
     for word in config.get('blocked_words', []):
+        if house:
+            # 故事 33：拍卖行的长描述（Pinselnummer、Goldakzente、文献 Band）会被片段误中：只看标题、按整词。
+            if _whole_word(word,item.get('title','')):
+                return dict(result, decision='skip', reason='屏蔽词：'+word+'（标题）', fair='')
+            continue
         for field in ('title', 'description'):
             if word.casefold() in str(item.get(field, '') or '').casefold():
                 return dict(result, decision='skip', reason='屏蔽词：'+word+'（'+('标题' if field=='title' else '描述')+'）', fair='')
