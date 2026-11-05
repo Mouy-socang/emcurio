@@ -99,7 +99,8 @@ def allow_auction_house(root=ROOT):
 
 # ---- 故事 32：拍卖行名单 ----
 
-HOUSE_STATUSES=('allowed','ask','forbidden')
+# skip（故事 34）：不值得看——瓷器少、停业或没有自己的网站；与条款结论（allowed / ask / forbidden）分开。
+HOUSE_STATUSES=('allowed','ask','forbidden','skip')
 # 条款禁止程序采集的平台：名单里出现时不得标为 allowed（双保险，代码也从不访问它们）。
 NEVER_VISIT=frozenset({'lottissimo','the_saleroom','invaluable','liveauctioneers','catawiki'})
 _HOUSE_KEY=re.compile(r'[a-z][a-z0-9_]{0,30}')
@@ -126,7 +127,7 @@ def auction_houses(value):
         site=h.get('site','')
         if not isinstance(site,str) or (site and not site.startswith('https://')):raise ValueError(where+' 的 site 必须为 https 网址或空')
         status=h.get('status')
-        if status not in HOUSE_STATUSES:raise ValueError(where+' 的 status 必须为 allowed / ask / forbidden')
+        if status not in HOUSE_STATUSES:raise ValueError(where+' 的 status 必须为 allowed / ask / forbidden / skip')
         if key in NEVER_VISIT and status=='allowed':raise ValueError(key+' 的条款禁止程序采集，不能标为 allowed')
         for f in ('adapter','enabled'):
             if type(h.get(f,False)) is not bool:raise ValueError(where+' 的 '+f+' 必须为 true 或 false')

@@ -19,13 +19,13 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .config import ROOT
+from .config import HOUSE_MAX_REQUESTS, ROOT
 
 log = logging.getLogger(__name__)
 BERLIN = ZoneInfo('Europe/Berlin')
 BOT = 'CurioObjectBot/0.1'
 PLATFORM = 'auction_house'
-MAX_REQUESTS = 40
+MAX_REQUESTS = HOUSE_MAX_REQUESTS     # 每家每次的请求上限缺省值，与名单校验同一个常量
 MAX_REDIRECTS = 3
 TIMEOUT = 30
 STATUS_KEY = 'ah_status'
@@ -52,6 +52,10 @@ class RobotsDenied(Stop):
 
 class LimitReached(Stop):
     pass
+
+
+class OutOfTime(LimitReached):
+    """本轮总时限已到（run_due 传给 Fetcher 的 deadline）：这家停下，其余拍卖行本轮也不再开始。"""
 
 
 class FetchError(Exception):
@@ -97,7 +101,7 @@ class Robots:
 
     def _groups(self, ua):
         name = (ua or '').split('/')[0].strip().lower()
-        own = [g for g in self.groups if any(a != '*' and a.split('/')[0] and name.startswith(a.split('/')[0]) for a in g['agents'])]
+        own = [g for g in self.groups if any(a != '*' and a.split('/')[0].strip() == name for a in g['agents'])]
         return own or [g for g in self.groups if '*' in g['agents']]
 
     @staticmethod
@@ -140,8 +144,9 @@ def user_agent(contact=None, root=ROOT):
 class Fetcher:
     """一家拍卖行一次运行用的取数器。session 只需 request(method, url, **kw)。"""
 
-    def __init__(self, session, ua=BOT, interval=5.0, max_requests=MAX_REQUESTS, sleep=time.sleep, monotonic=time.monotonic):
+    def __init__(self, session, ua=BOT, interval=5.0, max_requests=MAX_REQUESTS, sleep=time.sleep, monotonic=time.monotonic, deadline=None):
         self.session, self.ua, self.interval, self.max_requests = session, ua, float(interval), max_requests
+        self.deadline = deadline   # monotonic 时刻：过了就不再发请求（run_due 每轮的总时限）
         self.sleep, self.monotonic = sleep, monotonic
         self.requests = 0
         self.last = {}         # 主机 → 上次请求的 monotonic 时间
@@ -216,7 +221,11 @@ class Fetcher:
         if host in self.last:
             wait = gap - (self.monotonic() - self.last[host])
             if wait > 0:
+                if self.deadline is not None and self.monotonic() + wait > self.deadline:
+                    raise OutOfTime('本轮时限已到，其余明天再看')
                 self.sleep(wait)
+        if self.deadline is not None and self.monotonic() >= self.deadline:
+            raise OutOfTime('本轮时限已到，其余明天再看')
         self.requests += 1
         try:
             r = self.session.request(method, url, headers={'User-Agent': self.ua, 'Accept-Language': 'de'},
@@ -646,6 +655,8 @@ HISTORIA_AUCTIONS = HISTORIA_BASE + '/auktionen/'
 HISTORIA_PER_PAGE = 52
 HISTORIA_BACK = 5            # 估算的页过了号段起点时，最多往回退几页
 HISTORIA_IMAGE = 'https://bidspirit-images.global.ssl.fastly.net/'
+HISTORIA_TITLE_MAX = 120
+HISTORIA_MISSED = '号段起点没找到，部分拍品可能漏收'
 
 
 def _attr(tag, name):
@@ -687,7 +698,7 @@ def historia_sales(page):
 
 def historia_schedule(page):
     """拍卖页的日程块（data-time + 表行「Porzellan Teil II | 2830 - 3659 | ab 10:00 Uhr」）→
-    [{category, lo, hi, at（UTC datetime，取块的 data-time）}]。"""
+    [{category, lo, hi, at（UTC datetime）}]。at 取这一行自己的「HH:MM Uhr」（同一天，柏林时间），没写时取块的 data-time。"""
     rows = []
     blocks = re.split(r'(<div class="information-block__item\b[^>]*>)', page)
     for head, body in zip(blocks[1::2], blocks[2::2]):
@@ -700,8 +711,17 @@ def historia_schedule(page):
         for tr in re.findall(r'<tr>(.*?)</tr>', body.split('</table>')[0], re.S):
             cells = [text_of(td) for td in re.findall(r'<td[^>]*>(.*?)</td>', tr, re.S)]
             rng = re.search(r'(\d+)\s*-\s*(\d+)', cells[1]) if len(cells) >= 2 else None
-            if rng:
-                rows.append(dict(category=cells[0], lo=int(rng[1]), hi=int(rng[2]), at=at.astimezone(timezone.utc)))
+            if not rng:
+                continue
+            own = at.astimezone(timezone.utc)
+            clock = re.search(r'(\d{1,2})[.:](\d{2})\s*Uhr', cells[2]) if len(cells) >= 3 else None
+            if clock:
+                try:
+                    local = datetime.combine(at.astimezone(BERLIN).date(), dtime(int(clock[1]), int(clock[2])))
+                    own = local.replace(tzinfo=BERLIN).astimezone(timezone.utc)
+                except ValueError:
+                    pass
+            rows.append(dict(category=cells[0], lo=int(rng[1]), hi=int(rng[2]), at=own))
     return rows
 
 
@@ -738,9 +758,9 @@ def historia_lots(page):
                 description = text_of(str(data.get('content') or ''))
             except (ValueError, AttributeError):
                 pass
-        if description.startswith(title) and title:
-            head = description.split(',')[0].strip()     # data-content 的 title 截断在约 33 个字；描述开头的整句更完整
-            if len(head) > len(title):
+        if title and description.startswith(title) and ',' in description:
+            head = description.split(',')[0].strip()     # data-content 的 title 截断在约 33 个字；描述开头到第一个逗号更完整
+            if len(title) < len(head) <= HISTORIA_TITLE_MAX:
                 title = head
         if not title:
             name = re.search(r'<div class="grid-title">(.*?)</div>', chunk, re.S)
@@ -750,8 +770,10 @@ def historia_lots(page):
         start = re.search(r'Startpreis:\s*(?:<[^>]+>\s*)*EUR\s*([\d.,]+)', chunk)
         price = None
         if start:
-            digits = re.sub(r'[.,]', '', start[1])            # 「EUR 10,000」「EUR 1.200」都是整欧元
-            price = float(digits) if digits.isdigit() else None
+            if re.fullmatch(r'\d{1,3}(?:,\d{3})+', start[1]):          # 样本里的「EUR 10,000」：英文千位分隔
+                price = float(start[1].replace(',', ''))
+            else:
+                price = euro_number(start[1])                           # 「1.200」「1.200,50」：德文写法
         lots.append(dict(lot=number[1], n=int(re.match(r'\d+', number[1])[0]), title=title or number[1],
                          description=description, start=price, url=html.unescape(link[1]) if link else '',
                          image=html.unescape(img[1]) if img else ''))
@@ -773,27 +795,34 @@ def _historia_guess(lo, schedule, counts, per_page):
 
 def _historia_segment(read, lo, hi, guess, last, add):
     """翻一个号段：从估算页起，过了起点就往回退（最多 HISTORIA_BACK 页），再往后翻到号段终点或没有拍品为止。
-    号段里的拍品逐页交给 add（中途到请求上限时，已翻到的不丢）。返回件数。"""
+    read(页码) → (拍品, 该页给出的末页)；末页取读过各页的最大值。号段里的拍品逐页交给 add（中途到请求上限时，已翻到的不丢）。
+    页面按拍品号排序：一页里出现比 hi 大的号，号段（含 3659a 这类带字母的）就翻完了。
+    返回 (件数, 是否没找到号段起点)。"""
     page = max(1, min(guess, last))
     for _ in range(HISTORIA_BACK):
-        nums = [l['n'] for l in read(page)]
+        lots, page_last = read(page)
+        last = max(last, page_last)
+        nums = [l['n'] for l in lots]
         if page > 1 and (not nums or min(nums) > lo):
             page -= 1
             continue
         break
+    lots, _ = read(page)
+    missed = page > 1 and bool(lots) and min(l['n'] for l in lots) > lo
     found = 0
     while page <= last:
-        lots = read(page)
+        lots, page_last = read(page)
+        last = max(last, page_last)
         if not lots:
             break
         for lot in lots:
             if lo <= lot['n'] <= hi:
                 add(lot)
                 found += 1
-        if max(l['n'] for l in lots) >= hi:
+        if max(l['n'] for l in lots) > hi:
             break
         page += 1
-    return found
+    return found, missed
 
 
 def collect_historia(fetcher, today, window_days, out, now=None):
@@ -820,23 +849,26 @@ def collect_historia(fetcher, today, window_days, out, now=None):
         lots1, last, cards = historia_lots(first)
         if cards is None:
             raise ValueError(PARSE_FAILED)
-        cache[1] = lots1
+        cache[1] = (lots1, last)
 
         def read(n, sale=sale, cache=cache):
             if n not in cache:
-                lots, _, cards = historia_lots(fetcher.get(sale['url'] + 'page/%d/' % n))
+                lots, page_last, cards = historia_lots(fetcher.get(sale['url'] + 'page/%d/' % n))
                 if cards is None:
                     raise ValueError(PARSE_FAILED)
-                cache[n] = lots
+                cache[n] = (lots, page_last)
             return cache[n]
         counts = historia_counts(first)
         for seg in sorted(pending, key=lambda r: r['lo']):
             guess = _historia_guess(seg['lo'], schedule, counts, HISTORIA_PER_PAGE)
-            found += _historia_segment(read, seg['lo'], seg['hi'], guess, last,
-                                       lambda lot, sale=sale, seg=seg: out.append(historia_row(sale, lot, seg['at'])))
-    if found:
-        return None
-    return '；'.join(notes) if notes else _empty_note(window_days)
+            n, missed = _historia_segment(read, seg['lo'], seg['hi'], guess, last,
+                                          lambda lot, sale=sale, seg=seg: out.append(historia_row(sale, lot, seg['at'])))
+            found += n
+            if missed:
+                notes.append('%d 场 %s（%d–%d）%s' % (sale['sale'], seg['category'], seg['lo'], seg['hi'], HISTORIA_MISSED))
+    if notes:
+        return '；'.join(notes)                  # 部分场次收到了也照样留下其他场次的说明
+    return None if found else _empty_note(window_days)
 
 
 # ---------- Leo Spik（故事 34） ----------
@@ -850,13 +882,13 @@ LEO_PORZ = LEO_BASE + '/aa/porz.html'
 
 
 def leo_decode(raw):
-    """页面字节 → 文字：先按 UTF-8，失败再按 latin-1（HTML 实体在取字段时反转义）。"""
+    """页面字节 → 文字：先按 UTF-8，失败再按 cp1252（latin-1 的超集，0x80 是 €；HTML 实体在取字段时反转义）。"""
     if isinstance(raw, str):
         return raw
     try:
         return raw.decode('utf-8')
     except UnicodeDecodeError:
-        return raw.decode('latin-1')
+        return raw.decode('cp1252', errors='replace')
 
 
 def _no_comments(page):
@@ -876,8 +908,8 @@ def leo_sales(page):
 def leo_current(page):
     """/aa/aa.html → {sale（当前场次号或 None）, nachverkauf, porz_at（瓷器一章所在那天的开始时间，柏林当地；读不到 None）}。"""
     page = _no_comments(page)
-    sale = re.search(r'Auktion\s+(\d+)', text_of(page))
     head = page.split('<table', 1)[0]
+    sale = re.search(r'Auktion\s+(\d+)', text_of(head))
     porz_at = None
     link = re.search(r'href="porz\.html"', page)
     if link:
@@ -895,8 +927,8 @@ def leo_lots(page):
     """porz.html → 拍品列表；找不到 #Pic / #Num / #Descr 结构时 None。三个相邻块：
     #Pic（详情链接、knopf 缩略图）、#Num（拍品号）、#Descr（<b>标题</b><br>厂家与年代<br>描述<br>(编号) 600,-- €）。"""
     blocks = re.findall(r'<div id="Pic"[^>]*>(.*?)</div>\s*<div id="Num"[^>]*>(.*?)</div>\s*<div id="Descr"[^>]*>(.*?)</div>', page, re.S)
-    if not blocks and 'id="Num"' not in page:
-        return None
+    if not blocks:
+        return None          # 没有 #Num 或有 #Num 却一块也解析不出：都按改版处理
     out = []
     for pic, num, descr in blocks:
         number = re.search(r'\d+[A-Za-z]?', text_of(num))
@@ -947,6 +979,9 @@ def collect_leo_spik(fetcher, today, window_days, out, now=None):
             return '目录已是 %d 场的拍后补售，不再收' % current['sale']
         what = '%d 场的拍后补售' % current['sale'] if current['nachverkauf'] else '%d 场' % current['sale']
         return '目录还是 %s，%d 场图录未上线' % (what, upcoming)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if current['porz_at'] and current['porz_at'].replace(tzinfo=BERLIN) <= now:
+        return '%d 场的瓷器一章已开拍' % current['sale']
     page = leo_decode(fetcher.get_bytes(LEO_PORZ))
     head = text_of(_no_comments(page).split('<div id="Pic"', 1)[0])
     shown = re.search(r'Auktion\s+(\d+)', head)
@@ -1023,12 +1058,16 @@ def run_due(store, config, clock=time.time, session=None, sleep=None, monotonic=
                      new=0, found=0, error=None, note=None)
         status[house['key']] = dict(entry, note='正在查看')
         store.set(STATUS_KEY, json.dumps(status, ensure_ascii=False))
-        rows, fetcher = [], None
+        rows, fetcher, out_of_time = [], None, False
         try:
             if session is None:
                 session = make_session()
-            fetcher = Fetcher(session, ua, house['interval'], house.get('max_requests') or MAX_REQUESTS, sleep, monotonic)
+            fetcher = Fetcher(session, ua, house['interval'], house.get('max_requests') or MAX_REQUESTS, sleep, monotonic,
+                              deadline=started + run_seconds)
             entry['note'] = ADAPTERS[house['key']](fetcher, today, window, rows, now=now_utc)
+        except OutOfTime as e:
+            entry['error'] = str(e)
+            out_of_time = True
         except Stop as e:
             entry['error'] = str(e)
         except FetchError as e:
@@ -1056,6 +1095,8 @@ def run_due(store, config, clock=time.time, session=None, sleep=None, monotonic=
         status[house['key']] = entry
         store.set(STATUS_KEY, json.dumps(status, ensure_ascii=False))
         summary[house['key']] = {k: entry[k] for k in ('new', 'found', 'error', 'note', 'requests')}
+        if out_of_time:
+            break
     return summary
 
 

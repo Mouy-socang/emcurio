@@ -36,7 +36,7 @@ publish:
 auction_house_bot:
   contact: ''
   window_days: 90
-# 拍卖行名单：status 为 allowed（条款与 robots 允许看）/ ask（需先问对方）/ forbidden（禁止或不适用）。
+# 拍卖行名单：status 为 allowed（条款与 robots 允许看）/ ask（需先问对方）/ forbidden（条款或 robots 禁止）/ skip（不值得：瓷器少或不适用）。
 # 只有 status=allowed、enabled 为 true 且 adapter 为 true（有适配器）的才访问；interval 为同一主机两次请求的最短间隔（秒）。
 auction_houses:
   - {key: wendl, name: 文德尔拍卖行, site: 'https://www.auktionshauswendl.de', status: allowed, adapter: true, enabled: true, interval: 5,
@@ -49,7 +49,7 @@ auction_houses:
      terms: 没有 robots.txt，条款无限制；只读当前场次的瓷器一章，拍后补售不读}
   - {key: metz, name: 梅茨拍卖行, site: 'https://www.metz-auktion.de', status: allowed, adapter: false, enabled: false,
      terms: 在线图录已下线；暂无适配器}
-  - {key: schmidt, name: 施密特拍卖行, site: 'https://www.schmidt-auktionen.de', status: forbidden, adapter: false, enabled: false,
+  - {key: schmidt, name: 施密特拍卖行, site: 'https://www.schmidt-auktionen.de', status: skip, adapter: false, enabled: false,
      terms: 允许浏览，但现在基本只拍画，瓷器少，不适用}
   - {key: hampel, name: 汉佩尔拍卖行, site: 'https://www.hampel-auctions.com', status: ask, adapter: false, enabled: false,
      terms: 条款禁止把数据存入数据库，需先征得同意}
@@ -79,28 +79,28 @@ auction_houses:
      terms: 平台条款禁止程序采集}
   - {key: catawiki, name: 卡塔维基拍卖平台, site: 'https://www.catawiki.com', status: forbidden, adapter: false, enabled: false,
      terms: 平台条款禁止程序采集}
-  - {key: neumeister, name: 诺伊迈斯特拍卖行, site: 'https://www.neumeister.com', status: forbidden, adapter: false, enabled: false,
+  - {key: neumeister, name: 诺伊迈斯特拍卖行, site: 'https://www.neumeister.com', status: skip, adapter: false, enabled: false,
      terms: 已停业，不适用}
-  - {key: bergmann, name: 贝格曼拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: bergmann, name: 贝格曼拍卖行, site: '', status: skip, adapter: false, enabled: false,
      terms: 查不到网站，不适用}
-  - {key: zeller, name: 策勒拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: zeller, name: 策勒拍卖行, site: '', status: skip, adapter: false, enabled: false,
      terms: 查不到网站，不适用}
-  - {key: kempf, name: 肯普夫拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: kempf, name: 肯普夫拍卖行, site: '', status: skip, adapter: false, enabled: false,
      terms: 查不到网站，不适用}
-  - {key: fischer, name: 菲舍尔博士拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: fischer, name: 菲舍尔博士拍卖行, site: 'https://www.auctions-fischer.de', status: skip, adapter: false, enabled: false,
      terms: 主拍玻璃，瓷器少，不适用}
-  - {key: stahl, name: 施塔尔拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: stahl, name: 施塔尔拍卖行, site: 'https://www.auktionshaus-stahl.de', status: skip, adapter: false, enabled: false,
      terms: 瓷器少，不适用}
-  - {key: kiefer, name: 基弗拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: kiefer, name: 基弗拍卖行, site: 'https://www.kiefer.de', status: skip, adapter: false, enabled: false,
      terms: 主拍书，瓷器少，不适用}
-  - {key: henrys, name: 亨利拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: henrys, name: 亨利拍卖行, site: 'https://www.henrys.de', status: skip, adapter: false, enabled: false,
      terms: 主拍珠宝，瓷器少，不适用}
-  - {key: hargesheimer, name: 哈格斯海默拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: hargesheimer, name: 哈格斯海默拍卖行, site: 'https://www.kunstauktionen-duesseldorf.de', status: skip, adapter: false, enabled: false,
      terms: '现在拍圣像、珠宝、亚洲艺术，瓷器少；robots 禁止带「?」的网址，不适用'}
-  - {key: kinsky, name: 金斯基拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
-     terms: 11 月只有珠宝、手表、画，瓷器少，不适用}
-  - {key: dannenberg, name: 丹能贝格拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+  - {key: kinsky, name: 金斯基拍卖行, site: 'https://www.imkinsky.com', status: skip, adapter: false, enabled: false,
+     terms: 2026-11 只拍珠宝手表画，下次有古董场再查}
+  - {key: dannenberg, name: 丹能贝格拍卖行, site: '', status: skip, adapter: false, enabled: false,
      terms: 没有自己的网站，只在 Invaluable 平台上，不适用}
-  # 故事 34：Historia 一次最多翻约 50 页、每页隔 30 秒（robots 的 Crawl-delay），排在最后，免得占住其他家。
+  # 故事 34：Historia 每次最多 50 个请求（含 robots.txt、/auktionen/、拍卖页，其余是拍品页），每次隔 30 秒（robots 的 Crawl-delay），排在最后，免得占住其他家。
   - {key: historia, name: 希斯托利亚拍卖行, site: 'https://historia.de', status: allowed, adapter: true, enabled: true, interval: 30,
      max_requests: 50, terms: 'robots 要求两次请求间隔 30 秒、禁止带「?」的网址；只翻瓷器号段所在的拍品页'}

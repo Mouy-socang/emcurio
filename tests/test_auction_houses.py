@@ -3,7 +3,7 @@
 import json
 import re
 import shutil
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.parse import quote_plus, urlsplit
@@ -828,7 +828,8 @@ def test_leo_spik_normal_catalogue(db, cfg):
     routes = leo_normal(pages())
     routes[LEO + '/aa/porz.html'] = (200, fx('leospik/porz.html').replace('Auktion 699', 'Auktion 700'))
     out = []
-    note = ah.collect_leo_spik(ah.Fetcher(FakeSession(routes), sleep=lambda s: None), date(2026, 11, 5), 90, out)
+    note = ah.collect_leo_spik(ah.Fetcher(FakeSession(routes), sleep=lambda s: None), date(2026, 11, 5), 90, out,
+                               now=datetime(2026, 11, 5, 11, tzinfo=timezone.utc))
     assert out == [] and '拍后补售' in note
 
 
@@ -839,8 +840,135 @@ def test_list_story34():
     assert keys['historia']['interval'] == 30 and keys['historia']['max_requests'] == 50 and keys['historia']['site'] == 'https://historia.de'
     assert list(keys)[-1] == 'historia'
     assert all(keys[k]['status'] == 'ask' for k in ('kastern', 'heickmann', 'schloss_ahlden', 'scheublein'))
-    assert all(keys[k]['status'] == 'forbidden' and '瓷器少' in keys[k]['terms']
-               for k in ('fischer', 'stahl', 'kiefer', 'henrys', 'hargesheimer', 'kinsky'))
-    assert keys['dannenberg']['status'] == 'forbidden' and '平台' in keys['dannenberg']['terms']
+    assert all(keys[k]['status'] == 'skip' and '瓷器少' in keys[k]['terms']
+               for k in ('schmidt', 'fischer', 'stahl', 'kiefer', 'henrys', 'hargesheimer'))
+    assert all(keys[k]['status'] == 'skip' for k in ('kinsky', 'neumeister', 'bergmann', 'zeller', 'kempf', 'dannenberg'))
+    assert keys['dannenberg']['site'] == '' and '平台' in keys['dannenberg']['terms'] and '古董场' in keys['kinsky']['terms']
+    assert keys['kinsky']['site'] == 'https://www.imkinsky.com' and keys['nagel']['status'] == 'forbidden'
+    assert validate_houses([dict(key='x', name='某', site='', status='skip', terms='瓷器少')])[0]['status'] == 'skip'
+    from curio import config
+    assert ah.MAX_REQUESTS == config.HOUSE_MAX_REQUESTS and keys['wendl']['max_requests'] == ah.MAX_REQUESTS
     with pytest.raises(ValueError, match='max_requests'):
         validate_houses([dict(key='x', name='某', site='', status='allowed', terms='x', max_requests=0)])
+
+
+# ---------- 故事 34 复审补充 ----------
+
+def test_robots_group_precedence():
+    ua = ah.user_agent('x@y')
+    own_allows = ah.Robots('User-agent: *\nDisallow: /\n\nUser-agent: CurioObjectBot\nCrawl-delay: 12\nAllow: /\n')
+    assert own_allows.can_fetch(ua, 'https://x.de/a') and own_allows.crawl_delay(ua) == 12
+    own_denies = ah.Robots('User-agent: *\nAllow: /\nCrawl-delay: 5\n\nUser-agent: curioobjectbot\nDisallow: /p/\n')
+    assert not own_denies.can_fetch(ua, 'https://x.de/p/1') and own_denies.can_fetch(ua, 'https://x.de/q')
+    assert own_denies.crawl_delay(ua) is None                    # 自己的组没写 Crawl-delay：不用「*」组的
+    tie = ah.Robots('User-agent: *\nDisallow: /page\nAllow: /page\n')
+    assert tie.can_fetch(ua, 'https://x.de/page/2/')             # 一样长时 Allow 优先
+    shared = ah.Robots('User-agent: googlebot\nUser-agent: CurioObjectBot\nDisallow: /x/\n')
+    assert not shared.can_fetch(ua, 'https://x.de/x/1')         # 相邻的 User-agent 行共用一组
+    assert ah.Robots('User-agent: *\nDisallow:\n').can_fetch(ua, 'https://x.de/anything')
+    short = ah.Robots('User-agent: c\nDisallow: /\n')
+    assert short.can_fetch(ua, 'https://x.de/a')                 # 「c」不是我们的名字
+
+
+def test_deadline_stops_further_requests():
+    routes = {'https://www.mehlis.eu/robots.txt': (200, OPEN), 'https://www.mehlis.eu/x': (200, 'ok')}
+    c = Clock()
+    session = FakeSession(routes)
+    f = ah.Fetcher(session, interval=5, sleep=c.sleep, monotonic=c.monotonic, deadline=c.t + 12)
+    f.get('https://www.mehlis.eu/x')                             # robots + 页面（隔 5 秒）
+    f.get('https://www.mehlis.eu/x')
+    with pytest.raises(ah.LimitReached, match='时限'):
+        f.get('https://www.mehlis.eu/x')                         # 再等 5 秒就过了时限：不发
+    assert len(session.calls) == 3
+
+
+def test_run_deadline_inside_historia_keeps_collected(db, cfg):
+    houses = [h for h in cfg['auction_houses'] if h['key'] == 'historia']
+    session = FakeSession()
+    c = Clock()
+    summary = ah.run_due(db, dict(cfg, auction_houses=houses), lambda: NOON, session, c.sleep, c.monotonic, run_seconds=100)
+    # robots、/auktionen/、拍卖页、第 43 页各隔 30 秒（共 90 秒），第 44 页要到 120 秒：不发
+    assert summary['historia']['error'] == '本轮时限已到，其余明天再看' and summary['historia']['found'] == 2
+    assert HA + 'page/44/' not in [u for _, u, _, _ in session.calls]
+
+
+def test_historia_after_porcelain_started_fetches_no_pages(db, cfg):
+    houses = [h for h in cfg['auction_houses'] if h['key'] == 'historia']
+    session = FakeSession()
+    summary, _ = run(db, dict(cfg, auction_houses=houses), session, datetime(2026, 11, 6, 10, 30, tzinfo=BERLIN).timestamp())
+    assert summary['historia']['note'] == '182 场的瓷器号段都已开拍' and summary['historia']['new'] == 0
+    assert not any('/page/' in u for _, u, _, _ in session.calls)
+
+
+def test_historia_both_segments_with_own_ends():
+    routes = historia_routes()
+    routes[HA + 'page/27/'] = (200, historia_page([(2000, 'Tasse', 'Tasse, Meissen'), (2001, 'A', 'A, KPM')]))      # 瓷器 I 估算第 27 页
+    routes[HA + 'page/28/'] = (200, historia_page([(2829, 'B', 'B, KPM'), (2830, 'C', 'C, Meissen')]))
+    routes[HA + 'page/43/'] = (200, historia_page([(2830, 'C', 'C, Meissen'), (2900, 'D', 'D, Meissen')]))          # 瓷器 II 估算第 43 页
+    routes[HA + 'page/44/'] = (200, historia_page([(3659, 'G', 'G, Meissen'), (3660, 'H', 'H')]))
+    session, out = FakeSession(routes), []
+    note = ah.collect_historia(ah.Fetcher(session, sleep=lambda s: None), date(2026, 11, 4), 90, out,
+                               now=datetime(2026, 11, 4, 12, tzinfo=BERLIN))
+    ends = {r['item_id']: r['ends'] for r in out}
+    assert set(ends) == {'ah-historia-182-%d' % n for n in (2000, 2001, 2829, 2830, 2900, 3659)} and note is None
+    assert ends['ah-historia-182-2000'] == ends['ah-historia-182-2829'] == '2026-11-05T09:00:00.000Z'
+    assert ends['ah-historia-182-2830'] == ends['ah-historia-182-3659'] == '2026-11-06T09:00:00.000Z'
+    hits = [u for _, u, _, _ in session.calls if '/page/' in u]
+    assert hits == [HA + 'page/%d/' % n for n in (27, 28, 43, 44)]
+
+
+def test_historia_boundary_page_shared_and_missed_start_note():
+    routes = historia_routes()
+    shared = historia_page([(2828, 'A', 'A, KPM'), (2829, 'B', 'B, KPM'), (2830, 'C', 'C, Meissen'), (2831, 'D', 'D, Meissen')])
+    routes[HA + 'page/27/'] = (200, historia_page([(2000, 'T', 'T, Meissen')]))
+    for n in range(28, 44):
+        routes[HA + 'page/%d/' % n] = (200, shared if n == 28 else historia_page([(9000 + n, 'X', 'X')]))
+    out = []
+    session = FakeSession(routes)
+    note = ah.collect_historia(ah.Fetcher(session, sleep=lambda s: None), date(2026, 11, 4), 90, out,
+                               now=datetime(2026, 11, 4, 12, tzinfo=BERLIN))
+    hits = [u for _, u, _, _ in session.calls if '/page/' in u]
+    assert hits.count(HA + 'page/28/') == 1 and len(hits) == len(set(hits))
+    assert {'ah-historia-182-2000', 'ah-historia-182-2829'} <= {r['item_id'] for r in out}
+    assert note and ah.HISTORIA_MISSED in note and 'Porzellan Teil II' in note   # 退了 5 页还没到 2830：说明可能漏收
+
+
+def test_historia_row_time_and_prices():
+    page = fx('historia/auction_182.html')
+    at = {r['category']: r['at'].isoformat() for r in ah.historia_schedule(page)}
+    assert at['Silber'] == '2026-11-04T10:30:00+00:00' and at['Glas, Kristall'] == '2026-11-04T14:30:00+00:00'   # 行自己的 11:30 / 15:30
+    assert at['Teppiche'] == '2026-11-09T19:00:00+00:00' and at['Porzellan Teil II'] == '2026-11-06T09:00:00+00:00'
+    noclock = page.replace('<td width="25%" style="text-align: right">ab 10:00 Uhr</td>', '<td></td>')
+    assert {r['category']: r['at'].isoformat() for r in ah.historia_schedule(noclock)}['Porzellan Teil II'] == '2026-11-06T09:00:00+00:00'
+    base = historia_page([(2900, 'Kanne', 'Kanne')])
+    assert ah.historia_lots(base.replace('EUR 200', 'EUR 1.200,50'))[0][0]['start'] == 1200.5
+    assert ah.historia_lots(base.replace('EUR 200', 'EUR 1.200'))[0][0]['start'] == 1200.0
+    long = 'Kanne ' + 'sehr ' * 40 + 'schön'
+    lot = ah.historia_lots(historia_page([(2900, long, long)]))[0][0]
+    assert lot['title'] == long[:33]                             # 描述里没有逗号：不拿整段描述当标题
+
+
+def test_leo_cp1252_and_broken_blocks():
+    raw = fx('leospik/porz.html').replace('&euro;', '€').encode('cp1252')
+    assert b'\x80' in raw
+    lots = ah.leo_lots(ah.leo_decode(raw))
+    assert lots[0]['estimate'] == 600.0 and 'goldgehöht' in lots[0]['body']
+    broken = fx('leospik/porz.html').replace('<div id="Descr"', '<span id="Descr"')
+    assert ah.leo_lots(broken) is None
+    routes = leo_normal(pages())
+    routes[LEO + '/aa/porz.html'] = (200, broken.replace('Auktion 699', 'Auktion 700').replace('Nachverkauf vom 25. 09. 2026', ''))
+    with pytest.raises(ValueError, match='解析不到拍品'):
+        ah.collect_leo_spik(ah.Fetcher(FakeSession(routes), sleep=lambda s: None), date(2026, 11, 5), 90, [],
+                            now=datetime(2026, 11, 5, 11, tzinfo=timezone.utc))
+
+
+def test_leo_current_from_head_and_started_note():
+    aa = fx('leospik/aa.html')
+    tail = aa.replace('</table>', '</table><p>Auktion 650 Archiv</p>', 1).replace('Auktion 699', 'Auktion 700', 1)
+    assert ah.leo_current(tail)['sale'] == 700
+    no_head = re.sub(r'Auktion 699', 'Katalog', aa, count=1) + '<table><tr><td>Auktion 650</td></tr></table>'
+    assert ah.leo_current(no_head)['sale'] is None              # 页首没有场次号：不拿表格里的
+    session = FakeSession(leo_normal(pages()))
+    note = ah.collect_leo_spik(ah.Fetcher(session, sleep=lambda s: None), date(2026, 12, 4), 90, [],
+                               now=datetime(2026, 12, 4, 12, tzinfo=BERLIN))
+    assert note == '700 场的瓷器一章已开拍' and not any('porz' in u for _, u, _, _ in session.calls)
