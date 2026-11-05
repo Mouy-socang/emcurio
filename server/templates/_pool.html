@@ -1,11 +1,11 @@
 {# 故事 31：喜欢 / 想要按钮与「♡ N · 阅读 M」。stats 为 None（Mac 预览）时按钮显示但不可点、不发请求、不显示数字；
    buttons=False（墓碑页）只显示数字。每个按钮是一个普通表单（POST /mark，带目标状态，幂等），guest.js 增强为就地切换。
    客人页只显示数字：不显示是谁，也不显示想要人数。 #}
-{% macro mark_btn(kind, code, on, live, next) -%}
+{% macro mark_btn(kind, code, on, live, next, n=0) -%}
 {% set label = ('已喜欢' if on else '喜欢') if kind == 'like' else ('已想要' if on else '想要这件') %}
 {% set icon = ('♥' if on else '♡') if kind == 'like' else '' %}
-{%- if live %}<form class="mk-f" method="post" action="/mark"><input type="hidden" name="code" value="{{ code }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="on" value="{{ '0' if on else '1' }}"><input type="hidden" name="next" value="{{ next }}"><button class="mk-b mk-{{ kind }}{% if on %} on{% endif %}" type="submit" aria-pressed="{{ 'true' if on else 'false' }}" data-mark="{{ kind }}">{% if icon %}<span class="mk-i" aria-hidden="true">{{ icon }}</span> {% endif %}<span class="mk-l">{{ label }}</span></button></form>
-{%- else %}<button class="mk-b mk-{{ kind }}" type="button" disabled aria-pressed="false">{% if icon %}<span class="mk-i" aria-hidden="true">{{ icon }}</span> {% endif %}<span class="mk-l">{{ label }}</span></button>
+{%- if live %}<form class="mk-f" method="post" action="/mark"><input type="hidden" name="code" value="{{ code }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="on" value="{{ '0' if on else '1' }}"><input type="hidden" name="next" value="{{ next }}"><button class="mk-b mk-{{ kind }}{% if on %} on{% endif %}" type="submit" aria-pressed="{{ 'true' if on else 'false' }}" data-mark="{{ kind }}"{% if kind == 'like' %} data-n="{{ n or '' }}"{% endif %}>{% if icon %}<span class="mk-i" aria-hidden="true">{{ icon }}</span> {% endif %}<span class="mk-l">{{ label }}</span></button></form>
+{%- else %}<button class="mk-b mk-{{ kind }}" type="button" disabled aria-pressed="false"{% if kind == 'like' %} data-n="{{ n or '' }}"{% endif %}>{% if icon %}<span class="mk-i" aria-hidden="true">{{ icon }}</span> {% endif %}<span class="mk-l">{{ label }}</span></button>
 {%- endif %}
 {%- endmacro %}
 
@@ -13,7 +13,7 @@
 {% set live = stats is not none %}
 {% set st = (stats or {}).get(code) or {} %}
 <div class="mk" data-marks data-code="{{ code }}" data-likes="{{ st.likes or 0 }}" data-reads="{{ st.reads or 0 }}">
-{%- if buttons %}{{ mark_btn('like', code, st.liked, live, next) }}{{ mark_btn('want', code, st.wanted, live, next) }}{% endif %}
+{%- if buttons %}{{ mark_btn('like', code, st.liked, live, next, st.likes) }}{{ mark_btn('want', code, st.wanted, live, next) }}{% endif %}
 <span class="mk-n mono" data-mk-count>{% if live %}{{ mark_count_text(st) }}{% endif %}</span>
 </div>
 {%- endmacro %}

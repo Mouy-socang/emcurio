@@ -736,6 +736,8 @@
       if (likes != null) box.setAttribute('data-likes', String(likes));
       var n = box.querySelector('[data-mk-count]');
       if (n) n.textContent = countText(parseInt(box.getAttribute('data-likes'), 10) || 0, parseInt(box.getAttribute('data-reads'), 10) || 0);
+      var lb = box.querySelector('[data-mark="like"]'), nl = parseInt(box.getAttribute('data-likes'), 10) || 0;
+      if (lb) lb.setAttribute('data-n', nl > 0 ? String(nl) : '');   // 今日榜卡把人数放在 ♡ 按钮里
       var b = box.querySelector('[data-mark="' + kind + '"]');
       if (!b) return;
       b.classList.toggle('on', on);

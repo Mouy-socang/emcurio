@@ -239,3 +239,12 @@ body.zl-open{overflow:hidden}
 .obj>.mk{margin:0 0 14px}
 .obj>.mk .mk-b{padding:0 16px}
 .mk-msg{flex-basis:100%;margin:4px 0 0}
+.mk-like{order:1}.mk-n{order:2}.mk-want{order:3}.mk-msg{order:4}
+/* 卡片窄（今日榜、商品池）：一行排下，喜欢只留 ♡ 加人数（文字仍给读屏）；阅读数只在单件页显示 */
+.rk .mk, .card .mk{gap:4px 6px}
+.rk .mk-like, .card .mk-like{position:relative;justify-content:center;min-width:var(--tap);padding:0 6px}
+.rk .mk-like .mk-l, .card .mk-like .mk-l{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.rk .mk-like::after, .card .mk-like::after{content:attr(data-n);margin-left:4px}
+.rk .mk-like[data-n=""]::after, .card .mk-like[data-n=""]::after{content:none}
+.rk .mk-want, .card .mk-want{padding:0 6px;white-space:nowrap}
+.rk .mk-n, .card .mk-n{display:none}
