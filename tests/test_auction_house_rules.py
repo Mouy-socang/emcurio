@@ -96,21 +96,3 @@ def test_rejudge_platform_only_moves_unreviewed_house_items(tmp_path):
         assert triage.state(c, 'ah-mehlis-124-3238') == 'new'
         assert triage.state(c, 'ah-mehlis-124-3239') == 'removed'
         assert c.execute("SELECT agent_reason, rule_version FROM items WHERE item_id='v1|9|0'").fetchone()[:] == ('屏蔽词：Pins（描述）', ebay_v)
-
-
-def test_auction_list_source_filter(tmp_path):
-    db = Store(tmp_path / 'data' / 'curio.db')
-    base = load()
-    common = dict(currency='EUR', price=100, buying='AUCTION', url='https://x', image='', description='')
-    db.ingest(dict(common, item_id='v1|5|0', platform='ebay', title='Meissen Teller Zwiebelmuster', ends='2026-11-06T10:00:00.000Z'), base)
-    db.ingest(dict(common, item_id='ah-mehlis-124-3300', platform='auction_house', title='Meissen Teller Zwiebelmuster',
-                   price_text='Limit 100 €', ends='2026-11-21T09:00:00.000Z'), base)
-    at = '2026-11-05T12:00:00+00:00'
-    ids = lambda **kw: [c['item_id'] for c in db.auction_list(40, at=at, **kw)['items']]
-    assert ids() == ['v1|5|0', 'ah-mehlis-124-3300']
-    assert ids(source='auction_house') == ['ah-mehlis-124-3300']
-    assert ids(source='ebay') == ['v1|5|0']
-    first = db.auction_list(1, at=at, source='auction_house')
-    assert first['next_cursor'] is None                               # 游标与来源一起生效
-    with pytest.raises(ValueError):
-        db.auction_list(40, at=at, source='etsy')

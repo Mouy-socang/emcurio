@@ -296,7 +296,7 @@ def server(store,host='127.0.0.1',port=8788,root=ROOT,fetch=None,flush=None,gc=N
                 q=parse_qs(url.query)
                 try:limit=int(q.get('limit',['40'])[0])
                 except ValueError:return self.reply(400,{'error':'参数无效'})
-                try:data=store.auction_list(limit,q.get('cursor',[''])[0] or None,root,source=q.get('source',[''])[0] or None)
+                try:data=store.auction_list(limit,q.get('cursor',[''])[0] or None,root)
                 except ValueError as e:return self.reply(400,{'error':str(e) or '参数无效'})
                 # 故事 32：顶部一行各拍卖行的状态（今天是否已看、新增几件、最近错误）；读不到只是不显示。
                 from . import auction_houses

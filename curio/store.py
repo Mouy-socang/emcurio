@@ -566,12 +566,12 @@ class Store:
                 out.append(dict(card(c,item,root),reason=r['reason'],reason_lang=guess_lang(r['reason']),removed_at=r['removed_at']))
             return dict(items=out,total=backoffice_counts(c)['auto_removed'])
     # ---- 故事 20：拍卖新品 ----
-    def auction_list(self,limit=FEED_BATCH,cursor=None,root=ROOT,at=None,source=None):
+    def auction_list(self,limit=FEED_BATCH,cursor=None,root=ROOT,at=None):
         """拍卖新品列表：未结束的按结束时间近到远在前，已过结束时间的在后；每件为卡片字段（主图、名称、分数与理由）
         加 title、bid（当前出价）、ends、ended、url（eBay 链接）。返回 dict(items, next_cursor, counts)。"""
         if type(limit) is not int or not 1<=limit<=100:raise ValueError('分页参数无效')
         with self.connect() as c:
-            rows,nxt=triage.auctions(c,limit,_decode_cursor(cursor),at,source)
+            rows,nxt=triage.auctions(c,limit,_decode_cursor(cursor),at)
             return dict(items=[auction_card(c,r,root) for r in rows],next_cursor=_encode_cursor(nxt),
                         counts=triage.auction_counts(c,at))
     def auction_convert(self,iid,on,request_id,root=ROOT):
