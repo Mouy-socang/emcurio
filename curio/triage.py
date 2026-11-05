@@ -390,7 +390,7 @@ def queue(c, limit=100, offset=0):
         (SELECT code FROM item_codes k WHERE k.item_id=i.item_id) code,
         s.score score,s.source score_source,s.reason score_reason
         FROM triage t JOIN items i ON i.item_id=t.item_id LEFT JOIN scores s ON s.item_id=i.item_id
-        WHERE t.state='new' AND t.backlog=0 AND i.status='active' AND NOT ''' + PURE_AUCTION + '''
+        WHERE t.state='new' AND t.backlog=0 AND i.status='active' AND NOT ''' + FEED_EXCLUDE + '''
         ORDER BY t.rescued_at IS NULL, t.rescued_at DESC, s.score IS NULL, s.score DESC, i.first_seen DESC, i.item_id
         LIMIT ? OFFSET ?''', (limit, offset))]
 
@@ -407,7 +407,10 @@ SEEN_ELSEWHERE = '''(SELECT max(e.eff_at) FROM owner_events e WHERE e.item_id=i.
 AUCTION_ONLY = ("(i.platform='auction_house' OR (i.platform='ebay' AND instr(COALESCE(i.buying,''),'AUCTION')>0"
                 " AND instr(COALESCE(i.buying,''),'FIXED_PRICE')=0))")
 PURE_AUCTION = ('(' + AUCTION_ONLY + ' AND NOT EXISTS(SELECT 1 FROM auction_converted ac WHERE ac.item_id=i.item_id))')
-FEED_BASE = "t.state='new' AND t.backlog=0 AND i.status='active' AND NOT " + PURE_AUCTION
+# 墨墨 2026-11-05："应该在新货里面，我点进入商品池才进入"：拍卖行的拍品进 01 新货瀑布流，不进拍卖新品列表；
+# 仍按纯拍卖处理（留下后进拍卖商品池、不能上普通 R12、结束自动判下架）。FEED_EXCLUDE 只排除 eBay 等平台的纯拍卖。
+FEED_EXCLUDE = "(i.platform<>'auction_house' AND " + PURE_AUCTION + ")"
+FEED_BASE = "t.state='new' AND t.backlog=0 AND i.status='active' AND NOT " + FEED_EXCLUDE
 FEED_SQL = '''SELECT i.*,t.state triage_state,t.rescued_at,
         t.rescued_at IS NULL k1, COALESCE(t.rescued_at,'') k2, COALESCE(i.first_seen,'') k3
         FROM triage t JOIN items i ON i.item_id=t.item_id
@@ -517,7 +520,7 @@ def set_converted(c, iid, on):
 # 拍卖新品列表：拣选状态 new、在售的纯拍卖。k1：0 = 未结束（ends 为空或无法解析也算未结束），1 = 已过结束时间；
 # k2：未结束组按结束时间近到远（无结束时间的排最后，1e9），已结束组按结束时间新到旧（取负值升序）。
 _ENDS_JD = "julianday(NULLIF(i.ends,''))"
-AUCTION_BASE = "t.state='new' AND i.status='active' AND " + PURE_AUCTION
+AUCTION_BASE = "t.state='new' AND i.status='active' AND " + FEED_EXCLUDE
 AUCTION_SQL = ('SELECT * FROM (SELECT i.*, t.state triage_state, '
                'CASE WHEN ' + _ENDS_JD + ' IS NULL OR ' + _ENDS_JD + ' > julianday(?) THEN 0 ELSE 1 END k1, '
                'CASE WHEN ' + _ENDS_JD + ' IS NULL THEN 1e9 WHEN ' + _ENDS_JD + ' > julianday(?) THEN ' + _ENDS_JD

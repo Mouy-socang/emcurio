@@ -184,14 +184,17 @@ def test_run_ingests_due_sales_and_skips_far_ones(db, cfg):
     assert not any('/item/' in u or 'lot-details' in u or '/kataloge/lot/' in u or u.endswith('.pdf')
                    or 'cdn.aeman.nl' in u for _, u, _, _ in session.calls)
     assert all(h['User-Agent'] == 'CurioObjectBot/0.1' for _, _, h, _ in session.calls)
-    # 拍卖新品里有、01 瀑布流里没有
-    auc = {i['item_id']: i for i in db.auction_list(at='2026-11-05T11:00:00+00:00')['items']}
+    # 墨墨 2026-11-05：拍卖行的拍品进 01 新货瀑布流，不进拍卖新品列表
+    auc = {i['item_id'] for i in db.auction_list(at='2026-11-05T11:00:00+00:00')['items']}
     with db.connect() as c:
-        fresh = {iid for iid in rows if triage.state(c, iid) == 'new'}     # 其余被规则自动移出（破损等），与 eBay 同一套
-    assert 'ah-mehlis-124-3200' in fresh and fresh == set(auc)
-    assert auc['ah-mehlis-124-3200']['platform'] == '梅利斯拍卖行' and auc['ah-mehlis-124-3200']['bid'] == 'Limit 480 €'
-    assert auc['ah-mehlis-124-3200']['source'] == 'auction_house'
-    assert not set(rows) & {i['item_id'] for i in db.triage_feed(session='s')['items']}
+        fresh = {iid for iid in rows if triage.state(c, iid) == 'new'}     # 其余被规则自动移出（破损等）
+    feed = {i['item_id']: i for i in db.triage_feed(session='s')['items']}
+    assert 'ah-mehlis-124-3200' in fresh and fresh <= set(feed) and not set(rows) & auc
+    assert feed['ah-mehlis-124-3200']['platform'] == '梅利斯拍卖行'
+    # 留下后进拍卖商品池（仍按纯拍卖处理），不进普通池
+    with db.connect() as c:
+        triage.keep(c, 'ah-mehlis-124-3200')
+        assert triage.is_pure_auction(c, 'ah-mehlis-124-3200')
     # 同一柏林日再跑：不发请求
     n = len(session.calls)
     assert run(db, cfg, session)[0] == {} and len(session.calls) == n
