@@ -403,8 +403,9 @@ SEEN_ELSEWHERE = '''(SELECT max(e.eff_at) FROM owner_events e WHERE e.item_id=i.
         AND e.eff_at > COALESCE((SELECT max(r.at) FROM owner_events r WHERE r.item_id=i.item_id AND r.type='restore'),''))'''
 # 故事 20：纯拍卖 = eBay、buying 含 AUCTION 不含 FIXED_PRICE（AUCTION、AUCTION,BEST_OFFER），且未被"转为普通货"。
 # FIXED_PRICE,AUCTION 是普通货。所有口径（01 瀑布流、看过未选、计数、queue、封存 pool、发布入选、拍卖新品列表）共用；别名 i 为 items。
-AUCTION_ONLY = ("(i.platform='ebay' AND instr(COALESCE(i.buying,''),'AUCTION')>0"
-                " AND instr(COALESCE(i.buying,''),'FIXED_PRICE')=0)")
+# 故事 32：拍卖行（platform auction_house）的货一律算纯拍卖，且不能转为普通货。
+AUCTION_ONLY = ("(i.platform='auction_house' OR (i.platform='ebay' AND instr(COALESCE(i.buying,''),'AUCTION')>0"
+                " AND instr(COALESCE(i.buying,''),'FIXED_PRICE')=0))")
 PURE_AUCTION = ('(' + AUCTION_ONLY + ' AND NOT EXISTS(SELECT 1 FROM auction_converted ac WHERE ac.item_id=i.item_id))')
 FEED_BASE = "t.state='new' AND t.backlog=0 AND i.status='active' AND NOT " + PURE_AUCTION
 FEED_SQL = '''SELECT i.*,t.state triage_state,t.rescued_at,
@@ -481,8 +482,10 @@ def seen_unpicked_count(c, session=None):
 # ---------- 故事 20：拍卖新品 ----------
 
 def is_auction_only(item):
-    """eBay 只拍卖（不看是否已转为普通货）；口径同 AUCTION_ONLY。item 为 items 行或 dict。"""
+    """eBay 只拍卖或拍卖行的货（不看是否已转为普通货）；口径同 AUCTION_ONLY。item 为 items 行或 dict。"""
     item = dict(item)
+    if item.get('platform') == 'auction_house':
+        return True
     buying = item.get('buying') or ''
     return item.get('platform') == 'ebay' and 'AUCTION' in buying and 'FIXED_PRICE' not in buying
 
@@ -501,6 +504,8 @@ def set_converted(c, iid, on):
     _begin(c)
     item = _item(c, iid)
     if on:
+        if item['platform'] == 'auction_house':
+            raise TriageError('拍卖行的拍品不能转为普通货')
         if not is_auction_only(item):
             raise TriageError('这件货不是纯拍卖，不需要转为普通货')
         c.execute('INSERT OR IGNORE INTO auction_converted(item_id,at) VALUES(?,?)', (iid, now()))

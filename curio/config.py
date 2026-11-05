@@ -68,26 +68,110 @@ def load(root=ROOT):
     defaults['goodcustomer']=goodcustomer(settings.get('goodcustomer'))
     # 故事 30：发布快照版本（1 = snapshot.v1；2 = snapshot.v2，带拍卖榜）。服务器部署能读 v2 之前保持 1。
     defaults['publish']=publish_settings(settings.get('publish'))
+    # 故事 32：拍卖行名单与采集设置。
+    defaults['auction_houses']=auction_houses(settings.get('auction_houses'))
+    defaults['auction_house_bot']=auction_house_bot(settings.get('auction_house_bot'))
     return defaults
 
 SNAPSHOT_VERSIONS=(1,2)
 
 def publish_settings(value):
-    """校验 settings.yaml 的 publish 段：{snapshot_version: 1 或 2}（缺省 1）。"""
+    """校验 settings.yaml 的 publish 段：{snapshot_version: 1 或 2（缺省 1）, allow_auction_house: 布尔（缺省 false）}。"""
     if value is None:value={}
     if not isinstance(value,dict):raise ValueError('publish 必须为映射（snapshot_version）')
-    unknown=set(value)-{'snapshot_version'}
+    unknown=set(value)-{'snapshot_version','allow_auction_house'}
     if unknown:raise ValueError('publish 含未知键：'+','.join(sorted(map(str,unknown))))
     version=value.get('snapshot_version',1)
     if type(version) is not int or version not in SNAPSHOT_VERSIONS:
         raise ValueError('publish.snapshot_version 必须为 1 或 2')
-    return dict(snapshot_version=version)
+    allow=value.get('allow_auction_house',False)
+    if type(allow) is not bool:raise ValueError('publish.allow_auction_house 必须为 true 或 false')
+    return dict(snapshot_version=version,allow_auction_house=allow)
+
+def _publish_section(root):
+    try:settings=yaml.safe_load((Path(root)/'config/settings.yaml').read_text()) or {}
+    except FileNotFoundError:settings={}
+    return publish_settings(settings.get('publish') if isinstance(settings,dict) else None)
+
+def allow_auction_house(root=ROOT):
+    """故事 32：拍卖行的货是否允许上拍卖榜（publish.allow_auction_house；缺省 false）。只读这一段。"""
+    return _publish_section(root)['allow_auction_house']
+
+# ---- 故事 32：拍卖行名单 ----
+
+HOUSE_STATUSES=('allowed','ask','forbidden')
+# 条款禁止程序采集的平台：名单里出现时不得标为 allowed（双保险，代码也从不访问它们）。
+NEVER_VISIT=frozenset({'lottissimo','the_saleroom','invaluable','liveauctioneers','catawiki'})
+_HOUSE_KEY=re.compile(r'[a-z][a-z0-9_]{0,30}')
+_HOUSE_FIELDS={'key','name','site','status','terms','adapter','enabled','interval'}
+
+def auction_houses(value):
+    """校验 auction_houses 名单：列表，每项 {key, name（中文显示名）, site, status, terms（条款结论一句）, adapter, enabled, interval?}。"""
+    if value is None:return []
+    if not isinstance(value,list):raise ValueError('auction_houses 必须为列表')
+    out,seen=[],set()
+    for n,h in enumerate(value,1):
+        where='auction_houses 第 %d 项'%n
+        if not isinstance(h,dict):raise ValueError(where+' 必须为映射')
+        unknown=set(h)-_HOUSE_FIELDS
+        if unknown:raise ValueError(where+' 含未知键：'+','.join(sorted(map(str,unknown))))
+        key=h.get('key')
+        if not isinstance(key,str) or not _HOUSE_KEY.fullmatch(key):raise ValueError(where+' 的 key 无效')
+        if key in seen:raise ValueError('auction_houses 里 key 重复：'+key)
+        seen.add(key)
+        for f in ('name','terms'):
+            if not isinstance(h.get(f),str) or not h[f].strip():raise ValueError(where+' 缺少 '+f)
+        site=h.get('site','')
+        if not isinstance(site,str) or (site and not site.startswith('https://')):raise ValueError(where+' 的 site 必须为 https 网址或空')
+        status=h.get('status')
+        if status not in HOUSE_STATUSES:raise ValueError(where+' 的 status 必须为 allowed / ask / forbidden')
+        if key in NEVER_VISIT and status=='allowed':raise ValueError(key+' 的条款禁止程序采集，不能标为 allowed')
+        for f in ('adapter','enabled'):
+            if type(h.get(f,False)) is not bool:raise ValueError(where+' 的 '+f+' 必须为 true 或 false')
+        interval=h.get('interval',5)
+        if isinstance(interval,bool) or not isinstance(interval,(int,float)) or not math.isfinite(interval) or interval<5:
+            raise ValueError(where+' 的 interval 必须为不小于 5 的秒数')
+        out.append(dict(key=key,name=h['name'].strip(),site=site,status=status,terms=h['terms'].strip(),
+                        adapter=h.get('adapter',False),enabled=h.get('enabled',False),interval=float(interval)))
+    return out
+
+def auction_house_bot(value):
+    """校验 auction_house_bot：{contact: 文字（附在 User-Agent 后，可空）, window_days: 1–365（缺省 90）}。"""
+    if value is None:value={}
+    if not isinstance(value,dict):raise ValueError('auction_house_bot 必须为映射')
+    unknown=set(value)-{'contact','window_days'}
+    if unknown:raise ValueError('auction_house_bot 含未知键：'+','.join(sorted(map(str,unknown))))
+    contact=value.get('contact') or ''
+    if not isinstance(contact,str) or len(contact)>200 or re.search(r'[\x00-\x1f]',contact):raise ValueError('auction_house_bot.contact 无效')
+    try:contact.encode('latin-1')
+    except UnicodeEncodeError:raise ValueError('auction_house_bot.contact 只能用拉丁字母（写进 HTTP 请求头）') from None
+    days=value.get('window_days',90)
+    if type(days) is not int or not 1<=days<=365:raise ValueError('auction_house_bot.window_days 必须为 1–365 的整数')
+    return dict(contact=contact.strip(),window_days=days)
+
+_HOUSES_CACHE={}
+
+def auction_house_settings(root=ROOT):
+    """只读 settings.yaml 的拍卖行两段：{houses: 校验后的名单, bot: auction_house_bot}（按文件修改时间缓存）。名单有误时抛 ValueError。"""
+    path=Path(root)/'config/settings.yaml'
+    try:st=path.stat();mtime=(st.st_mtime_ns,st.st_size)
+    except OSError:return dict(houses=[],bot=auction_house_bot(None))
+    hit=_HOUSES_CACHE.get(str(path))
+    if hit and hit[0]==mtime:return hit[1]
+    settings=yaml.safe_load(path.read_text()) or {}
+    if not isinstance(settings,dict):settings={}
+    out=dict(houses=auction_houses(settings.get('auction_houses')),bot=auction_house_bot(settings.get('auction_house_bot')))
+    _HOUSES_CACHE[str(path)]=(mtime,out)
+    return out
+
+def auction_house_names(root=ROOT):
+    """拍卖行 key → 中文显示名；名单读不到或有误时空 dict。"""
+    try:return {h['key']:h['name'] for h in auction_house_settings(root)['houses']}
+    except Exception:return {}
 
 def snapshot_version(root=ROOT):
     """发布快照版本（config/settings.yaml 的 publish.snapshot_version；缺省 1）。只读这一段，不做 load() 的全部校验。"""
-    try:settings=yaml.safe_load((Path(root)/'config/settings.yaml').read_text()) or {}
-    except FileNotFoundError:return 1
-    return publish_settings(settings.get('publish') if isinstance(settings,dict) else None)['snapshot_version']
+    return _publish_section(root)['snapshot_version']
 
 DEFAULT_GC_DB='~/Desktop/goodcustomerDB'
 DEFAULT_GCDB='~/Desktop/goodcustomer-plugin/skills/gc-schema/scripts/gcdb.py'

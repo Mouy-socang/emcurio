@@ -19,3 +19,11 @@ def no_host_launchd(monkeypatch, tmp_path):
 def no_goodcustomer_orders(monkeypatch, tmp_path):
     """综合评分（故事 27）默认不读本机 GoodCustomer：资料库路径指向不存在的目录；要假订单的测试自己传 gc_db。"""
     monkeypatch.setattr('curio.scoring._gc_db', lambda root: str(tmp_path / 'no-goodcustomer'))
+
+
+@pytest.fixture(autouse=True)
+def no_auction_house_network(monkeypatch):
+    """故事 32：采集轮会看名单上的拍卖行；测试默认不建真实会话（要模拟的测试自己替换 make_session 或传 session）。"""
+    def refuse():
+        raise AssertionError('测试不得连接拍卖行')
+    monkeypatch.setattr('curio.auction_houses.make_session', refuse)

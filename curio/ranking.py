@@ -117,15 +117,15 @@ def _pool_row(c, item, ranked, root, exp, auction_ranked=()):
         out['bid'] = out['price']
         out['ended'] = publish.is_ended(item['ends'])
         out['auction_rank_pos'] = auction_ranked.index(code) + 1 if code and code in auction_ranked else None
-        out['auction_rank_reason'] = auction_rank_reason(c, item, code)
+        out['auction_rank_reason'] = auction_rank_reason(c, item, code, root)
     return out
 
 
-def auction_rank_reason(c, item, code):
+def auction_rank_reason(c, item, code, root=ROOT):
     """这件货不能加入拍卖榜的原因（界面用语，去掉货号前缀）；能则 None。榜满由界面按当时件数判断。"""
     if not code:
         return '还没有货号，请先留下'
-    reason = publish.why_not_auction(c, code)
+    reason = publish.why_not_auction(c, code, root=root)
     return reason[len(code) + 1:] if reason and reason.startswith(code + ' ') else reason
 
 
@@ -222,7 +222,7 @@ def auction_rank_state(store, root=ROOT):
                 tag = auction_tag(c, item)
                 if tag:
                     row['tags'] = row['tags'] + [tag]
-            reason = publish.why_not_auction(c, code)
+            reason = publish.why_not_auction(c, code, root=root)
             ended = item is not None and publish.is_ended(item['ends'])
             row.update(pos=pos, code=code, off=reason is not None, reason=reason, ended=ended,
                        gone=item is not None and item['status'] != 'active',

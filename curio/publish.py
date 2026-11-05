@@ -42,7 +42,7 @@ from urllib.parse import urljoin, urlsplit
 import requests
 
 from . import sync, triage
-from .config import ROOT
+from .config import ROOT, allow_auction_house
 
 log = logging.getLogger(__name__)
 
@@ -184,6 +184,7 @@ def set_rank(c, codes, keep_stale=False):
 # ---------- 故事 30：拍卖榜 R12_auction ----------
 
 NOT_AUCTION = '不是拍卖中的货'
+HOUSE_COPYRIGHT = '拍卖行的照片和描述版权属对方，暂不上客人页'
 _TS = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z')
 
 
@@ -212,7 +213,7 @@ def rank_auction(c):
     return [r[0] for r in c.execute('SELECT code FROM publish_rank_auction ORDER BY pos')]
 
 
-def why_not_auction(c, code, now=None):
+def why_not_auction(c, code, now=None, root=ROOT):
     """货号不能上拍卖榜的原因（中文）；可以则 None。now：Unix 秒（判断是否已结束；None 为现在）。"""
     row = c.execute('''SELECT i.*, t.state FROM item_codes k JOIN items i ON i.item_id=k.item_id
         LEFT JOIN triage t ON t.item_id=k.item_id WHERE k.code=?''', (code,)).fetchone()
@@ -220,6 +221,8 @@ def why_not_auction(c, code, now=None):
         return f'{code} 不存在'
     if not triage.is_pure_auction(c, row['item_id']):
         return f'{code} {NOT_AUCTION}'
+    if row['platform'] == 'auction_house' and not _house_allowed(root):     # 故事 32：默认不上客人页
+        return f'{code} {HOUSE_COPYRIGHT}'
     if row['state'] != 'kept':
         return f'{code} 当前是「{triage.LABELS.get(row["state"], row["state"])}」，不在拍卖商品池'
     if row['status'] != 'active':
@@ -233,12 +236,21 @@ def why_not_auction(c, code, now=None):
     return None
 
 
+def _house_allowed(root):
+    """publish.allow_auction_house（读 root 的设置）；读不出或设置有误时按不允许。"""
+    try:
+        return bool(allow_auction_house(root))
+    except Exception:
+        log.warning('读取 publish.allow_auction_house 失败，按不允许处理')
+        return False
+
+
 def _write_rank_auction(c, codes):
     c.execute('DELETE FROM publish_rank_auction')
     c.executemany('INSERT INTO publish_rank_auction(pos,code) VALUES(?,?)', list(enumerate(codes, 1)))
 
 
-def set_rank_auction(c, codes, keep_stale=False, now=None):
+def set_rank_auction(c, codes, keep_stale=False, now=None, root=ROOT):
     """设置拍卖榜（按名次，至多 RANK_AUCTION_SIZE 件，须都能上拍卖榜）。不提交。keep_stale 同 set_rank。"""
     codes = [str(x).strip().upper() for x in codes]
     stale = set(rank_auction(c)) if keep_stale else set()
@@ -250,7 +262,7 @@ def set_rank_auction(c, codes, keep_stale=False, now=None):
     if len(set(codes)) != len(codes):
         raise PublishError('拍卖榜里有重复的货号')
     for code in codes:
-        reason = None if code in stale else why_not_auction(c, code, now)
+        reason = None if code in stale else why_not_auction(c, code, now, root)
         if reason:
             raise PublishError(reason)
     _write_rank_auction(c, codes)
@@ -274,12 +286,12 @@ def leave_auction_rank(c, iid):
     return drop_auction_rank(c, triage.code(c, iid))
 
 
-def check_rank_auction(c, now=None):
+def check_rank_auction(c, now=None, root=ROOT):
     """发布用的拍卖榜：不能上拍卖榜的（已结束、下架、转为普通货等）一律跳过，从不阻止发布。
     返回 (货号按名次, 对应的 items 行（带 code）)。"""
     codes, rows = [], []
     for code in rank_auction(c):
-        if why_not_auction(c, code, now):
+        if why_not_auction(c, code, now, root):
             continue
         row = c.execute('''SELECT i.*, k.code, k.seq code_seq FROM item_codes k JOIN items i ON i.item_id=k.item_id
             WHERE k.code=?''', (code,)).fetchone()
@@ -748,9 +760,9 @@ def check_orders(payload):
             raise PublishError('个性化顺序里有重复或不在商品池的货号')
 
 
-def _auction_rows(c, now):
+def _auction_rows(c, now, root=ROOT):
     """v2 快照的拍卖榜与其货（每行带 auction_ends，供 _item_payload 写 ends）。"""
-    codes, rows = check_rank_auction(c, now)
+    codes, rows = check_rank_auction(c, now, root)
     for r in rows:
         r['auction_ends'] = ends_z(r['ends'])
     return codes, rows
@@ -793,7 +805,7 @@ def build_and_enqueue(c, root, out_dir, attempted, now=None, expect_fingerprint=
     codes = [it['code'] for it in items]
     ranked = check_rank(c)
     version = snapshot_version(root)
-    auction_codes, auction_items = _auction_rows(c, now) if version == 2 else (None, [])
+    auction_codes, auction_items = _auction_rows(c, now, root) if version == 2 else (None, [])
     fees = fees or _fees(root)
     payload_items = [_item_payload(c, it, root, out_dir, attempted, fees) for it in items + auction_items]
     if (expect_fingerprint is not None
@@ -888,12 +900,12 @@ def candidate(store, root=ROOT, fetch=None, sips='sips'):
     version = snapshot_version(root)
     with store.connect() as c:
         check_rank(c)
-        items = eligible(c) + (_auction_rows(c, time.time())[1] if version == 2 else [])
+        items = eligible(c) + (_auction_rows(c, time.time(), root)[1] if version == 2 else [])
     attempted, failures = prepare_images(store, items, root, fetch, sips)
     with store.connect() as c:
         ranked = check_rank(c)
         items = eligible(c)
-        auction_codes, auction_items = _auction_rows(c, time.time()) if version == 2 else (None, [])
+        auction_codes, auction_items = _auction_rows(c, time.time(), root) if version == 2 else (None, [])
         fees = _fees(root)
         payload_items = [_item_payload(c, it, root, sync.image_dir(store), attempted, fees)
                          for it in items + auction_items]
@@ -980,7 +992,7 @@ def publish(store, root=ROOT, fetch=None, sips='sips', clock=time.time, expect_r
         with store.connect() as c:
             items = eligible(c)
             if snapshot_version(root) == 2:
-                items += _auction_rows(c, clock())[1]
+                items += _auction_rows(c, clock(), root)[1]
         attempted, failures = prepare_images(store, items, root, fetch, sips,
                                              heartbeat=lambda: _refresh(store, owner, clock))
         from . import personalize

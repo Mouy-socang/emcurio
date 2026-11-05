@@ -44,9 +44,10 @@ ROUND_SECONDS = 300         # 每次带 20 张图的请求要 30–60 秒，120 
 MIN_REQUEST_SECONDS = 60     # 剩余时间不足时不再发请求（不足一次带图请求的耗时就不发，免得白白超时）
 RETRY_HOURS = 24             # 已请求过但仍没拿到 AI 分的货（漏回、越界、截断），24 小时内不重发
 KV_AI_USAGE = 'ai_usage'
-# 看图只送这两个图片站（不复用会做 DNS 解析的 publish._check_host）；Etsy 不看图。
+# 看图只送这几个图片站（不复用会做 DNS 解析的 publish._check_host）；Etsy 不看图。
+# 故事 32：加拍卖行的图片主机（Wendl 的 cdn.aeman.nl、Mehlis、Lempertz）；它们的路径原样送检。
 EBAY_IMAGE_HOST = 'i.ebayimg.com'
-VISION_HOSTS = (EBAY_IMAGE_HOST, 'img.kleinanzeigen.de')
+VISION_HOSTS = (EBAY_IMAGE_HOST, 'img.kleinanzeigen.de', 'cdn.aeman.nl', 'www.mehlis.eu', 'www.lempertz.com')
 EBAY_IMAGE_SIZE = 's-l400'
 VISUAL_KEYS = ('single_cup', 'plain_white', 'not_porcelain')
 # 故事 21：看图三项（回复字段 → 词表与编号前缀）。
@@ -191,7 +192,7 @@ def system_prompt(fvocab=None):
 
 
 def vision_url(image):
-    """送检用的主图地址：只收 https、无账号口令与端口的 i.ebayimg.com（尺寸改为 s-l400）与 img.kleinanzeigen.de；否则 None。"""
+    """送检用的主图地址：只收 https、无账号口令与端口的 VISION_HOSTS（i.ebayimg.com 尺寸改为 s-l400，其余原样）；否则 None。"""
     if not isinstance(image, str) or not image.strip():
         return None
     try:

@@ -312,8 +312,14 @@ def test_http_auctions_and_convert(db, cfg, http):
     add(db, cfg, 'auc', ends=far)
     add(db, cfg, 'fix', 'FIXED_PRICE')
     assert 'id="openAuc"' in http['html'] and 'id="aucView"' in http['html']
+    from curio.schedule import berlin_date
+    db.set('ah_status', json.dumps({'mehlis': {'date': berlin_date(time.time()), 'new': 4, 'found': 9, 'error': None, 'note': None}}))
     d = http['get']('/api/auctions')
     assert ids(d['items']) == ['auc'] and d['counts'] == {'auction': 1, 'auction_soon': 0}
+    houses = {h['key']: h for h in d['houses']}                  # 故事 32：顶部拍卖行状态行
+    assert set(houses) == {'wendl', 'mehlis', 'lempertz'}
+    assert houses['mehlis']['checked_today'] is True and houses['mehlis']['new'] == 4 and houses['mehlis']['name'] == '梅利斯拍卖行'
+    assert houses['wendl']['checked_today'] is False
     assert http['get']('/api/triage/feed?limit=40')['counts']['auction'] == 1
     assert http['post']('/api/auction/convert', dict(item_id='auc', on=True, request_id='x1'), tok=False)[0] == 403
     status, r = http['post']('/api/auction/convert', dict(item_id='auc', on=True, request_id='x1'))
@@ -596,7 +602,7 @@ def test_config_snapshot_version(tmp_path):
     (tmp_path / 'config' / 'settings.yaml').write_text('publish:\n  snapshot_version: 3\n')
     with pytest.raises(ValueError, match='snapshot_version'):
         snapshot_version(tmp_path)
-    assert load()['publish'] == {'snapshot_version': 1}                 # 仓库里的设置保持 1
+    assert load()['publish'] == {'snapshot_version': 1, 'allow_auction_house': False}   # 仓库里的设置保持 1；拍卖行默认不上客人页
 
 
 def test_http_auction_pool_and_rank(db, cfg, http):

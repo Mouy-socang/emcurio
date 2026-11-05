@@ -660,6 +660,7 @@ def _archive_one(store,item,root,api,budget):
     return done
 
 def _archive_usable(store,platform,api,config,budget,clock=time.time):
+    if platform=='auction_house':return True                     # 故事 32：只下载主图一张，不发其它请求、不花平台预算
     if platform not in ('ebay','kleinanzeigen'):return False     # Etsy 的货不做存档（Etsy 目前停用）
     return pool_platform_ok(store,platform,config,budget,clock,ebay=api is not None)
 
@@ -687,7 +688,7 @@ def archive_pool(store,root,api,config,budget=None,monotonic=time.monotonic,cloc
     with store.connect() as c:
         rows=[dict(r) for r in c.execute("""SELECT i.* FROM triage t JOIN items i ON i.item_id=t.item_id
             LEFT JOIN pool_archive a ON a.item_id=i.item_id
-            WHERE t.state='kept' AND i.platform IN ('ebay','kleinanzeigen') AND COALESCE(a.done,0)=0 AND COALESCE(a.attempts,0)<?
+            WHERE t.state='kept' AND i.platform IN ('ebay','kleinanzeigen','auction_house') AND COALESCE(a.done,0)=0 AND COALESCE(a.attempts,0)<?
             ORDER BY t.updated_at DESC,i.item_id""",(ARCHIVE_ATTEMPTS,))]
     summary=dict(attempted=0,archived=0,errors=0,pending=len(rows))
     if api is not None:api.purpose='check'
@@ -793,7 +794,10 @@ def run(root,clock=time.time):
         if not do_fetch and not do_check and not do_pub and not do_pool:
             # 池里的结束拍卖照常立即存档（故事 26 的下架即快照）：只在有这样的货时才建 eBay 客户端。
             if any(r.get('state')=='kept' for r in ended):
-                try:archive_ended_auctions(store,ended,root,EbayAPI(root,budget,store),config,budget,clock)
+                # 拍卖行的货存档不需要 eBay 客户端：建不了客户端时仍照常存档它们。
+                try:idle_api=EbayAPI(root,budget,store)
+                except Exception:idle_api=None
+                try:archive_ended_auctions(store,ended,root,idle_api,config,budget,clock)
                 except Exception:log.exception('结束拍卖存档未完成')
             # 空闲轮也发心跳（AD-10）：同步模块每轮都把各平台最近成功时间发给服务器。
             from . import sync,learning
@@ -864,10 +868,17 @@ def run(root,clock=time.time):
                 except EtsyAuthError:result['etsy_status']='error';result['etsy']=AUTH_BACKOFF_MESSAGE
                 except CollectionError as error:result['etsy_status']='error';result['etsy']=str(error)
                 except Exception:result['etsy_status']='error';result['etsy']='Etsy 采集未完成，将在后续轮次重试'
+            # 故事 32：拍卖行每柏林日最多看一次（只读瓷器列表页）；一家出错不影响其他家，也不影响上面的采集与本轮状态。
+            try:
+                from . import auction_houses
+                result['auction_houses']=auction_houses.run_due(store,config,clock)
+            except Exception:
+                log.exception('拍卖行采集未完成');result['auction_houses_error']='拍卖行采集未完成，将在后续轮次重试'
             # 以入库时间计新货：采集中途失败或预算用完时，已入库的新货同样计入。
             with store.connect() as c:
                 counts=dict(c.execute('SELECT platform,count(*) FROM items WHERE first_seen>=? GROUP BY platform',(fetch_started,)).fetchall())
             for platform in ('ebay','kleinanzeigen','etsy'):result[platform+'_new']=counts.get(platform,0)
+            result['auction_house_new']=counts.get('auction_house',0)   # 不计入 new_total（抓取间隔只看平台上新）
             result['new_total']=sum(result[p+'_new'] for p in ('ebay','kleinanzeigen','etsy'))
             # 没有任何平台成功（都出错、暂停或预算用完）时不调间隔，免得把故障当成"没上新"。
             if any(result.get(p+'_status')=='ok' for p in ('ebay','kleinanzeigen','etsy')):

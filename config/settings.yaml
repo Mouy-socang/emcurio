@@ -29,3 +29,53 @@ goodcustomer:
 # 客人页普通榜下出现「拍卖中」一栏）。服务器部署能读 v2 的版本之前保持 1。
 publish:
   snapshot_version: 1
+  # 故事 32：true 时拍卖行的货才能上拍卖榜（客人页）；默认 false——拍卖行的照片和描述版权属对方。
+  allow_auction_house: false
+# 故事 32：拍卖行自己的网站每天礼貌地看一次（只读瓷器分类的列表页，不逐件打开拍品页）。
+# User-Agent 如实写 CurioObjectBot/0.1（contact 非空时附在后面）；只看今天起 window_days 天内开拍的场次。
+auction_house_bot:
+  contact: ''
+  window_days: 90
+# 拍卖行名单：status 为 allowed（条款与 robots 允许看）/ ask（需先问对方）/ forbidden（禁止或不适用）。
+# 只有 status=allowed、enabled 为 true 且 adapter 为 true（有适配器）的才访问；interval 为同一主机两次请求的最短间隔（秒）。
+auction_houses:
+  - {key: wendl, name: 文德尔拍卖行, site: 'https://www.auktionshauswendl.de', status: allowed, adapter: true, enabled: true, interval: 5,
+     terms: 条款与 robots 未禁止浏览公开图录，只读列表页}
+  - {key: mehlis, name: 梅利斯拍卖行, site: 'https://www.mehlis.eu', status: allowed, adapter: true, enabled: true, interval: 5,
+     terms: 条款与 robots 未禁止浏览公开图录，只读列表页}
+  - {key: lempertz, name: 伦佩茨拍卖行, site: 'https://www.lempertz.com', status: allowed, adapter: true, enabled: true, interval: 10,
+     terms: 条款未禁止浏览公开图录；请求放慢到 10 秒一次}
+  - {key: historia, name: 希斯托利亚拍卖行, site: 'https://www.historia.de', status: allowed, adapter: false, enabled: false, interval: 30,
+     terms: robots 要求两次请求间隔 30 秒；暂无适配器}
+  - {key: metz, name: 梅茨拍卖行, site: 'https://www.metz-auktion.de', status: allowed, adapter: false, enabled: false,
+     terms: 在线图录已下线；暂无适配器}
+  - {key: schmidt, name: 施密特拍卖行, site: 'https://www.schmidt-auktionen.de', status: allowed, adapter: false, enabled: false,
+     terms: 允许浏览，但基本不拍瓷器}
+  - {key: hampel, name: 汉佩尔拍卖行, site: 'https://www.hampel-auctions.com', status: ask, adapter: false, enabled: false,
+     terms: 条款禁止把数据存入数据库，需先征得同意}
+  - {key: van_ham, name: 范哈姆拍卖行, site: 'https://www.van-ham.com', status: ask, adapter: false, enabled: false,
+     terms: 依 §44b 保留文本与数据挖掘权利，需先征得同意}
+  - {key: eppli, name: 埃普利拍卖行, site: 'https://www.eppli.com', status: ask, adapter: false, enabled: false,
+     terms: 读不到条款，需先询问}
+  - {key: dorotheum, name: 多禄泰拍卖行, site: 'https://www.dorotheum.com', status: ask, adapter: false, enabled: false,
+     terms: 拦截程序访问；可改用 myDorotheum 邮件提醒}
+  - {key: nagel, name: 纳格尔拍卖行, site: 'https://www.auction.de', status: forbidden, adapter: false, enabled: false,
+     terms: robots 只放行白名单，条款禁止商业复制}
+  - {key: lottissimo, name: 洛蒂西莫拍卖平台, site: 'https://www.lot-tissimo.com', status: forbidden, adapter: false, enabled: false,
+     terms: 平台条款禁止程序采集}
+  - {key: the_saleroom, name: 萨利鲁姆拍卖平台, site: 'https://www.the-saleroom.com', status: forbidden, adapter: false, enabled: false,
+     terms: 平台条款禁止程序采集}
+  - {key: invaluable, name: 因瓦卢阿布尔拍卖平台, site: 'https://www.invaluable.com', status: forbidden, adapter: false, enabled: false,
+     terms: 平台条款禁止程序采集}
+  - {key: liveauctioneers, name: 现场拍卖师平台, site: 'https://www.liveauctioneers.com', status: forbidden, adapter: false, enabled: false,
+     terms: 平台条款禁止程序采集}
+  - {key: catawiki, name: 卡塔维基拍卖平台, site: 'https://www.catawiki.com', status: forbidden, adapter: false, enabled: false,
+     terms: 平台条款禁止程序采集}
+  - {key: neumeister, name: 诺伊迈斯特拍卖行, site: 'https://www.neumeister.com', status: forbidden, adapter: false, enabled: false,
+     terms: 已停业，不适用}
+  - {key: bergmann, name: 贝格曼拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+     terms: 查不到网站，不适用}
+  - {key: zeller, name: 策勒拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+     terms: 查不到网站，不适用}
+  - {key: kempf, name: 肯普夫拍卖行, site: '', status: forbidden, adapter: false, enabled: false,
+     terms: 查不到网站，不适用}

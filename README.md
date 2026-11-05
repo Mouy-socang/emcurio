@@ -110,6 +110,17 @@ sqlite3 data/curio.db "SELECT result FROM collection_runs ORDER BY id DESC LIMIT
 - 每件新货调用一次 judge；仅标价或币种变化重判。规则排除的也保存原因。更改规则配置不会自动重判历史货，需运行 `scripts/rejudge.py`。
 - 拍卖总价 = 标价 × (1 + auction_fee_rate)，其他总价=标价。这里只包含配置手续费，不含未知运费/税费；竞拍标价是当前出价，不是最终成交价。
 
+### 拍卖行（故事 32，`curio/auction_houses.py`）
+
+- **名单**在 `config/settings.yaml` 的 `auction_houses:`：每家 key、中文显示名、网站、status（`allowed` 可以看 / `ask` 需先问对方 / `forbidden` 禁止或不适用）、条款结论一句、`adapter`（有没有适配器）、`enabled`、`interval`（同一主机两次请求的最短秒数，不小于 5）。只有 status=allowed、enabled 且有适配器的才访问，目前是文德尔（Wendl）、梅利斯（Mehlis）、伦佩茨（Lempertz，10 秒一次）。Lot-tissimo、the-saleroom、Invaluable、LiveAuctioneers、Catawiki 的条款禁止程序采集，名单校验不允许把它们标为 allowed。
+- **做什么**：采集轮（抓取到期时）在 eBay → Kleinanzeigen → Etsy 之后调用 `run_due`：每家每柏林日最多看一次（kv `ah_status` 记日期，出错当天也不再试），只看今天起 `auction_house_bot.window_days`（90）天内开拍的场次，只读瓷器分类的列表页（Lempertz 为每个目录一个 JSON），不打开拍品页、不下载 PDF 图录。
+- **礼貌规则**：User-Agent 如实写 `CurioObjectBot/0.1`（`auction_house_bot.contact` 非空时附在后面），不伪装浏览器、不用无头浏览器；每次先读 robots.txt（`urllib.robotparser`），禁止的路径不访问，Crawl-delay 更长时按它；每家每次最多 40 个请求；遇到 403、429 或验证页面，这家当天停下并记错，不重试、不绕过。一家出错不影响其他家，也不影响 eBay 等采集。
+- **入库**：platform `auction_house`，货号 `ah-<key>-<场次>-<拍品号>`（Lempertz 拍品号带 position，如 782a），buying `AUCTION`，EUR；price 为 Limit 或估价下限，price_text 写原文（「Limit 300 €」「估价 600–800 €」），总价即标价（不加 eBay 费率）。ends：Lempertz 用 session_end（或 bid_deadline），Mehlis 用时间表里该号段 / 瓷器分类的开拍时间，Wendl 用该场最后一天 23:59，都按柏林时间转 UTC。已收过的拍品由 `store.ingest` 判 unchanged / changed，不另发请求。入库后与其他货一样过规则（破损等会被自动移出）。
+- **口径**：拍卖行的货一律算纯拍卖（进 03 拍卖新品、不进 01 瀑布流），不能「转为普通货」；不进 eBay / Kleinanzeigen / Etsy 的在售检查与预算。结束靠 `close_ended_auctions`（结束时间过 1 小时判下架、撤下拍卖榜）。留下后进拍卖池，商品池存档只下载 `items.image` 这一张图，不花任何平台预算。
+- **不上客人页**：拍卖行的照片和描述版权属对方，`publish.allow_auction_house` 默认 false，拍卖榜拒绝这些货（理由同上）；改为 true 才放行。
+- **后台**：03 拍卖新品顶部一行显示各家今天是否已看、新增几件、最近的错误或说明（如「下一场 2027-02-24，未到 90 天」）；卡片平台标签为拍卖行中文名。
+- **改版**：页面结构变了解析不到拍品时状态记「解析不到拍品，可能改版」，不抛出；对照 `tests/fixtures/auction_houses/` 的样本更新 `curio/auction_houses.py` 里对应的纯解析函数。
+
 ## 规则、模型与审核
 
 `config/price_rules.yaml` 和 `config/slow_sellers.yaml` 初始为空，文件注释有格式。没有把未经确认的旧价格线当作正式配置；旧 judge 的默认调用行为保留，本流程禁用旧硬编码价格阈值，使用 YAML。原有文字分类规则继续使用。

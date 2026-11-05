@@ -326,7 +326,7 @@ class Store:
         # Only explicit public product fields are persisted; no response blobs or credentials.
         fields=('item_id','platform','title','description','currency','price_text','buying','url','image','created','ends','condition','country')
         p={k:item.get(k,'') or '' for k in fields}
-        if not p['item_id'] or p['platform'] not in ('ebay','kleinanzeigen','etsy'):raise ValueError('来源商品编号无效')
+        if not p['item_id'] or p['platform'] not in ('ebay','kleinanzeigen','etsy','auction_house'):raise ValueError('来源商品编号无效')
         listed,total=prices(item,config['auction_fee_rate']);p.update(price=listed,listed_price=listed,total_price=total)
         ts=now()
         with self.connect() as c:
@@ -689,7 +689,16 @@ def fee_choices(fees=None):
     fees=fees or fees_for()
     return [dict(tier=k,amount=v['amount'],label=v['label']) for k,v in fees['tiers'].items()]+[dict(tier='ask',amount=None,label='请咨询')]
 
-PLATFORM_LABELS=dict(ebay='eBay',etsy='Etsy',kleinanzeigen='Kleinanzeigen')
+PLATFORM_LABELS=dict(ebay='eBay',etsy='Etsy',kleinanzeigen='Kleinanzeigen',auction_house='拍卖行')
+
+def platform_label(item,root=ROOT):
+    """卡片上的平台标签；拍卖行的货（故事 32）按 item_id 前缀 ah-<key>- 查名单里的中文名，查不到时为「拍卖行」。"""
+    platform=item.get('platform')
+    if platform=='auction_house':
+        m=re.match(r'ah-([a-z0-9_]+)-',item.get('item_id') or '')
+        from .config import auction_house_names
+        return (auction_house_names(root).get(m[1]) if m else None) or PLATFORM_LABELS['auction_house']
+    return PLATFORM_LABELS.get(platform,platform or '')
 _DE=re.compile(r'[äöüßÄÖÜ]|\b(und|der|die|das|mit|nicht|keine?|sehr|guter?|zustand|tasse|teller|unterglasur)\b',re.I)
 _EN=re.compile(r'\b(the|and|with|no|not|very|good|condition|cup|saucer|plate|porcelain|chips?|cracks?|please|see|photos?|pattern|marked?)\b',re.I)
 _CJK=re.compile(r'[一-鿿]')
@@ -864,7 +873,7 @@ def card(c,item,root=ROOT):
     return dict(item_id=iid,name=std['std_name'] if named else item.get('title') or '',
                 name_lang=None if named else guess_lang(item.get('title')),
                 price=price_label(item.get('listed_price'),item.get('currency')),
-                platform=PLATFORM_LABELS.get(item.get('platform'),item.get('platform') or ''),
+                platform=platform_label(item,root),
                 score=score['score'] if score else None,score_reason=score['reason'] if score else None,
                 image=images[0]['src'] if images else None,code=triage.code(c,iid),tags=tags,status=item.get('status'),
                 vision_line=vision_line(c,iid,item.get('image'),root))
@@ -886,8 +895,10 @@ def auction_card(c,row,root=ROOT):
     """拍卖新品列表的一行（故事 20）：卡片字段加卖家标题、当前出价、结束时间、是否已过结束时间与 eBay 链接。"""
     out=card(c,row,root)
     url=row.get('url') or ''
-    out.update(title=row.get('title') or '',title_lang=guess_lang(row.get('title')),bid=out['price'],
-               ends=row.get('ends') or None,ended=bool(row.get('ended')),url=url if re.match(r'https?://',url) else '')
+    house=row.get('platform')=='auction_house'      # 故事 32：拍卖行显示原文价格（Limit / 估价）
+    out.update(title=row.get('title') or '',title_lang=guess_lang(row.get('title')),bid=(row.get('price_text') or out['price']) if house else out['price'],
+               ends=row.get('ends') or None,ended=bool(row.get('ended')),url=url if re.match(r'https?://',url) else '',
+               source='auction_house' if house else 'ebay')
     return out
 
 def item_detail(c,iid,root=ROOT):

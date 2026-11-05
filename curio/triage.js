@@ -729,7 +729,7 @@ function aucRow(c) {
   const parts = [t];
   if (c.title && c.title !== c.name) { const st = document.createElement('p'); st.className = 'r'; st.textContent = c.title; setLang(st, c.title_lang); parts.push(st); }
   const p = document.createElement('p'); p.className = 'p';
-  const pm = document.createElement('span'); pm.className = 'mono'; pm.textContent = c.bid || c.price; p.append('最近出价 ', pm, ' · ' + c.platform);
+  const pm = document.createElement('span'); pm.className = 'mono'; pm.textContent = c.bid || c.price; p.append(c.source === 'auction_house' ? '' : '最近出价 ', pm, ' · ' + c.platform);
   parts.push(p);
   const left = aucLeft(c);
   const when = document.createElement('p'); when.className = 'when';
@@ -745,7 +745,8 @@ function aucRow(c) {
   }
   if (c.url) {
     const lp = document.createElement('p'); const a = document.createElement('a'); a.className = 'lnk lnk-pad';
-    a.href = c.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = 'eBay 原链接'; lp.append(a); parts.push(lp);
+    a.href = c.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    a.textContent = c.source === 'auction_house' ? (c.platform || '拍卖行') + '原链接' : 'eBay 原链接'; lp.append(a); parts.push(lp);
   }
   const acts = document.createElement('div'); acts.className = 'acts2';
   const keep = document.createElement('button'); keep.type = 'button'; keep.className = 'btn primary'; keep.dataset.k = 'keep'; keep.textContent = '留下（进拍卖池）';
@@ -756,7 +757,8 @@ function aucRow(c) {
   cv.setAttribute('aria-label', c.name + ' 转为普通货');
   const cvp = document.createElement('div'); cvp.className = 'acts2'; cvp.style.gridTemplateColumns = '1fr'; cvp.style.marginTop = '8px'; cvp.append(cv);
   const msg = document.createElement('p'); msg.className = 'im'; msg.hidden = true; msg.setAttribute('role', 'alert');
-  parts.push(acts, cvp, msg);
+  // 故事 32：拍卖行的拍品不能转为普通货，不显示这个按钮。
+  if (c.source === 'auction_house') parts.push(acts, msg); else parts.push(acts, cvp, msg);
   body.append(...parts); li.append(th, body);
   th.onclick = () => openDetail(c.item_id, 'auction', th);
   t.onclick = () => openDetail(c.item_id, 'auction', t);
@@ -774,10 +776,23 @@ async function loadAuc(reset) {
     if (gen !== aucGen) return;
     const shown = new Set([...$('aucList').children].map(li => li.dataset.id));
     d.items.forEach(c => { if (!shown.has(c.item_id)) $('aucList').append(aucRow(c)); });
+    if (!aucCursor) aucHouses(d.houses);
     aucCursor = d.next_cursor; aucCount = d.counts.auction; aucSoon = d.counts.auction_soon; counts();
     $('aucMore').hidden = !aucCursor;
     $('aucEmpty').hidden = $('aucList').children.length > 0;
   } catch (e) { if (gen === aucGen) { $('aucErr').hidden = false; shout('未能加载拍卖新品'); } }
+}
+// 故事 32：拍卖新品顶部一行，各拍卖行今天是否已看、新增几件、最近的错误或说明。
+function aucHouses(houses) {
+  const el = $('aucHouses');
+  if (!Array.isArray(houses) || !houses.length) { el.hidden = true; el.textContent = ''; return; }
+  el.textContent = '拍卖行：' + houses.map(h => {
+    let t = h.name + (h.checked_today ? ' 今天已看 · 新增 ' + (h.new || 0) + ' 件' : ' 今天未看');
+    if (h.error) t += ' · 出错：' + h.error;
+    else if (h.note) t += ' · ' + h.note;
+    return t;
+  }).join('；');
+  el.hidden = false;
 }
 function openAuc() {
   hideMsg();

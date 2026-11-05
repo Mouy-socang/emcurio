@@ -11,6 +11,7 @@ def money(value):
 def prices(item,fee_rate):
     listed=money(item.get('price'))
     if listed is None:return None,None
+    # 只有 eBay 拍卖加费率；拍卖行（auction_house）的 total 即标价（买家佣金另计，未知）。
     auction=item.get('platform')=='ebay' and 'AUCTION' in item.get('buying','')
     rate=Decimal(str(fee_rate)) if auction else Decimal(0)
     return listed,money(Decimal(str(listed))*(Decimal(1)+rate))

@@ -125,7 +125,7 @@ def fake_download(fail=()):
     """假的图片下载：写一个按网址命名的本地文件，与 vision.download 同样的返回形状。"""
     import hashlib
 
-    def dl(url, folder):
+    def dl(url, folder, headers=None):
         if url in fail:
             raise vision.Failure('图片网络失败')
         name = hashlib.sha256(url.encode()).hexdigest() + '.jpg'

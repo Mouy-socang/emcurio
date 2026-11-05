@@ -31,11 +31,14 @@ def key(root=ROOT):
    v=line.split('=',1)[1].strip().strip('\"\'')
    if v:return v
  raise Failure('NVIDIA_API_KEY尚未填写')
-def download(url,folder):
+# 故事 32：拍卖行的图片主机（Wendl 用 cdn.aeman.nl）。
+HOUSE_IMAGE_HOSTS=('cdn.aeman.nl','www.mehlis.eu','www.lempertz.com')
+IMAGE_HOSTS=('i.ebayimg.com','img.kleinanzeigen.de','img.classistatic.de')+HOUSE_IMAGE_HOSTS
+def download(url,folder,headers=None):
  u=urlparse(url)
- if u.scheme!='https' or u.hostname not in ('i.ebayimg.com','img.kleinanzeigen.de','img.classistatic.de'):raise Failure('图片域名不允许')
+ if u.scheme!='https' or u.hostname not in IMAGE_HOSTS:raise Failure('图片域名不允许')
  try:
-  with requests.get(url,stream=True,timeout=30,allow_redirects=False) as r:
+  with requests.get(url,stream=True,timeout=30,allow_redirects=False,headers=headers) as r:
    kind=r.headers.get('Content-Type','').split(';')[0];ext={'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp'}.get(kind)
    if r.status_code!=200 or not ext:raise Failure('图片下载失败或格式无效')
    b=bytearray()
@@ -54,7 +57,7 @@ def snapshot(store,item,root=ROOT,api=None,budget=None,max_images=4,pool=False):
  pool=True（商品池存档）时在快照里记 pool_archive={image_limit, detail_ok, download_failures}，Kleinanzeigen 被拦时暂停两小时。
  预算用完（BudgetExhausted）不吞掉、向上抛出，调用方不记这次尝试。"""
  from .schedule import BudgetExhausted
- acquisition_started=time.monotonic();detail_ok=False
+ acquisition_started=time.monotonic();detail_ok=False;headers=None;image_limit=max_images
  data={k:item.get(k) for k in ('item_id','platform','title','description','condition','listed_price','currency','buying','url','status')};urls=[item.get('image')];errors=[];raw=None
  if item['platform']=='ebay':
   from .curio_monitor import EbayAPI
@@ -67,6 +70,10 @@ def snapshot(store,item,root=ROOT,api=None,budget=None,max_images=4,pool=False):
    else:store.mark_gone(item['item_id']);data['status']='gone';errors.append('详情已不可用，成交未知')
   except BudgetExhausted:raise
   except Exception:errors.append('详情失败，使用已有资料')
+ elif item['platform']=='auction_house':
+  # 故事 32：拍卖行的货只下载 items.image 这一张，不请求拍品页、不花任何平台预算；资料取自列表页入库时的字段。
+  from .auction_houses import user_agent
+  urls=[item.get('image')];detail_ok=True;max_images=1;headers={'User-Agent':user_agent(root=root)}
  else:
   from .curio_monitor import ka_curl,blocked
   status,page,err=0,'',None
@@ -84,7 +91,7 @@ def snapshot(store,item,root=ROOT,api=None,budget=None,max_images=4,pool=False):
  download_started=time.monotonic()
  images=[];failures=0
  for url in list(dict.fromkeys(u for u in urls if u))[:max_images]:
-  try:images.append(download(html.unescape(url),root/'data/porcelain/images'))
+  try:images.append(download(html.unescape(url),root/'data/porcelain/images',headers))
   except Failure as e:errors.append(str(e));failures+=1
  download_seconds=round(time.monotonic()-download_started,3)
  if not images:
@@ -93,7 +100,8 @@ def snapshot(store,item,root=ROOT,api=None,budget=None,max_images=4,pool=False):
    images=[x for x in json.loads(previous[0]).get('images',[]) if (root/'data/porcelain'/x['file']).is_file()]
    if images:errors.append('使用此前已保存的照片')
  data.update(images=images,source_detail=raw,acquisition_errors=errors,scope=f'最多{max_images}张可获取图片，出售范围待核')
- if pool:data['pool_archive']=dict(image_limit=max_images,detail_ok=detail_ok,download_failures=failures)
+ # 拍卖行的货只有一张主图可取：image_limit 仍记调用方的上限（商品池 12），表示"可取的都取了"。
+ if pool:data['pool_archive']=dict(image_limit=image_limit,detail_ok=detail_ok,download_failures=failures)
  from .archive_price import archive_price
  data['price_archive']=archive_price(data.get('listed_price'),data.get('currency'),root)
  fp=digest(data)
