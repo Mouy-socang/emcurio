@@ -3,7 +3,7 @@
 把拍品以纯拍卖身份（platform auction_house、buying AUCTION）入库，之后与 eBay 拍卖走同一套。
 
 礼貌规则（Fetcher）：User-Agent 如实写 CurioObjectBot/0.1（可附 contact），不伪装浏览器；每次先读 robots.txt，禁止的路径不访问；
-同一主机两次请求至少隔 interval 秒（名单里配置；robots 的 Crawl-delay 更长时按它）；每家每次最多 MAX_REQUESTS 个请求；
+同一主机两次请求至少隔 interval 秒（名单里配置；robots 的 Crawl-delay 更长时按它）；每家每次最多 max_requests 个请求（名单里配置，缺省 MAX_REQUESTS）；
 遇到 403、429 或验证页面，这家当天停下并记错，不重试、不绕过。不打开拍品页、不下载 PDF 图录与图片（入池存档的主图除外，见 vision）。
 
 每个适配器分成纯解析函数（输入 HTML / JSON 文本，测试直接用样本）与取数函数（经 Fetcher）。
@@ -14,8 +14,7 @@ import logging
 import re
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
-from urllib import robotparser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, unquote_plus, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -33,7 +32,7 @@ STATUS_KEY = 'ah_status'
 # 只认验证页本身的标记（普通页面里的 reCAPTCHA 表单、文字不算）。
 BLOCK_RE = re.compile(r'cf-chl|challenge-platform|verify you are human|<title>\s*Just a moment|<title>\s*Attention Required', re.I)
 MAX_DELAY = 60            # robots Crawl-delay 的上限（秒）
-RUN_SECONDS = 20 * 60     # run_due 每轮的总时限：超过后其余拍卖行本轮不开始、不记为今天已看
+RUN_SECONDS = 40 * 60     # run_due 每轮的总时限（故事 34 放宽到 40 分钟，仍短于采集锁的 3600 秒）：超过后其余拍卖行本轮不开始、不记为今天已看
 PARSE_FAILED = '解析不到拍品，可能改版'
 
 
@@ -57,6 +56,74 @@ class LimitReached(Stop):
 
 class FetchError(Exception):
     """一次请求没拿到可用的页面（网络错误、非 200）。"""
+
+
+class Robots:
+    """robots.txt 规则（故事 34：自己解析，支持 Google 式的「*」通配与结尾「$」，如 Historia 的 Disallow: /*?）。
+    先找点名我们的组（User-agent 是 CurioObjectBot 的前缀），没有时用「*」组；同组规则取匹配最长的一条，一样长时 Allow 优先。
+    text 为 None 时全部放行（没有 robots.txt）。"""
+
+    def __init__(self, text=None):
+        self.allow_all = text is None
+        self.groups = []
+        if text is not None:
+            self._parse(text)
+
+    def _parse(self, text):
+        group, agent_line = None, False
+        for line in text.splitlines():
+            line = line.split('#', 1)[0].strip()
+            if ':' not in line:
+                continue
+            field, value = (x.strip() for x in line.split(':', 1))
+            field = field.lower()
+            if field == 'user-agent':
+                if group is None or not agent_line:
+                    group = dict(agents=[], rules=[], delay=None)
+                    self.groups.append(group)
+                group['agents'].append(value.lower())
+                agent_line = True
+                continue
+            agent_line = False
+            if group is None:
+                continue
+            if field in ('allow', 'disallow') and value:
+                group['rules'].append((field == 'allow', value))
+            elif field == 'crawl-delay':
+                try:
+                    group['delay'] = float(value)
+                except ValueError:
+                    pass
+
+    def _groups(self, ua):
+        name = (ua or '').split('/')[0].strip().lower()
+        own = [g for g in self.groups if any(a != '*' and a.split('/')[0] and name.startswith(a.split('/')[0]) for a in g['agents'])]
+        return own or [g for g in self.groups if '*' in g['agents']]
+
+    @staticmethod
+    def _match(pattern, path):
+        anchored = pattern.endswith('$')
+        body = unquote(pattern[:-1] if anchored else pattern)
+        rx = '.*'.join(re.escape(part) for part in body.split('*')) + ('$' if anchored else '')
+        return re.match(rx, path, re.S) is not None
+
+    def can_fetch(self, ua, url):
+        if self.allow_all:
+            return True
+        parts = urlsplit(url)
+        path = unquote(parts.path or '/') + ('?' + unquote(parts.query) if parts.query or url.endswith('?') else '')
+        best = None                      # (长度, 是否 Allow)
+        for g in self._groups(ua):
+            for allow, pattern in g['rules']:
+                if self._match(pattern, path):
+                    key = (len(pattern), allow)
+                    if best is None or key > best:
+                        best = key
+        return best is None or best[1]
+
+    def crawl_delay(self, ua):
+        delays = [g['delay'] for g in self._groups(ua) if g['delay'] is not None]
+        return max(delays) if delays else None
 
 
 def user_agent(contact=None, root=ROOT):
@@ -84,6 +151,10 @@ class Fetcher:
     def get(self, url):
         return self._send('GET', url)
 
+    def get_bytes(self, url):
+        """取页面的原始字节（自己判断编码时用，如 Leo Spik）。"""
+        return self._send('GET', url, binary=True)
+
     def post_json(self, url, payload):
         return self._send('POST', url, json=payload)
 
@@ -91,7 +162,6 @@ class Fetcher:
         parts = urlsplit(url)
         origin = parts.scheme + '://' + parts.netloc
         if origin not in self.robots:
-            rp = robotparser.RobotFileParser(origin + '/robots.txt')
             target = origin + '/robots.txt'
             for _ in range(MAX_REDIRECTS + 1):
                 status, text, location = self._raw('GET', target, with_location=True)
@@ -107,9 +177,9 @@ class Fetcher:
             else:
                 raise FetchError('跳转过多')
             if status == 200:
-                rp.parse(text.splitlines())
+                rp = Robots(text)
             elif 400 <= status < 500:
-                rp.allow_all = True           # 没有 robots.txt（404 等）：按惯例视为不限制
+                rp = Robots(None)             # 没有 robots.txt（404 等）：按惯例视为不限制
             else:
                 raise FetchError('robots.txt 读取失败（HTTP %d）' % status)
             self.robots[origin] = rp
@@ -120,12 +190,12 @@ class Fetcher:
             self.delay[parts.hostname] = max(self.interval, min(float(crawl or 0), MAX_DELAY))
         return self.robots[origin]
 
-    def _send(self, method, url, **kw):
+    def _send(self, method, url, binary=False, **kw):
         for _ in range(MAX_REDIRECTS + 1):
             if not self._rules(url).can_fetch(self.ua, url):
                 path = urlsplit(url).path or '/'
                 raise RobotsDenied('robots 禁止：' + path)
-            status, text, location = self._raw(method, url, with_location=True, **kw)
+            status, text, location = self._raw(method, url, with_location=True, binary=binary, **kw)
             if status in (301, 302, 303, 307, 308) and location:
                 url = urljoin(url, location)
                 if urlsplit(url).scheme != 'https':
@@ -138,7 +208,7 @@ class Fetcher:
             return text
         raise FetchError('跳转过多')
 
-    def _raw(self, method, url, with_location=False, **kw):
+    def _raw(self, method, url, with_location=False, binary=False, **kw):
         if self.requests >= self.max_requests:
             raise LimitReached('已到每次 %d 个请求的上限，其余明天再看' % self.max_requests)
         host = urlsplit(url).hostname
@@ -161,6 +231,8 @@ class Fetcher:
         text = r.text or ''
         if code == 200 and BLOCK_RE.search(text[:20000]) and not urlsplit(url).path.endswith('robots.txt'):
             raise Blocked('被拦（出现验证页面），今天停止')
+        if binary:
+            text = r.content if isinstance(getattr(r, 'content', None), bytes) else text.encode('utf-8')
         if with_location:
             return code, text, (r.headers or {}).get('location') or (r.headers or {}).get('Location')
         return code, text
@@ -224,7 +296,11 @@ def euro_text(value):
 # 列表页给的是缩略图（Mehlis 200×200、Lempertz 480、Wendl 420×280）；同一张图的大图地址只换尺寸段，不需要多发请求。
 _BIG_IMAGE = ((re.compile(r'^(https://www\.mehlis\.eu/media/catalog/.+)\.(?:preview|medium)\.jpg$'), r'\1.jpg'),   # 原图约 2300×3500
               (re.compile(r'^(https://www\.lempertz\.com/lempertz_api/images/)(?:smedium|medium)/'), r'\1large/'),  # 约 1500 宽
-              (re.compile(r'^(https://cdn\.aeman\.nl/AE_Wendl/image/)\d+/\d+/'), r'\1'))                          # 约 1280 宽
+              (re.compile(r'^(https://cdn\.aeman\.nl/AE_Wendl/image/)\d+/\d+/'), r'\1'),                           # 约 1280 宽
+              # Historia（bidspirit）：各种缩放统一成 1000 宽（原图可能好几 MB，看图与存档都有大小上限）
+              (re.compile(r'^(https://bidspirit-images\.global\.ssl\.fastly\.net/historia/cloned-images/\d+/\d+/)a_ignore_[a-z0-9_]+?_c_[a-z]+_(\w+\.(?:jpg|jpeg|png|webp))$'),
+               r'\1a_ignore_q_80_w_1000_c_limit_\2'),
+              (re.compile(r'^(https://(?:www\.)?leo-spik\.de/aa/bilder/)knopf/'), r'\1'))                         # Leo Spik：去掉 knopf/ 即大图
 
 
 def big_image(url):
@@ -300,7 +376,7 @@ def wendl_row(sale, lot):
                'Limit %s €' % euro_text(price) if price is not None else '', lot['url'], lot['image'], ends)
 
 
-def collect_wendl(fetcher, today, window_days, out):
+def collect_wendl(fetcher, today, window_days, out, now=None):
     sales = wendl_sales(fetcher.get(WENDL_TERMINE))
     if not sales:
         raise ValueError('解析不到场次，可能改版')
@@ -426,7 +502,7 @@ def mehlis_row(sale, timeline, lot):
                mehlis_ends(sale, timeline, lot['lot']))
 
 
-def collect_mehlis(fetcher, today, window_days, out):
+def collect_mehlis(fetcher, today, window_days, out, now=None):
     sales = mehlis_sales(fetcher.get(MEHLIS_CATALOGS))
     if not sales:
         raise ValueError('解析不到场次，可能改版')
@@ -542,7 +618,7 @@ def lempertz_row(catalogue, lot):
                price, text, url, image, utc_z(ends))
 
 
-def collect_lempertz(fetcher, today, window_days, out):
+def collect_lempertz(fetcher, today, window_days, out, now=None):
     cats = lempertz_catalogues(fetcher.get(LEMPERTZ_CATALOGUES))
     if not cats:
         raise ValueError('解析不到场次，可能改版')
@@ -561,9 +637,334 @@ def collect_lempertz(fetcher, today, window_days, out):
     return None
 
 
+# ---------- Historia（故事 34） ----------
+# robots.txt：Crawl-delay 30，禁止 /*? 与 /agb/——永远不发带「?」的网址（卡片、链接里带「?」的一律跳过）。
+# www.historia.de 会 301 到裸域，直接用裸域。拍品按号排序、每页 52 件；只翻还没开拍的瓷器号段所在的页。
+
+HISTORIA_BASE = 'https://historia.de'
+HISTORIA_AUCTIONS = HISTORIA_BASE + '/auktionen/'
+HISTORIA_PER_PAGE = 52
+HISTORIA_BACK = 5            # 估算的页过了号段起点时，最多往回退几页
+HISTORIA_IMAGE = 'https://bidspirit-images.global.ssl.fastly.net/'
+
+
+def _attr(tag, name):
+    m = re.search(r'\b' + name + r'\s*=\s*"([^"]*)"', tag, re.I)
+    return html.unescape(m[1]).strip() if m else ''
+
+
+def historia_sales(page):
+    """/auktionen/ 的场次卡片 → [{sale, url, start, end}]。日期取卡片里 add-to-calendar-button 的 startDate / endDate
+    （按它的 timeZone 换成柏林日期）；链接带「?」的卡片（往期）跳过。"""
+    out, seen = [], set()
+    for card in re.split(r'<div class="favorite-auction auction-item\b', page)[1:]:
+        link = re.search(r'href="(https://historia\.de/auction/(\d+)-[^"/]*/?)"', card)
+        button = re.search(r'<add-to-calendar-button\b([^>]*)>', card, re.S)
+        if not link or not button or '?' in link[1] or link[1] in seen:
+            continue
+        attrs = button[1]
+        try:
+            zone = ZoneInfo(_attr(attrs, 'timeZone') or 'Europe/Berlin')
+        except Exception:
+            zone = BERLIN
+        days = []
+        for d, t in (('startDate', 'startTime'), ('endDate', 'endTime')):
+            try:
+                local = datetime.strptime(_attr(attrs, d) + ' ' + (_attr(attrs, t) or '00:00:00')[:8], '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                try:
+                    local = datetime.strptime(_attr(attrs, d), '%Y-%m-%d')
+                except ValueError:
+                    break
+            days.append(local.replace(tzinfo=zone).astimezone(BERLIN).date())
+        if len(days) != 2:
+            continue
+        seen.add(link[1])
+        url = link[1] if link[1].endswith('/') else link[1] + '/'
+        out.append(dict(sale=int(link[2]), url=url, start=min(days), end=max(days)))
+    return out
+
+
+def historia_schedule(page):
+    """拍卖页的日程块（data-time + 表行「Porzellan Teil II | 2830 - 3659 | ab 10:00 Uhr」）→
+    [{category, lo, hi, at（UTC datetime，取块的 data-time）}]。"""
+    rows = []
+    blocks = re.split(r'(<div class="information-block__item\b[^>]*>)', page)
+    for head, body in zip(blocks[1::2], blocks[2::2]):
+        try:
+            at = datetime.fromisoformat(_attr(head, 'data-time').replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        for tr in re.findall(r'<tr>(.*?)</tr>', body.split('</table>')[0], re.S):
+            cells = [text_of(td) for td in re.findall(r'<td[^>]*>(.*?)</td>', tr, re.S)]
+            rng = re.search(r'(\d+)\s*-\s*(\d+)', cells[1]) if len(cells) >= 2 else None
+            if rng:
+                rows.append(dict(category=cells[0], lo=int(rng[1]), hi=int(rng[2]), at=at.astimezone(timezone.utc)))
+    return rows
+
+
+def historia_counts(page):
+    """拍卖页侧栏的分类件数 {分类名: 件数}（「Porzellan Teil I <span>830</span>」），用来估算号段在第几页。"""
+    out = {}
+    for name, n in re.findall(r'<li class="[^"]*category_by-\d+[^"]*">\s*<a[^>]*>(.*?)<span>\s*(\d+)\s*</span>', page, re.S):
+        out[text_of(name)] = int(n)
+    return out
+
+
+def historia_lots(page):
+    """拍品页 → (拍品列表, 末页（从 1 起）, 卡片数)。每件取 bp-lot lot-item 块的 data-lot-index、data-content
+    （URL 编码的 JSON：title / content）、详情链接、首图（bidspirit）、「Startpreis: EUR n」。
+    找不到拍品列表（页面结构变了）时卡片数为 None。"""
+    pages = [int(n) for n in re.findall(r'href="https://historia\.de/auction/[^"?]*/page/(\d+)/"', page)]
+    last = max(pages + [1])
+    if 'class="bp-lots ' not in page and 'id="single-lot-' not in page:
+        return [], last, None
+    lots, seen = [], set()
+    chunks = re.split(r'<div id="single-lot-', page)[1:]
+    for chunk in chunks:
+        chunk = chunk.split('<script', 1)[0]
+        number = re.search(r'data-lot-index="(\d+[A-Za-z]?)"', chunk)
+        if not number or number[1] in seen:
+            continue
+        seen.add(number[1])
+        title = description = ''
+        content = re.search(r'data-content="([^"]*)"', chunk)
+        if content:
+            try:
+                data = json.loads(unquote_plus(html.unescape(content[1])))
+                title = str(data.get('title') or '').strip()
+                description = text_of(str(data.get('content') or ''))
+            except (ValueError, AttributeError):
+                pass
+        if description.startswith(title) and title:
+            head = description.split(',')[0].strip()     # data-content 的 title 截断在约 33 个字；描述开头的整句更完整
+            if len(head) > len(title):
+                title = head
+        if not title:
+            name = re.search(r'<div class="grid-title">(.*?)</div>', chunk, re.S)
+            title = text_of(name[1]) if name else ''
+        link = re.search(r'href="(https://historia\.de/auction/[^"?]+/)"', chunk)
+        img = re.search(r'data-src="(' + re.escape(HISTORIA_IMAGE) + r'[^"?]+)"', chunk)
+        start = re.search(r'Startpreis:\s*(?:<[^>]+>\s*)*EUR\s*([\d.,]+)', chunk)
+        price = None
+        if start:
+            digits = re.sub(r'[.,]', '', start[1])            # 「EUR 10,000」「EUR 1.200」都是整欧元
+            price = float(digits) if digits.isdigit() else None
+        lots.append(dict(lot=number[1], n=int(re.match(r'\d+', number[1])[0]), title=title or number[1],
+                         description=description, start=price, url=html.unescape(link[1]) if link else '',
+                         image=html.unescape(img[1]) if img else ''))
+    return lots, last, len(chunks)
+
+
+def historia_row(sale, lot, at):
+    price = lot['start']
+    return row('historia', sale['sale'], _slug(lot['lot']), lot['title'], lot['description'], price,
+               '起拍 %s €' % euro_text(price) if price is not None else '', lot['url'], lot['image'],
+               at.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'))
+
+
+def _historia_guess(lo, schedule, counts, per_page):
+    """号段起点 lo 估计在第几页：号比 lo 小的各分类件数之和（侧栏件数，没有时按号段长度）÷ 每页件数。"""
+    before = sum(counts.get(r['category'], r['hi'] - r['lo'] + 1) for r in schedule if r['hi'] < lo)
+    return before // max(per_page, 1) + 1
+
+
+def _historia_segment(read, lo, hi, guess, last, add):
+    """翻一个号段：从估算页起，过了起点就往回退（最多 HISTORIA_BACK 页），再往后翻到号段终点或没有拍品为止。
+    号段里的拍品逐页交给 add（中途到请求上限时，已翻到的不丢）。返回件数。"""
+    page = max(1, min(guess, last))
+    for _ in range(HISTORIA_BACK):
+        nums = [l['n'] for l in read(page)]
+        if page > 1 and (not nums or min(nums) > lo):
+            page -= 1
+            continue
+        break
+    found = 0
+    while page <= last:
+        lots = read(page)
+        if not lots:
+            break
+        for lot in lots:
+            if lo <= lot['n'] <= hi:
+                add(lot)
+                found += 1
+        if max(l['n'] for l in lots) >= hi:
+            break
+        page += 1
+    return found
+
+
+def collect_historia(fetcher, today, window_days, out, now=None):
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    sales = historia_sales(fetcher.get(HISTORIA_AUCTIONS))
+    if not sales:
+        raise ValueError('解析不到场次，可能改版')
+    due, later = _window(sales, today, window_days)
+    if not due:
+        return _next_note(later, window_days)
+    found, notes = 0, []
+    for sale in due:
+        first = fetcher.get(sale['url'])
+        schedule = historia_schedule(first)
+        porcelain = [r for r in schedule if 'porzellan' in r['category'].lower()]
+        pending = [r for r in porcelain if r['at'] > now]
+        if not porcelain:
+            notes.append('%d 场的日程里还没有瓷器号段' % sale['sale'])
+            continue
+        if not pending:
+            notes.append('%d 场的瓷器号段都已开拍' % sale['sale'])
+            continue
+        cache = {}
+        lots1, last, cards = historia_lots(first)
+        if cards is None:
+            raise ValueError(PARSE_FAILED)
+        cache[1] = lots1
+
+        def read(n, sale=sale, cache=cache):
+            if n not in cache:
+                lots, _, cards = historia_lots(fetcher.get(sale['url'] + 'page/%d/' % n))
+                if cards is None:
+                    raise ValueError(PARSE_FAILED)
+                cache[n] = lots
+            return cache[n]
+        counts = historia_counts(first)
+        for seg in sorted(pending, key=lambda r: r['lo']):
+            guess = _historia_guess(seg['lo'], schedule, counts, HISTORIA_PER_PAGE)
+            found += _historia_segment(read, seg['lo'], seg['hi'], guess, last,
+                                       lambda lot, sale=sale, seg=seg: out.append(historia_row(sale, lot, seg['at'])))
+    if found:
+        return None
+    return '；'.join(notes) if notes else _empty_note(window_days)
+
+
+# ---------- Leo Spik（故事 34） ----------
+# 静态网页、没有 robots.txt。只有「Aktuelle Auktion」（/aa/aa.html）的场次号是 termine 里 90 天内的场次、
+# 且不是 Nachverkauf（拍后补售）时，才读瓷器一章 /aa/porz.html。
+
+LEO_BASE = 'https://www.leo-spik.de'
+LEO_TERMINE = LEO_BASE + '/termine.html'
+LEO_AA = LEO_BASE + '/aa/aa.html'
+LEO_PORZ = LEO_BASE + '/aa/porz.html'
+
+
+def leo_decode(raw):
+    """页面字节 → 文字：先按 UTF-8，失败再按 latin-1（HTML 实体在取字段时反转义）。"""
+    if isinstance(raw, str):
+        return raw
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return raw.decode('latin-1')
+
+
+def _no_comments(page):
+    return re.sub(r'<!--.*?-->', ' ', page, flags=re.S)
+
+
+def leo_sales(page):
+    """termine.html：「<b>Auktion 700</b><br>03. - 05. Dezember 2026<br>」→ [{sale, start, end}]。"""
+    out = []
+    for m in re.finditer(r'<b>\s*Auktion\s+(\d+)\s*</b>\s*<br\s*/?>\s*([^<]+)', _no_comments(page), re.I):
+        days = german_days(m[2])
+        if days:
+            out.append(dict(sale=int(m[1]), start=min(days), end=max(days)))
+    return out
+
+
+def leo_current(page):
+    """/aa/aa.html → {sale（当前场次号或 None）, nachverkauf, porz_at（瓷器一章所在那天的开始时间，柏林当地；读不到 None）}。"""
+    page = _no_comments(page)
+    sale = re.search(r'Auktion\s+(\d+)', text_of(page))
+    head = page.split('<table', 1)[0]
+    porz_at = None
+    link = re.search(r'href="porz\.html"', page)
+    if link:
+        for m in re.finditer(r'(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\s*,?\s*(?:<br\s*/?>)?\s*BEGINN:?\s*(\d{1,2})[.:](\d{2})',
+                             page[:link.start()], re.I):
+            try:
+                porz_at = datetime(int(m[3]), int(m[2]), int(m[1]), int(m[4]), int(m[5]))
+            except ValueError:
+                pass
+    return dict(sale=int(sale[1]) if sale else None, nachverkauf=bool(re.search(r'nachverkauf', text_of(head), re.I)),
+                porz_at=porz_at)
+
+
+def leo_lots(page):
+    """porz.html → 拍品列表；找不到 #Pic / #Num / #Descr 结构时 None。三个相邻块：
+    #Pic（详情链接、knopf 缩略图）、#Num（拍品号）、#Descr（<b>标题</b><br>厂家与年代<br>描述<br>(编号) 600,-- €）。"""
+    blocks = re.findall(r'<div id="Pic"[^>]*>(.*?)</div>\s*<div id="Num"[^>]*>(.*?)</div>\s*<div id="Descr"[^>]*>(.*?)</div>', page, re.S)
+    if not blocks and 'id="Num"' not in page:
+        return None
+    out = []
+    for pic, num, descr in blocks:
+        number = re.search(r'\d+[A-Za-z]?', text_of(num))
+        if not number:
+            continue
+        title = re.search(r'<b>\s*([^<]*?\S[^<]*?)\s*</b>', descr)
+        rest = descr[title.end():] if title else descr
+        segs = [text_of(x) for x in re.split(r'<br\s*/?>', rest)]
+        segs = [x for x in segs if x]
+        estimate = None
+        if segs:
+            m = re.search(r'([\d.]+),--\s*(?:€|EUR)\s*$', segs[-1])
+            if m:
+                estimate = float(m[1].replace('.', ''))
+                segs = segs[:-1]
+        maker = segs[0] if len(segs) > 1 else ''
+        body = ' '.join(segs[1:] if len(segs) > 1 else segs)
+        link = re.search(r'''href=['"]([^'"]+\.html)['"]''', pic)
+        img = re.search(r'''<img[^>]*src=['"]([^'"]+)['"]''', pic)
+        out.append(dict(lot=number[0], title=text_of(title[1]) if title else number[0], maker=maker, body=body,
+                        estimate=estimate, url=urljoin(LEO_PORZ, html.unescape(link[1])) if link else '',
+                        image=urljoin(LEO_PORZ, html.unescape(img[1])) if img else ''))
+    return out
+
+
+def leo_row(sale, ends, lot):
+    price = lot['estimate']
+    maker, body = lot['maker'], lot['body']
+    description = (maker + (' ' if maker.endswith('.') else '. ') + body) if maker and body else (maker or body)
+    return row('leo_spik', sale, _slug(lot['lot']), lot['title'], description, price,
+               '估价 %s €' % euro_text(price) if price is not None else '', lot['url'], lot['image'], ends)
+
+
+def collect_leo_spik(fetcher, today, window_days, out, now=None):
+    sales = leo_sales(leo_decode(fetcher.get_bytes(LEO_TERMINE)))
+    if not sales:
+        raise ValueError('解析不到场次，可能改版')
+    due, later = _window(sales, today, window_days)
+    if not due:
+        return _next_note(later, window_days)
+    current = leo_current(leo_decode(fetcher.get_bytes(LEO_AA)))
+    if current['sale'] is None:
+        raise ValueError('解析不到当前场次，可能改版')
+    want = {s['sale']: s for s in due}
+    upcoming = min(due, key=lambda s: s['start'])['sale']
+    if current['sale'] not in want or current['nachverkauf']:
+        if current['sale'] == upcoming:
+            return '目录已是 %d 场的拍后补售，不再收' % current['sale']
+        what = '%d 场的拍后补售' % current['sale'] if current['nachverkauf'] else '%d 场' % current['sale']
+        return '目录还是 %s，%d 场图录未上线' % (what, upcoming)
+    page = leo_decode(fetcher.get_bytes(LEO_PORZ))
+    head = text_of(_no_comments(page).split('<div id="Pic"', 1)[0])
+    shown = re.search(r'Auktion\s+(\d+)', head)
+    if re.search(r'nachverkauf', head, re.I) or (shown and int(shown[1]) != current['sale']):
+        return '瓷器一章还是 %s 场的拍后补售，%d 场未上线' % (shown[1] if shown else '上一', current['sale'])
+    lots = leo_lots(page)
+    if lots is None:
+        raise ValueError(PARSE_FAILED)
+    sale = want[current['sale']]
+    ends = utc_z(current['porz_at'] or datetime.combine(sale['end'], dtime(23, 59)))
+    out.extend(leo_row(current['sale'], ends, lot) for lot in lots)
+    return None if lots else _empty_note(window_days)
+
+
 # ---------- 调度 ----------
 
-ADAPTERS = {'wendl': collect_wendl, 'mehlis': collect_mehlis, 'lempertz': collect_lempertz}
+ADAPTERS = {'wendl': collect_wendl, 'mehlis': collect_mehlis, 'lempertz': collect_lempertz,
+            'leo_spik': collect_leo_spik, 'historia': collect_historia}
 
 
 def _window(sales, today, window_days):
@@ -597,11 +998,12 @@ def load_status(store):
     return data if isinstance(data, dict) else {}
 
 
-def run_due(store, config, clock=time.time, session=None, sleep=time.sleep, monotonic=time.monotonic, run_seconds=RUN_SECONDS):
+def run_due(store, config, clock=time.time, session=None, sleep=None, monotonic=time.monotonic, run_seconds=RUN_SECONDS):
     """采集轮里调用：今天（柏林日期）还没看过的拍卖行各看一次。每家先记今天的日期（出错也不再重试），
     取到的拍品逐件 store.ingest（新货、价格或结束时间变化由 ingest 自己判断；结束时间已过的不入库，免得把已判下架的拍品改回在售）。
     一家出错不影响其他家。本轮用时超过 run_seconds 后，其余拍卖行不开始、也不记为今天已看（下轮再看）。
     返回 {key: {new, found, error, note, requests}}（只含本轮实际运行的）。"""
+    sleep = sleep or time.sleep          # 调用时再取（测试替换 time.sleep 才生效）
     houses = [h for h in config.get('auction_houses') or [] if runnable(h)]
     bot = config.get('auction_house_bot') or {}
     window = bot.get('window_days', 90)
@@ -625,8 +1027,8 @@ def run_due(store, config, clock=time.time, session=None, sleep=time.sleep, mono
         try:
             if session is None:
                 session = make_session()
-            fetcher = Fetcher(session, ua, house['interval'], MAX_REQUESTS, sleep, monotonic)
-            entry['note'] = ADAPTERS[house['key']](fetcher, today, window, rows)
+            fetcher = Fetcher(session, ua, house['interval'], house.get('max_requests') or MAX_REQUESTS, sleep, monotonic)
+            entry['note'] = ADAPTERS[house['key']](fetcher, today, window, rows, now=now_utc)
         except Stop as e:
             entry['error'] = str(e)
         except FetchError as e:

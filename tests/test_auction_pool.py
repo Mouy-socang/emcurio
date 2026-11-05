@@ -317,7 +317,7 @@ def test_http_auctions_and_convert(db, cfg, http):
     d = http['get']('/api/auctions')
     assert ids(d['items']) == ['auc'] and d['counts'] == {'auction': 1, 'auction_soon': 0}
     houses = {h['key']: h for h in d['houses']}                  # 故事 32：顶部拍卖行状态行
-    assert set(houses) == {'wendl', 'mehlis', 'lempertz'}
+    assert set(houses) == {'wendl', 'mehlis', 'lempertz', 'leo_spik', 'historia'}
     assert houses['mehlis']['checked_today'] is True and houses['mehlis']['new'] == 4 and houses['mehlis']['name'] == '梅利斯拍卖行'
     assert houses['wendl']['checked_today'] is False
     assert http['get']('/api/triage/feed?limit=40')['counts']['auction'] == 1

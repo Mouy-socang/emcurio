@@ -103,10 +103,12 @@ HOUSE_STATUSES=('allowed','ask','forbidden')
 # 条款禁止程序采集的平台：名单里出现时不得标为 allowed（双保险，代码也从不访问它们）。
 NEVER_VISIT=frozenset({'lottissimo','the_saleroom','invaluable','liveauctioneers','catawiki'})
 _HOUSE_KEY=re.compile(r'[a-z][a-z0-9_]{0,30}')
-_HOUSE_FIELDS={'key','name','site','status','terms','adapter','enabled','interval'}
+_HOUSE_FIELDS={'key','name','site','status','terms','adapter','enabled','interval','max_requests'}
+HOUSE_MAX_REQUESTS=40   # 每家每次的请求上限缺省值（故事 34：名单里可按家改，1–200）
 
 def auction_houses(value):
-    """校验 auction_houses 名单：列表，每项 {key, name（中文显示名）, site, status, terms（条款结论一句）, adapter, enabled, interval?}。"""
+    """校验 auction_houses 名单：列表，每项 {key, name（中文显示名）, site, status, terms（条款结论一句）, adapter, enabled, interval?,
+    max_requests?（每次最多请求数，1–200，缺省 40）}。"""
     if value is None:return []
     if not isinstance(value,list):raise ValueError('auction_houses 必须为列表')
     out,seen=[],set()
@@ -131,8 +133,10 @@ def auction_houses(value):
         interval=h.get('interval',5)
         if isinstance(interval,bool) or not isinstance(interval,(int,float)) or not math.isfinite(interval) or interval<5:
             raise ValueError(where+' 的 interval 必须为不小于 5 的秒数')
+        cap=h.get('max_requests',HOUSE_MAX_REQUESTS)
+        if type(cap) is not int or not 1<=cap<=200:raise ValueError(where+' 的 max_requests 必须为 1–200 的整数')
         out.append(dict(key=key,name=h['name'].strip(),site=site,status=status,terms=h['terms'].strip(),
-                        adapter=h.get('adapter',False),enabled=h.get('enabled',False),interval=float(interval)))
+                        adapter=h.get('adapter',False),enabled=h.get('enabled',False),interval=float(interval),max_requests=cap))
     return out
 
 def auction_house_bot(value):
