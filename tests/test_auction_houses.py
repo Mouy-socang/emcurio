@@ -972,3 +972,11 @@ def test_leo_current_from_head_and_started_note():
     note = ah.collect_leo_spik(ah.Fetcher(session, sleep=lambda s: None), date(2026, 12, 4), 90, [],
                                now=datetime(2026, 12, 4, 12, tzinfo=BERLIN))
     assert note == '700 场的瓷器一章已开拍' and not any('porz' in u for _, u, _, _ in session.calls)
+
+
+def test_historia_full_title_from_description():
+    desc = 'Große Henkelvase, Freiherr v. Schierholz, Plaue, um 1900, Blumendekor, H. 40 cm'
+    assert ah.historia_title('Große Henkelvase, Freiherr v. Sch', desc) == 'Große Henkelvase, Freiherr v. Schierholz'
+    assert ah.historia_title('Große Jugendstil-Vase, KPM Berlin', 'Große Jugendstil-Vase, KPM Berlin, um 1905') == \
+        'Große Jugendstil-Vase, KPM Berlin'
+    assert len(ah.historia_title('A', 'A' * 300 + ', B')) <= 300   # 第一段超长时退回原标题

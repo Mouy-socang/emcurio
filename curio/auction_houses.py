@@ -733,6 +733,20 @@ def historia_counts(page):
     return out
 
 
+def historia_title(short, description):
+    """截断的标题 → 描述里按逗号分段、至少盖过截断处的完整前几段（不超过 HISTORIA_TITLE_MAX 字）。"""
+    parts, out = description.split(','), ''
+    for part in parts:
+        nxt = (out + ',' + part) if out else part
+        if len(nxt.strip()) > HISTORIA_TITLE_MAX:
+            break
+        out = nxt
+        if len(out.strip()) >= len(short):
+            break
+    out = out.strip()
+    return out if len(out) >= len(short) else short
+
+
 def historia_lots(page):
     """拍品页 → (拍品列表, 末页（从 1 起）, 卡片数)。每件取 bp-lot lot-item 块的 data-lot-index、data-content
     （URL 编码的 JSON：title / content）、详情链接、首图（bidspirit）、「Startpreis: EUR n」。
@@ -759,9 +773,8 @@ def historia_lots(page):
             except (ValueError, AttributeError):
                 pass
         if title and description.startswith(title) and ',' in description:
-            head = description.split(',')[0].strip()     # data-content 的 title 截断在约 33 个字；描述开头到第一个逗号更完整
-            if len(title) < len(head) <= HISTORIA_TITLE_MAX:
-                title = head
+            # data-content 的 title 截断在约 33 个字（"Große Henkelvase, Freiherr v. Sch"）；描述就是完整标题，按逗号取到截断处之后的那一段为止。
+            title = historia_title(title, description)
         if not title:
             name = re.search(r'<div class="grid-title">(.*?)</div>', chunk, re.S)
             title = text_of(name[1]) if name else ''
