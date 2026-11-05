@@ -221,9 +221,23 @@ def euro_text(value):
     return ('%d' % value) if float(value).is_integer() else ('%.2f' % value).replace('.', ',')
 
 
+# 列表页给的是缩略图（Mehlis 200×200、Lempertz 480、Wendl 420×280）；同一张图的大图地址只换尺寸段，不需要多发请求。
+_BIG_IMAGE = ((re.compile(r'^(https://www\.mehlis\.eu/media/catalog/.+)\.(?:preview|medium)\.jpg$'), r'\1.jpg'),   # 原图约 2300×3500
+              (re.compile(r'^(https://www\.lempertz\.com/lempertz_api/images/)(?:smedium|medium)/'), r'\1large/'),  # 约 1500 宽
+              (re.compile(r'^(https://cdn\.aeman\.nl/AE_Wendl/image/)\d+/\d+/'), r'\1'))                          # 约 1280 宽
+
+
+def big_image(url):
+    """拍卖行首图换成清晰的大图地址；认不出的地址原样返回。"""
+    for rx, repl in _BIG_IMAGE:
+        if rx.match(url or ''):
+            return rx.sub(repl, url)
+    return url
+
+
 def row(key, sale, lot, title, description, price, price_text, url, image, ends):
     return dict(item_id='ah-%s-%s-%s' % (key, sale, lot), platform=PLATFORM, title=title[:500], description=description or '',
-                price=price, currency='EUR', price_text=price_text, buying='AUCTION', url=url, image=image or '',
+                price=price, currency='EUR', price_text=price_text, buying='AUCTION', url=url, image=big_image(image or ''),
                 ends=ends or '', country='DE')
 
 

@@ -147,7 +147,7 @@ def test_mehlis_parse():
     row = ah.mehlis_row(sales[0], timeline, lots[0])
     assert row['item_id'] == 'ah-mehlis-124-3200' and row['price'] == 480.0 and row['price_text'] == 'Limit 480 €'
     assert row['ends'] == '2026-11-21T09:00:00.000Z'            # 11-21 10:00 柏林
-    assert row['image'] == 'https://www.mehlis.eu/media/catalog/12426/00003200/0003200.preview.jpg'
+    assert row['image'] == 'https://www.mehlis.eu/media/catalog/12426/00003200/0003200.jpg'   # 换成清晰的原图
     assert row['url'] == 'https://www.mehlis.eu/de/catalogs/12426/item/3200/'
 
 
@@ -628,3 +628,13 @@ def test_idle_round_archives_ended_house_lot_without_ebay(tmp_path):
     assert got == ['https://www.mehlis.eu/media/catalog/12426/00003200/0003200.preview.jpg']
     with db.connect() as c:
         assert vision.pool_archived(c, iid, tmp_path)
+
+
+def test_big_image_for_first_picture():
+    assert ah.big_image('https://www.mehlis.eu/media/catalog/12426/00003200/0003200.preview.jpg') == \
+        'https://www.mehlis.eu/media/catalog/12426/00003200/0003200.jpg'
+    assert ah.big_image('https://www.lempertz.com/lempertz_api/images/smedium/1299-700-A.jpg') == \
+        'https://www.lempertz.com/lempertz_api/images/large/1299-700-A.jpg'
+    assert ah.big_image('https://cdn.aeman.nl/AE_Wendl/image/420/420/5cb2/jpg') == 'https://cdn.aeman.nl/AE_Wendl/image/5cb2/jpg'
+    assert ah.big_image('https://example.org/a.jpg') == 'https://example.org/a.jpg'
+    assert ah.big_image('') == ''
