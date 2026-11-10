@@ -126,7 +126,7 @@ def test_auction_order_upcoming_then_ended_then_cursor(db, cfg):
 # ---------- 留下：进 02、拍卖中、不能上 R12、不进发布 ----------
 
 def test_kept_auction_in_pool_but_not_rankable(db, cfg, tmp_path):
-    add(db, cfg, 'auc', ends=z(30))
+    add(db, cfg, 'auc', ends=z(24 * 3650))   # ranking.pool 用真实时间，结束时间要远在将来，否则会显示「已结束」
     add(db, cfg, 'fix', 'FIXED_PRICE')
     db.triage_act('keep', 'auc', 'r1')
     db.triage_act('keep', 'fix', 'r2')

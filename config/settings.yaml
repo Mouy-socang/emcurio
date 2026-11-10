@@ -101,6 +101,61 @@ auction_houses:
      terms: 2026-11 只拍珠宝手表画，下次有古董场再查}
   - {key: dannenberg, name: 丹能贝格拍卖行, site: '', status: skip, adapter: false, enabled: false,
      terms: 没有自己的网站，只在 Invaluable 平台上，不适用}
+  # 2026-11-10 调研：可以看但还没做适配器
+  - {key: doebritz, name: 德布里茨拍卖行, site: 'https://auktionen.doebritz.de', status: allowed, adapter: false, enabled: false,
+     terms: robots 与条款不限；迈森多；下一场 221 场 2027-02-27，目录未出}
+  - {key: bruun_rasmussen, name: 布鲁恩·拉斯穆森拍卖行, site: 'https://bruun-rasmussen.dk', status: allowed, adapter: false, enabled: false,
+     terms: '条款不限；robots 禁止 /m/search，只读拍卖页的瓷器分类；网址要带 cas=guest'}
+  - {key: dobiaschofsky, name: 多比亚肖夫斯基拍卖行, site: 'https://www.dobiaschofsky.com', status: allowed, adapter: false, enabled: false,
+     terms: 瑞士，非欧盟；robots 与条款不限；有瓷器分类，下一场 2027-04-28}
+  - {key: schuler, name: 舒勒拍卖行, site: 'https://www.schulerauktionen.ch', status: allowed, adapter: false, enabled: false,
+     terms: 瑞士，非欧盟；robots 与条款不限；迈森在「Tischkultur」分类，A183 场 11-24 至 11-27}
+  - {key: jordaens, name: 约丹斯拍卖行, site: 'https://jordaens.eu', status: allowed, adapter: false, enabled: false,
+     terms: 比利时；robots 与条款不限；瓷器多但迈森/KPM 少且便宜}
+  # 2026-11-10 调研：需先问
+  - {key: kloss, name: 克洛斯拍卖行, site: 'https://www.auktionshaus-kloss.de', status: ask, adapter: false, enabled: false,
+     terms: 'robots 禁止翻页参数 order_by_sort、要求间隔 10 秒；条款只许私人非商业使用'}
+  - {key: karge, name: 卡尔格拍卖行, site: 'https://auktion-karge.de', status: ask, adapter: false, enabled: false,
+     terms: robots 不限；条款只许私人非商业使用；迈森多，4 号场 11-28}
+  - {key: blank, name: 布兰克拍卖行, site: 'https://www.auktionshaus-blank.de', status: ask, adapter: false, enabled: false,
+     terms: robots 禁止翻页，只能看到瓷器分类第一页；194 场 11-28}
+  - {key: plueckbaum, name: 普吕克鲍姆拍卖行, site: 'https://www.plueckbaum.de', status: ask, adapter: false, enabled: false,
+     terms: 条款宽松，但图录只能靠 JS 打开，读接口要先征得同意}
+  - {key: koller, name: 科勒拍卖行, site: 'https://www.kollerauktionen.ch', status: ask, adapter: false, enabled: false,
+     terms: 瑞士，非欧盟；迈森很强，但网站拦程序访问，需先询问}
+  - {key: venduehuis, name: 海牙拍卖行, site: 'https://www.venduehuis.com', status: ask, adapter: false, enabled: false,
+     terms: 图录只能靠 JS 打开，图片保留版权；迈森/KPM 少}
+  # 2026-11-10 调研：不适用
+  - {key: bassenge, name: 巴森格拍卖行, site: 'https://bassenge.com', status: skip, adapter: false, enabled: false,
+     terms: 只拍版画、书画和照片，没有瓷器，不适用}
+  - {key: guenther, name: 君特拍卖行, site: 'https://dresden-kunstauktion.de', status: skip, adapter: false, enabled: false,
+     terms: 已并入 Historia，不适用}
+  - {key: bieberle, name: 比伯勒拍卖行, site: 'https://auktionshausbieberle.de', status: skip, adapter: false, enabled: false,
+     terms: 瓷器少，图录只能靠 JS 打开，不适用}
+  - {key: jena, name: 耶拿典当拍卖行, site: 'https://www.auktionshaus-jena.eu', status: skip, adapter: false, enabled: false,
+     terms: 主拍钱币邮票，迈森很少，不适用}
+  - {key: leipzig, name: 莱比锡艺术拍卖行, site: 'https://www.kunstauktionshaus-leipzig.de', status: skip, adapter: false, enabled: false,
+     terms: 官网证书出错打不开，图录似乎只在平台上，暂不适用}
+  - {key: tempelhof, name: 滕珀尔霍夫钱币行, site: '', status: skip, adapter: false, enabled: false,
+     terms: 钱币拍卖行，不适用}
+  - {key: rapp, name: 拉普拍卖行, site: 'https://www.rapp-auktionen.ch', status: skip, adapter: false, enabled: false,
+     terms: 主拍邮票钱币珠宝，瓷器少，不适用}
+  - {key: fischer_luzern, name: 卢塞恩菲舍尔拍卖行, site: 'https://www.fischerauktionen.ch', status: skip, adapter: false, enabled: false,
+     terms: 只有旧 PDF 图录，没有瓷器列表，不适用}
+  - {key: geble, name: 格布勒拍卖行, site: 'https://www.auktionshaus-geble.de', status: skip, adapter: false, enabled: false,
+     terms: 在线图录只在平台上，不适用}
+  - {key: kaupp, name: 考普拍卖行, site: 'https://www.kaupp.de', status: skip, adapter: false, enabled: false,
+     terms: 2023-11 以后没有拍卖，瓷器少，不适用}
+  - {key: quittenbaum, name: 奎滕鲍姆拍卖行, site: 'https://www.quittenbaum.de', status: skip, adapter: false, enabled: false,
+     terms: 主拍新艺术和设计，瓷器少；条款禁止复制，不适用}
+  - {key: arnold, name: 阿诺德拍卖行, site: 'https://www.auktionshaus-arnold.de', status: skip, adapter: false, enabled: false,
+     terms: 主拍现代艺术和珠宝，瓷器少，不适用}
+  - {key: von_zengen, name: 冯岑根拍卖行, site: '', status: skip, adapter: false, enabled: false,
+     terms: 网站已下线，疑似停业，不适用}
+  - {key: aldag, name: 阿尔达格拍卖行, site: '', status: skip, adapter: false, enabled: false,
+     terms: 域名已被抢注，疑似停业，不适用}
+  - {key: badisches, name: 巴登拍卖行, site: 'https://www.badisches-auktionshaus.de', status: skip, adapter: false, enabled: false,
+     terms: 2022 年后停拍，不适用}
   # 故事 34：Historia 每次最多 50 个请求（含 robots.txt、/auktionen/、拍卖页，其余是拍品页），每次隔 30 秒（robots 的 Crawl-delay），排在最后，免得占住其他家。
   - {key: historia, name: 希斯托利亚拍卖行, site: 'https://historia.de', status: allowed, adapter: true, enabled: true, interval: 30,
      max_requests: 50, terms: 'robots 要求两次请求间隔 30 秒、禁止带「?」的网址；只翻瓷器号段所在的拍品页'}
