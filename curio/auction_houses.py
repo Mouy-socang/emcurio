@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
-from urllib.parse import unquote, unquote_plus, urljoin, urlsplit
+from urllib.parse import quote, unquote, unquote_plus, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -309,7 +309,11 @@ _BIG_IMAGE = ((re.compile(r'^(https://www\.mehlis\.eu/media/catalog/.+)\.(?:prev
               # Historia（bidspirit）：各种缩放统一成 1000 宽（原图可能好几 MB，看图与存档都有大小上限）
               (re.compile(r'^(https://bidspirit-images\.global\.ssl\.fastly\.net/historia/cloned-images/\d+/\d+/)a_ignore_[a-z0-9_]+?_c_[a-z]+_(\w+\.(?:jpg|jpeg|png|webp))$'),
                r'\1a_ignore_q_80_w_1000_c_limit_\2'),
-              (re.compile(r'^(https://(?:www\.)?leo-spik\.de/aa/bilder/)knopf/'), r'\1'))                         # Leo Spik：去掉 knopf/ 即大图
+              (re.compile(r'^(https://(?:www\.)?leo-spik\.de/aa/bilder/)knopf/'), r'\1'),                         # Leo Spik：去掉 knopf/ 即大图
+              # 故事 35：Bruun Rasmussen 列表给 470×470，同一张图有 1000×1000
+              (re.compile(r'^(https://img\.bruun-rasmussen\.dk/.+)_470x470(\.\w+(?:\?.*)?)$'), r'\1_1000x1000\2'),
+              # Döbritz：data-src 带 ?crop=True（裁成方图），去掉即原图
+              (re.compile(r'^(https://auktionen\.doebritz\.de/[^?]+)\?crop=True$', re.I), r'\1'))
 
 
 def big_image(url):
@@ -320,10 +324,56 @@ def big_image(url):
     return url
 
 
-def row(key, sale, lot, title, description, price, price_text, url, image, ends):
+def row(key, sale, lot, title, description, price, price_text, url, image, ends, currency='EUR', country='DE'):
     return dict(item_id='ah-%s-%s-%s' % (key, sale, lot), platform=PLATFORM, title=title[:500], description=description or '',
-                price=price, currency='EUR', price_text=price_text, buying='AUCTION', url=url, image=big_image(image or ''),
-                ends=ends or '', country='DE')
+                price=price, currency=currency, price_text=price_text, buying='AUCTION', url=url, image=big_image(image or ''),
+                ends=ends or '', country=country)
+
+
+# 故事 35：只收标题或描述提到迈森 / KPM 的拍品（Bruun、Schuler、Döbritz、Dobiaschofsky 的瓷器分类里外厂多）。
+MAKER_RE = re.compile(r'meissen|meißen|kpm|k\.p\.m\.|königliche porzellan|porzellanmanufaktur berlin', re.I)
+MAKER_NOTE = '%d 天内的场次里没有提到迈森 / KPM 的未成交拍品'
+
+
+def maker_wanted(*texts):
+    return any(MAKER_RE.search(t or '') for t in texts)
+
+
+def numeric_days(text):
+    """「24.11.2026 – 27.11.2026」「So 18.10.2026 bis Mo 21.12.2026」→ 日期列表（按出现顺序）。"""
+    out = []
+    for d, m, y in re.findall(r'(?<!\d)(\d{1,2})\.(\d{1,2})\.(\d{4})(?!\d)', text_of(text)):
+        try:
+            out.append(date(int(y), int(m), int(d)))
+        except ValueError:
+            continue
+    return out
+
+
+def plain_number(text):
+    """「1'000」「1’000.00」「100000」「1.000」→ 1000.0（瑞士撇号、德文点号都是千位分隔）；读不出 None。"""
+    m = re.search(r"\d[\d'’.\s]*", html.unescape(text or ''))
+    if not m:
+        return None
+    raw = re.sub(r"['’\s]", '', m[0]).rstrip('.')       # 「1'000.–」：结尾的「.–」「.-」不算数字
+    if re.fullmatch(r'\d+\.\d{2}', raw):           # 「1100.00」：小数点
+        raw = raw.split('.')[0]
+    try:
+        return float(raw.replace('.', ''))
+    except ValueError:
+        return None
+
+
+def estimate_text(lo, hi, unit):
+    if lo is None:
+        return ''
+    if hi and hi != lo:
+        return '估价 %s–%s %s' % (euro_text(lo), euro_text(hi), unit)
+    return '估价 %s %s' % (euro_text(lo), unit)
+
+
+def _end_of(day):
+    return utc_z(datetime.combine(day, dtime(23, 59)))
 
 
 def _slug(value):
@@ -1009,10 +1059,446 @@ def collect_leo_spik(fetcher, today, window_days, out, now=None):
     return None if lots else _empty_note(window_days)
 
 
+# ---------- Bruun Rasmussen（故事 35） ----------
+# 丹麦，DKK。robots 禁止 /m/search：只读场次列表与每场的瓷器分类（category_id=492），网址都带 cas=guest&locale=en。
+
+BRUUN_BASE = 'https://bruun-rasmussen.dk'
+BRUUN_AUCTIONS = BRUUN_BASE + '/m/auctions?cas=guest&locale=en'
+BRUUN_LIST = BRUUN_BASE + '/m/auctions/{id}?category_id=492&cas=guest&locale=en'
+COPENHAGEN = ZoneInfo('Europe/Copenhagen')
+BRUUN_TITLE_MAX = 160
+
+
+def _iso(text):
+    try:
+        at = datetime.fromisoformat((text or '').strip())
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=COPENHAGEN)
+
+
+def bruun_sales(page):
+    """/m/auctions：「<a href="/m/auctions/1009096"><h1>…标题…</h1></a>…<time datetime="2026-11-17T15:00:00+01:00">」
+    → [{id, title, at（带时区）, start, end（哥本哈根日期）}]，同一场只取一次。"""
+    out, seen = [], set()
+    for m in re.finditer(r'href="/m/auctions/(\d+)"[^>]*>\s*<h1[^>]*>(.*?)</h1>\s*</a>(.*?)</div>', page, re.S):
+        t = re.search(r'<time datetime="([^"]+)"', m[3])
+        at = _iso(t[1]) if t else None
+        if m[1] in seen or at is None:
+            continue
+        seen.add(m[1])
+        day = at.astimezone(COPENHAGEN).date()
+        out.append(dict(id=m[1], title=text_of(m[2]), at=at, start=day, end=day))
+    return out
+
+
+def _first_sentence(text, limit):
+    parts = re.split(r'(?<=[a-z0-9\)]{2}\.)\s+(?=[A-Z0-9"“\'])', text, maxsplit=1)
+    head = parts[0].strip()
+    if len(head) > limit:
+        head = head[:limit].rsplit(' ', 1)[0].rstrip(',;:') + '…'
+    return head
+
+
+def bruun_lots(page):
+    """某场的瓷器分类页 → (拍品列表, 卡片数)。<li id="lot_…"> 里：header「936/274」、p.description、
+    <currency-range from to currency> 或 <currency-amount amount currency> 估价、hammer-time 的 <time datetime>、/m/lots/ 链接、首图。
+    已有成交价（lot-price 不空）的不取。找不到拍品列表（页面结构变了）时卡片数为 None。"""
+    if 'class="lots ' not in page and 'class="lots"' not in page:
+        return [], None
+    lots = []
+    chunks = [c for c in re.split(r'<li id="lot_', page)[1:] if not c.startswith('placeholder')]
+    for chunk in chunks:
+        number = re.search(r'<header[^>]*>\s*<div[^>]*>\s*(\d+)\s*/\s*(\d+[A-Za-z]?)\s*</div>', chunk)
+        if not number:
+            continue
+        price = re.search(r'data-update-key="lot-price"[^>]*>(.*?)</p>', chunk, re.S)
+        if price and text_of(price[1]):
+            continue
+        desc = re.search(r'<p class="description[^"]*">(.*?)</p>', chunk, re.S)
+        description = text_of(desc[1]) if desc else ''
+        rng = re.search(r'<currency-range\b([^>]*)>', chunk)
+        amt = re.search(r'<currency-amount\b([^>]*)>', chunk)
+        lo = hi = None
+        currency = 'DKK'
+        if rng:
+            lo, hi = number_of(_attr(rng[1], 'from')), number_of(_attr(rng[1], 'to'))
+            currency = _attr(rng[1], 'currency') or currency
+        elif amt:
+            lo = number_of(_attr(amt[1], 'amount'))
+            currency = _attr(amt[1], 'currency') or currency
+        hammer = re.search(r'<time datetime="([^"]+)"[^>]*data-update-key="hammer-time-datetime"', chunk) or \
+            re.search(r'data-update-key="hammer-time".*?<time datetime="([^"]+)"', chunk, re.S)
+        link = re.search(r'href="(/m/lots/[0-9A-Za-z]+)"', chunk)
+        img = re.search(r'<img[^>]*src="((?:https:)?//img\.bruun-rasmussen\.dk/[^"]+)"', chunk)
+        image = html.unescape(img[1]) if img else ''
+        if image.startswith('//'):
+            image = 'https:' + image
+        lots.append(dict(sale=number[1], lot=number[2], title=_first_sentence(description, BRUUN_TITLE_MAX) or number[0],
+                         description=description, lo=lo, hi=hi, currency=currency.upper(),
+                         at=_iso(hammer[1]) if hammer else None, url=BRUUN_BASE + link[1] if link else '', image=image))
+    return lots, len(chunks)
+
+
+def bruun_total(page):
+    """列表的 data-item-count（这场瓷器分类的总件数）；没有时 None。"""
+    m = re.search(r'<ul class="lots[^"]*"[^>]*data-item-count="(\d+)"', page)
+    return int(m[1]) if m else None
+
+
+def bruun_row(sale, lot):
+    # 没有落槌时间时按该场当天 23:59（哥本哈根）：用开场时间的话当天就会被当作已结束
+    at = lot['at'] or datetime.combine(sale['end'], dtime(23, 59)).replace(tzinfo=COPENHAGEN)
+    return row('bruun_rasmussen', lot['sale'], _slug(lot['lot']), lot['title'], lot['description'], lot['lo'],
+               estimate_text(lot['lo'], lot['hi'], lot['currency']), lot['url'], lot['image'],
+               at.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'), currency=lot['currency'], country='DK')
+
+
+def collect_bruun_rasmussen(fetcher, today, window_days, out, now=None):
+    sales = bruun_sales(fetcher.get(BRUUN_AUCTIONS))
+    if not sales:
+        raise ValueError('解析不到场次，可能改版')
+    due, later = _window(sales, today, window_days)
+    if not due:
+        return _next_note(later, window_days)
+    found, parsed, failed, broken, partial = 0, 0, [], 0, []
+    for sale in sorted(due, key=lambda s: s['at']):
+        try:
+            page = fetcher.get(BRUUN_LIST.format(id=sale['id']))
+        except FetchError as e:
+            failed.append(e)              # 一场取不到不影响其他场；全部取不到才算这家出错
+            continue
+        lots, cards = bruun_lots(page)
+        if cards is None:
+            broken += 1
+            continue
+        parsed += 1
+        total = bruun_total(page)
+        if total is not None and total > cards:
+            partial.append('%s 场只显示了 %d / %d 件' % (sale['id'], cards, total))   # 不为补齐多发请求
+        for lot in lots:
+            if maker_wanted(lot['title'], lot['description']):
+                out.append(bruun_row(sale, lot))
+                found += 1
+    if failed and len(failed) == len(due):
+        raise failed[-1]
+    if not parsed:
+        raise ValueError(PARSE_FAILED)
+    notes = (['%d 场的瓷器分类没读到' % len(failed)] if failed else []) + \
+        (['%d 场的瓷器分类页面结构变了' % broken] if broken else []) + partial
+    if notes:
+        return '；'.join(notes)
+    return None if found else MAKER_NOTE % window_days
+
+
+# ---------- Schuler（故事 35） ----------
+# 瑞士苏黎世，CHF。迈森在「Tischkultur」分类；场次卡片的 h2 没有链接表示在线图录还没上线（卡片写「Online-Katalog ab …」）。
+
+SCHULER_BASE = 'https://www.schulerauktionen.ch'
+SCHULER_AUCTIONS = SCHULER_BASE + '/de/auctions'
+SCHULER_LIST = SCHULER_BASE + '/de/auctions/{code}?category=tischkultur&page=1'
+SCHULER_MAX_PAGES = 30
+
+
+def schuler_sales(page):
+    """/de/auctions 的卡片 → [{sale, code, linked, start, end, catalog（图录上线日或 None）}]。"""
+    out = []
+    for card in re.split(r'<div class="auction-date\b', page)[1:]:
+        head = re.search(r'(?:<a href="/de/auctions/(a\d+)"[^>]*>\s*)?<h2[^>]*>(.*?)</h2>', card, re.S)
+        if not head:
+            continue
+        name = text_of(head[2])
+        code = re.search(r'\bA\s*(\d+)\b', name)
+        dates = re.search(r'<p>([^<]*\d{4}[^<]*)</p>', card[head.end():])
+        days = numeric_days(dates[1]) if dates else []
+        if not code or not days:
+            continue
+        catalog = re.search(r'Online-Katalog ab\s*([\d.]+)', text_of(card))
+        cat_days = numeric_days(catalog[1]) if catalog else []
+        out.append(dict(sale=int(code[1]), code=(head[1] or 'a%s' % code[1]).lower(), linked=bool(head[1]),
+                        start=min(days), end=max(days), catalog=cat_days[0] if cat_days else None))
+    return out
+
+
+def schuler_lots(page, code):
+    """Tischkultur 列表页 → (拍品列表, 下一页网址或 None, 卡片数)。每张 .grid-item：h2「1000. 标题」、<small>开拍时间、
+    「CHF 1'000 – 2'000」估价、window.open 的 /de/items/ 链接、lg_ 图片；已有 Zuschlag 的不取。
+    找不到列表（页面结构变了）时卡片数为 None。"""
+    nxt = None
+    m = re.search(r'<a[^>]*rel="next"[^>]*href="([^"]+)"', page) or re.search(r'<a[^>]*href="([^"]+)"[^>]*rel="next"', page)
+    if m:
+        href = html.unescape(m[1])
+        if href.startswith('/de/auctions/%s?' % code):
+            nxt = SCHULER_BASE + href
+    if 'data-grid-view' not in page and 'class="grid-item"' not in page:
+        return [], nxt, None
+    lots = []
+    chunks = re.split(r'<div class="grid-item">', page)[1:]
+    for chunk in chunks:
+        head = re.search(r'<h2 class="title">(.*?)</h2>', chunk, re.S)
+        number = re.match(r'\s*(\d+[A-Za-z]?)\.\s*(.*)', text_of(head[1])) if head else None
+        if not number or 'Zuschlag' in chunk:
+            continue
+        at = None
+        small = re.search(r'<small>\s*(\d{1,2})\.(\d{1,2})\.(\d{4}),?\s*(\d{1,2}):(\d{2})\s*</small>', chunk)
+        if small:
+            try:
+                at = datetime(int(small[3]), int(small[2]), int(small[1]), int(small[4]), int(small[5]))
+            except ValueError:
+                at = None
+        prices = re.search(r'<div class="prices[^"]*">\s*CHF([^<]*)</div>', chunk)
+        lo = hi = None
+        if prices:
+            parts = re.split(r'\s+[–-]\s+', html.unescape(prices[1]).strip())   # 「1'000.– – 2'000.–」：只认两边有空格的破折号
+            lo = plain_number(parts[0])
+            hi = plain_number(parts[1]) if len(parts) > 1 else None
+        link = re.search(r"window\.open\('(/de/items/[^'?]+)", html.unescape(chunk))
+        img = re.search(r'<img[^>]*src="(https://images\.schulerauktionen\.ch/[^"]+)"', chunk)
+        lots.append(dict(lot=number[1], title=number[2] or number[1], at=at, lo=lo, hi=hi,
+                         url=SCHULER_BASE + link[1] if link else '', image=html.unescape(img[1]) if img else ''))
+    return lots, nxt, len(chunks)
+
+
+def schuler_row(sale, lot):
+    ends = utc_z(lot['at']) if lot['at'] else _end_of(sale['end'])
+    return row('schuler', sale['sale'], _slug(lot['lot']), lot['title'], '', lot['lo'], estimate_text(lot['lo'], lot['hi'], 'CHF'),
+               lot['url'], lot['image'], ends, currency='CHF', country='CH')
+
+
+def collect_schuler(fetcher, today, window_days, out, now=None):
+    sales = schuler_sales(fetcher.get(SCHULER_AUCTIONS))
+    if not sales:
+        raise ValueError('解析不到场次，可能改版')
+    due, later = _window(sales, today, window_days)
+    if not due:
+        return _next_note(later, window_days)
+    found, notes = 0, []
+    for sale in sorted(due, key=lambda s: s['start']):
+        if not sale['linked']:
+            when = sale['catalog'].isoformat() if sale['catalog'] else '稍后'
+            notes.append('A%d 场图录 %s 上线' % (sale['sale'], when))
+            continue
+        url, seen, first = SCHULER_LIST.format(code=sale['code']), set(), True
+        while url and url not in seen and len(seen) < SCHULER_MAX_PAGES:
+            seen.add(url)
+            lots, nxt, cards = schuler_lots(fetcher.get(url), sale['code'])
+            if cards is None:
+                if first:
+                    raise ValueError(PARSE_FAILED)
+                break
+            first = False
+            for lot in lots:
+                if maker_wanted(lot['title']):
+                    out.append(schuler_row(sale, lot))
+                    found += 1
+            if not cards:
+                break
+            url = nxt
+    if notes:
+        return '；'.join(notes)
+    return None if found else MAKER_NOTE % window_days
+
+
+# ---------- Döbritz（故事 35） ----------
+# 法兰克福。场次只在「Aktuelle Auktionen」；每场按关键词搜两次（meissen、kpm），Lstatus=0，按 pagenumber 翻到 data-maxpage。
+
+DOEBRITZ_BASE = 'https://auktionen.doebritz.de'
+DOEBRITZ_CURRENT = DOEBRITZ_BASE + '/de/Auktionen/Aktuelle'
+DOEBRITZ_SEARCH = DOEBRITZ_BASE + '/de/objekte/au-{sale}/{slug}?Q={q}&Lstatus=0&pagenumber={page}'
+DOEBRITZ_QUERIES = ('meissen', 'kpm')
+DOEBRITZ_MAX_PAGES = 15
+
+
+def doebritz_sales(page):
+    """/de/Auktionen/Aktuelle 的卡片「/de/objekte/au-26/nachverkauf_…」「So 18.10.2026 bis Mo 21.12.2026」
+    → [{sale, slug, title, nachverkauf, start, end}]，同一场只取一次。"""
+    out, seen = [], set()
+    for card in re.split(r'<div class="highlight-auction">', page)[1:]:
+        link = re.search(r'href="/de/objekte/au-(\d+)/([^"?/#]+)', card)
+        if not link or link[1] in seen:
+            continue
+        title = re.search(r'<h4[^>]*>(.*?)</h4>', card, re.S)
+        days = numeric_days(card)
+        if not days:
+            continue
+        seen.add(link[1])
+        name = text_of(title[1]) if title else link[2]
+        out.append(dict(sale=int(link[1]), slug=link[2], title=name, nachverkauf=bool(re.search('nachverkauf', name + ' ' + link[2], re.I)),
+                        start=min(days), end=max(days)))
+    return out
+
+
+def doebritz_lots(page):
+    """搜索结果页 → (拍品列表, 末页, 卡片数)。每块 #pos_N：catalogNumber、/de/l/<id>/ 链接、h5 标题、「Startpreis 1.000 EUR」、
+    data-src 图片；标着「Verkauft」的不取。找不到 #lotlist（页面结构变了）时卡片数为 None。"""
+    last = re.search(r'data-maxpage="(\d+)"', page)
+    last = int(last[1]) if last else 1
+    if 'id="lotlist"' not in page:
+        return [], last, None
+    lots = []
+    chunks = re.split(r'<div id="pos_\d+"', page)[1:]
+    for chunk in chunks:
+        number = re.search(r'<span class="catalogNumber">\s*([^<]+?)\s*</span>', chunk)
+        if not number or re.search(r'class="ribbon sold"|>\s*Verkauft\s*<', chunk):
+            continue
+        link = re.search(r'href="(/de/l/(\d+)/[^"?]*)', chunk)
+        head = re.search(r'<h5>\s*<a[^>]*>(.*?)</a>', chunk, re.S)
+        start = re.search(r'Startpreis\s*([\d.,]+)\s*(?:EUR|€)', chunk)
+        img = re.search(r'data-src="([^"]+)"', chunk)
+        image = html.unescape(img[1]) if img else ''
+        if not image.lower().startswith('/lots/images/'):
+            image = ''                              # /de/Media/LotImage 是「暂无图片」占位
+        lots.append(dict(lot=text_of(number[1]), id=link[2] if link else '', title=text_of(head[1]) if head else text_of(number[1]),
+                         start=euro_number(start[1]) if start else None,
+                         url=DOEBRITZ_BASE + link[1] if link else '', image=DOEBRITZ_BASE + image if image else ''))
+    return lots, last, len(chunks)
+
+
+def doebritz_row(sale, lot):
+    price = lot['start']
+    if price is None:
+        text = ''
+    elif sale['nachverkauf']:
+        text = '拍后补售 · 起价 %s €' % euro_text(price)
+    else:
+        text = '起拍 %s €' % euro_text(price)
+    # 补售场里不同原场次的拍品可能同号（如两件 698）：编号带上网站的拍品 id
+    lot_key = _slug(lot['lot']) + ('-' + lot['id'] if lot['id'] else '')
+    return row('doebritz', sale['sale'], lot_key, lot['title'], '', price, text, lot['url'], lot['image'], _end_of(sale['end']))
+
+
+def collect_doebritz(fetcher, today, window_days, out, now=None):
+    sales = doebritz_sales(fetcher.get(DOEBRITZ_CURRENT))
+    if not sales:
+        raise ValueError('解析不到场次，可能改版')
+    due, later = _window(sales, today, window_days)
+    if not due:
+        return _next_note(later, window_days)
+    found = 0
+    for sale in due:
+        seen, parsed = set(), 0
+        for q in DOEBRITZ_QUERIES:
+            page, last = 1, 1
+            while page <= min(last, DOEBRITZ_MAX_PAGES):
+                lots, page_last, cards = doebritz_lots(fetcher.get(DOEBRITZ_SEARCH.format(sale=sale['sale'], slug=sale['slug'], q=q, page=page)))
+                if cards is None:
+                    break                 # 没有 #lotlist（如零结果）：当作这个词没有结果；整场都读不出才算改版
+                parsed += 1
+                if not cards:
+                    break
+                last = max(last, page_last)
+                for lot in lots:
+                    key = lot['id'] or lot['lot']
+                    if key in seen or not maker_wanted(lot['title']):
+                        continue
+                    seen.add(key)
+                    out.append(doebritz_row(sale, lot))
+                    found += 1
+                page += 1
+        if not parsed:
+            raise ValueError(PARSE_FAILED)
+    return None if found else MAKER_NOTE % window_days
+
+
+# ---------- Dobiaschofsky（故事 35） ----------
+# 瑞士伯尔尼，CHF。首页写「Letzte / Nächste Auktion」与图录页 dNNN.html；瓷器分类 kat=525，按 setp 翻页。页面是 latin-1（cp1252）。
+
+DOBI_BASE = 'https://www.dobiaschofsky.com'
+DOBI_HOME = DOBI_BASE + '/'
+DOBI_LIST = DOBI_BASE + '/{page}.html?kat=525&setp={n}'
+DOBI_MAX_PAGES = 20
+
+
+def dobi_decode(raw):
+    return raw if isinstance(raw, str) else raw.decode('cp1252', errors='replace')
+
+
+def dobi_sales(page):
+    """首页「Letzte Auktion / Nächste Auktion」块 → [{name, page（图录页 dNNN 或 None）, start, end}]。"""
+    out = []
+    for m in re.finditer(r'<li[^>]*>\s*(?:Letzte|N(?:ä|&auml;)chste) Auktion\s*<br\s*/?>(.*?)</li>(.*?)</ul>', page, re.S | re.I):
+        name = re.search(r'<b>(.*?)</b>', m[1], re.S)
+        days = german_days(m[1])
+        if not days:
+            continue
+        link = re.search(r'<a href="/?(d\d+)\.html">\s*Katalog\s*</a>', m[2])
+        out.append(dict(name=text_of(name[1]) if name else '', page=link[1] if link else None, start=min(days), end=max(days)))
+    return out
+
+
+def dobi_lots(page, n=1):
+    """瓷器分类页 → (场次号或 None, 拍品列表, 有无下一页, 卡片数)。每件：form action（拍品页）、首图、h4 拍品号、h3、p、
+    「Schätzung CHF 250」；有 Zuschlag 的不取。找不到列表（页面结构变了）时卡片数为 None。"""
+    sale = re.search(r'<h2>\s*A-?(\d+)\b', page) or re.search(r'action="/d\d+-A(\d+)-', page)
+    if 'DIV7114treffer' not in page:
+        return (sale[1] if sale else None), [], False, None
+    lots = []
+    chunks = re.split(r'<form method=POST action="', page)[1:]
+    chunks = [c for c in chunks if '<h4>' in c.split('</li>', 1)[0]]
+    for chunk in chunks:
+        chunk = chunk.split('</li>', 1)[0]
+        info = re.search(r'<h4>(.*?)</h4>\s*<h3>(.*?)</h3>\s*(?:<p>(.*?)</p>)?', chunk, re.S)
+        if not info or 'Zuschlag' in chunk:
+            continue
+        number = text_of(info[1])
+        if not number:
+            continue
+        action = chunk.split('"', 1)[0].split('?', 1)[0]
+        est = re.search(r'Schätzung</td>\s*<td>.*?CHF.*?</td>\s*<td[^>]*>([^<]*)</td>', chunk, re.S)
+        img = re.search(r'<img src="(/abblot/[^"]+)"', chunk)
+        head, body = text_of(info[2]), text_of(info[3] or '')
+        lots.append(dict(lot=number, title=(head + ' – ' + body) if body else head, head=head, description=body,
+                         estimate=plain_number(est[1]) if est else None,
+                         url=DOBI_BASE + quote(html.unescape(action), safe="/-_.~&'()") if action.startswith('/') else '',
+                         image=DOBI_BASE + img[1] if img else ''))
+    pages = [int(x) for x in re.findall(r'[?&]setp=(\d+)', page)]
+    return (sale[1] if sale else None), lots, any(x > n for x in pages), len(chunks)
+
+
+def dobi_row(sale_no, sale, lot):
+    price = lot['estimate']
+    return row('dobiaschofsky', sale_no, _slug(lot['lot']), lot['title'], lot['description'], price,
+               estimate_text(price, None, 'CHF'), lot['url'], lot['image'], _end_of(sale['end']), currency='CHF', country='CH')
+
+
+def collect_dobiaschofsky(fetcher, today, window_days, out, now=None):
+    sales = dobi_sales(dobi_decode(fetcher.get_bytes(DOBI_HOME)))
+    if not sales:
+        raise ValueError('解析不到场次，可能改版')
+    due, later = _window(sales, today, window_days)
+    if not due:
+        return _next_note(later, window_days)
+    found, notes = 0, []
+    for sale in due:
+        if not sale['page']:
+            notes.append('%s 图录未上线' % (sale['name'] or sale['start'].isoformat()))
+            continue
+        n, more = 1, True
+        while more and n <= DOBI_MAX_PAGES:
+            sale_no, lots, more, cards = dobi_lots(dobi_decode(fetcher.get_bytes(DOBI_LIST.format(page=sale['page'], n=n))), n)
+            if cards is None:
+                if n == 1:
+                    raise ValueError(PARSE_FAILED)
+                break                     # 后面的页读不出：已收到的照样入库
+            if not sale_no:
+                raise ValueError(PARSE_FAILED)   # 没有场次号就不入库，免得同一件拍品换了编号
+            for lot in lots:
+                if maker_wanted(lot['head'], lot['description']):
+                    out.append(dobi_row(sale_no, sale, lot))
+                    found += 1
+            if not cards:
+                break
+            n += 1
+    if notes:
+        return '；'.join(notes)
+    return None if found else MAKER_NOTE % window_days
+
+
 # ---------- 调度 ----------
 
 ADAPTERS = {'wendl': collect_wendl, 'mehlis': collect_mehlis, 'lempertz': collect_lempertz,
-            'leo_spik': collect_leo_spik, 'historia': collect_historia}
+            'leo_spik': collect_leo_spik, 'bruun_rasmussen': collect_bruun_rasmussen, 'schuler': collect_schuler,
+            'doebritz': collect_doebritz, 'dobiaschofsky': collect_dobiaschofsky, 'historia': collect_historia}
 
 
 def _window(sales, today, window_days):

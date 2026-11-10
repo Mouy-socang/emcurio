@@ -32,7 +32,8 @@ def key(root=ROOT):
    if v:return v
  raise Failure('NVIDIA_API_KEY尚未填写')
 # 故事 32：拍卖行的图片主机（Wendl 用 cdn.aeman.nl）。
-HOUSE_IMAGE_HOSTS=('cdn.aeman.nl','www.mehlis.eu','www.lempertz.com','bidspirit-images.global.ssl.fastly.net','www.leo-spik.de','leo-spik.de')
+HOUSE_IMAGE_HOSTS=('cdn.aeman.nl','www.mehlis.eu','www.lempertz.com','bidspirit-images.global.ssl.fastly.net','www.leo-spik.de','leo-spik.de',
+ 'img.bruun-rasmussen.dk','images.schulerauktionen.ch','auktionen.doebritz.de','www.dobiaschofsky.com')
 IMAGE_HOSTS=('i.ebayimg.com','img.kleinanzeigen.de','img.classistatic.de')+HOUSE_IMAGE_HOSTS
 def download(url,folder,headers=None):
  u=urlparse(url)

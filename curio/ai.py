@@ -48,7 +48,8 @@ KV_AI_USAGE = 'ai_usage'
 # 故事 32：加拍卖行的图片主机（Wendl 的 cdn.aeman.nl、Mehlis、Lempertz）；它们的路径原样送检。
 EBAY_IMAGE_HOST = 'i.ebayimg.com'
 VISION_HOSTS = (EBAY_IMAGE_HOST, 'img.kleinanzeigen.de', 'cdn.aeman.nl', 'www.mehlis.eu', 'www.lempertz.com',
-                'bidspirit-images.global.ssl.fastly.net', 'www.leo-spik.de', 'leo-spik.de')
+                'bidspirit-images.global.ssl.fastly.net', 'www.leo-spik.de', 'leo-spik.de',
+                'img.bruun-rasmussen.dk', 'images.schulerauktionen.ch', 'auktionen.doebritz.de', 'www.dobiaschofsky.com')
 EBAY_IMAGE_SIZE = 's-l400'
 VISUAL_KEYS = ('single_cup', 'plain_white', 'not_porcelain')
 # 故事 21：看图三项（回复字段 → 词表与编号前缀）。

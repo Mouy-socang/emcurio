@@ -101,17 +101,18 @@ auction_houses:
      terms: 2026-11 只拍珠宝手表画，下次有古董场再查}
   - {key: dannenberg, name: 丹能贝格拍卖行, site: '', status: skip, adapter: false, enabled: false,
      terms: 没有自己的网站，只在 Invaluable 平台上，不适用}
-  # 2026-11-10 调研：可以看但还没做适配器
-  - {key: doebritz, name: 德布里茨拍卖行, site: 'https://auktionen.doebritz.de', status: allowed, adapter: false, enabled: false,
-     terms: robots 与条款不限；迈森多；下一场 221 场 2027-02-27，目录未出}
-  - {key: bruun_rasmussen, name: 布鲁恩·拉斯穆森拍卖行, site: 'https://bruun-rasmussen.dk', status: allowed, adapter: false, enabled: false,
-     terms: '条款不限；robots 禁止 /m/search，只读拍卖页的瓷器分类；网址要带 cas=guest'}
-  - {key: dobiaschofsky, name: 多比亚肖夫斯基拍卖行, site: 'https://www.dobiaschofsky.com', status: allowed, adapter: false, enabled: false,
-     terms: 瑞士，非欧盟；robots 与条款不限；有瓷器分类，下一场 2027-04-28}
-  - {key: schuler, name: 舒勒拍卖行, site: 'https://www.schulerauktionen.ch', status: allowed, adapter: false, enabled: false,
-     terms: 瑞士，非欧盟；robots 与条款不限；迈森在「Tischkultur」分类，A183 场 11-24 至 11-27}
+  # 故事 35：2026-11-10 调研出的「可以看」的几家，接入前四家；只收标题或描述提到迈森 / KPM 的拍品
+  - {key: doebritz, name: 德布里茨拍卖行, site: 'https://auktionen.doebritz.de', status: allowed, adapter: true, enabled: true, interval: 5,
+     max_requests: 80,
+     terms: robots 与条款不限；每场只按 meissen、kpm 搜两次（含拍后补售场）}
+  - {key: bruun_rasmussen, name: 布鲁恩·拉斯穆森拍卖行, site: 'https://bruun-rasmussen.dk', status: allowed, adapter: true, enabled: true, interval: 5,
+     terms: '丹麦，DKK；条款不限；robots 禁止 /m/search，只读每场的瓷器分类；网址要带 cas=guest'}
+  - {key: dobiaschofsky, name: 多比亚肖夫斯基拍卖行, site: 'https://www.dobiaschofsky.com', status: allowed, adapter: true, enabled: true, interval: 5,
+     terms: 瑞士，CHF，非欧盟；robots 与条款不限；只读有图录的场次的瓷器分类}
+  - {key: schuler, name: 舒勒拍卖行, site: 'https://www.schulerauktionen.ch', status: allowed, adapter: true, enabled: true, interval: 5,
+     terms: 瑞士，CHF，非欧盟；robots 与条款不限；迈森在「Tischkultur」分类，图录上线后才读}
   - {key: jordaens, name: 约丹斯拍卖行, site: 'https://jordaens.eu', status: allowed, adapter: false, enabled: false,
-     terms: 比利时；robots 与条款不限；瓷器多但迈森/KPM 少且便宜}
+     terms: 比利时；robots 与条款不限；不接：瓷器分类是全部历史拍品混在一起、看不出属于哪场，最新 100 件里没有迈森/KPM}
   # 2026-11-10 调研：需先问
   - {key: kloss, name: 克洛斯拍卖行, site: 'https://www.auktionshaus-kloss.de', status: ask, adapter: false, enabled: false,
      terms: 'robots 禁止翻页参数 order_by_sort、要求间隔 10 秒；条款只许私人非商业使用'}

@@ -358,10 +358,12 @@ def test_only_allowed_enabled_with_adapter_visited(db, cfg):
               for h in cfg['auction_houses']]
     session = FakeSession()
     summary, _ = run(db, dict(cfg, auction_houses=houses), session)
-    assert set(summary) == {'wendl', 'leo_spik', 'historia'}
-    assert set(session.hosts()) == {'www.auktionshauswendl.de', 'www.leo-spik.de', 'historia.de'}
+    assert set(summary) == {'wendl', 'leo_spik', 'doebritz', 'bruun_rasmussen', 'dobiaschofsky', 'schuler', 'historia'}
+    assert set(session.hosts()) == {'www.auktionshauswendl.de', 'www.leo-spik.de', 'auktionen.doebritz.de', 'bruun-rasmussen.dk',
+                                    'www.dobiaschofsky.com', 'www.schulerauktionen.ch', 'historia.de'}
     visited = [h['key'] for h in cfg['auction_houses'] if ah.runnable(h)]
-    assert visited == ['wendl', 'mehlis', 'lempertz', 'leo_spik', 'historia']   # 仓库名单：只有这五家会访问，Historia 最后
+    # 仓库名单：只有这九家会访问（故事 35 加了四家），Historia 最后
+    assert visited == ['wendl', 'mehlis', 'lempertz', 'leo_spik', 'doebritz', 'bruun_rasmussen', 'dobiaschofsky', 'schuler', 'historia']
 
 
 def test_list_validation():
@@ -472,6 +474,8 @@ def test_monitor_run_collects_once_per_day(tmp_path):
     view = ah.status_view(store, tmp_path, lambda: NOON)
     assert [(v['name'], v['checked_today'], v['new']) for v in view] == [('文德尔拍卖行', True, 0), ('梅利斯拍卖行', True, 3),
                                                                         ('伦佩茨拍卖行', True, 3), ('莱奥·施皮克拍卖行', True, 0),
+                                                                        ('德布里茨拍卖行', True, 0), ('布鲁恩·拉斯穆森拍卖行', True, 0),
+                                                                        ('多比亚肖夫斯基拍卖行', True, 0), ('舒勒拍卖行', True, 0),
                                                                         ('希斯托利亚拍卖行', True, 3)]
     assert ah.status_view(store, tmp_path, lambda: NEXT_DAY)[1]['checked_today'] is False
 
@@ -618,7 +622,7 @@ def test_run_time_budget_leaves_rest_for_next_round(db, cfg):
     assert list(summary) == ['wendl']                            # 第一家用掉时限，其余两家本轮不开始
     assert set(status(db)) == {'wendl'}
     summary = ah.run_due(db, cfg, lambda: NOON, session, c.sleep, c.monotonic)
-    assert set(summary) == {'mehlis', 'lempertz', 'leo_spik', 'historia'}
+    assert set(summary) == {'mehlis', 'lempertz', 'leo_spik', 'doebritz', 'bruun_rasmussen', 'dobiaschofsky', 'schuler', 'historia'}
     assert ah.RUN_SECONDS == 40 * 60 < 3600                     # 故事 34：放宽到 40 分钟，仍短于采集锁
 
 
