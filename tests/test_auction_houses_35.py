@@ -431,3 +431,10 @@ def test_dobi_missing_sale_number_is_parse_failure():
     routes[DOBI + '/d147.html?kat=525&setp=1'] = (200, kat.encode('cp1252'))
     with pytest.raises(ValueError, match=ah.PARSE_FAILED):
         collect(ah.collect_dobiaschofsky, routes)
+
+
+def test_bruun_empty_category_is_zero_not_broken():
+    """实测：没有瓷器的场次，分类页没有列表，只有「Did you not find what you were looking for?」提示；算 0 件，不算改版。"""
+    page = '<html><h1>Porcelain</h1><p>Did you not find what you were looking for? Create a search agent</p></html>'
+    assert ah.bruun_lots(page) == ([], 0)
+    assert ah.bruun_lots('<html>')[1] is None

@@ -1067,6 +1067,7 @@ BRUUN_AUCTIONS = BRUUN_BASE + '/m/auctions?cas=guest&locale=en'
 BRUUN_LIST = BRUUN_BASE + '/m/auctions/{id}?category_id=492&cas=guest&locale=en'
 COPENHAGEN = ZoneInfo('Europe/Copenhagen')
 BRUUN_TITLE_MAX = 160
+BRUUN_EMPTY = 'Did you not find what you were looking for'   # 分类里没有拍品时页面的提示（2026-11-10 实测）
 
 
 def _iso(text):
@@ -1105,6 +1106,8 @@ def bruun_lots(page):
     <currency-range from to currency> 或 <currency-amount amount currency> 估价、hammer-time 的 <time datetime>、/m/lots/ 链接、首图。
     已有成交价（lot-price 不空）的不取。找不到拍品列表（页面结构变了）时卡片数为 None。"""
     if 'class="lots ' not in page and 'class="lots"' not in page:
+        if BRUUN_EMPTY in page:
+            return [], 0                  # 这一场没有瓷器：页面不给列表，只给「建搜索提醒」
         return [], None
     lots = []
     chunks = [c for c in re.split(r'<li id="lot_', page)[1:] if not c.startswith('placeholder')]
