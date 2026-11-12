@@ -3,7 +3,6 @@ import pytest
 from curio import triage, market
 from curio.config import load
 from curio.store import Store
-from scripts import migrate_triage
 
 
 @pytest.fixture
@@ -188,38 +187,6 @@ def test_market_decision_removes_and_restores(tmp_path, monkeypatch):
     assert st(store, 'one') == 'new'
 
 
-def test_migration_idempotent(tmp_path, capsys):
-    store = Store(tmp_path / 'curio.db')
-    with store.connect() as c:
-        raw_insert(c, 'irr'); raw_insert(c, 'skip'); raw_insert(c, 'want'); raw_insert(c, 'probe', agent='skip')
-        raw_insert(c, 'md'); raw_insert(c, 'mdold')
-        raw_insert(c, 'old', first_seen='2026-01-01T00:00:00+00:00')
-        raw_insert(c, 'oldskip', agent='skip', first_seen='2026-01-01T00:00:00+00:00')
-        raw_insert(c, 'fresh', first_seen='2099-01-01T00:00:00+00:00')
-        for n, (iid, d) in enumerate([('irr', 'irrelevant'), ('skip', 'skip'), ('want', 'want'), ('probe', 'probe'),
-                                      ('mdold', 'want')]):
-            c.execute("INSERT INTO cases(item_id,decision,reason,agent_decision,rule_version,decided_at,request_id) "
-                      "VALUES(?,?,'x','probe',1,?,?)", (iid, d, '2026-10-0%dT00:00:00+00:00' % (n + 1), 'q%d' % n))
-        c.execute("INSERT INTO market_decisions VALUES('ebay','md',1,'邮票','2026-10-10T00:00:00+00:00')")
-        c.execute("INSERT INTO market_decisions VALUES('ebay','mdold',1,'早','2026-09-01T00:00:00+00:00')")
-        c.execute("INSERT INTO kv VALUES('triage_migrated_at','2026-11-02T00:00:00+00:00')")
-    first = migrate_triage.main([str(store.path)])
-    assert first['new_codes'] == 2 and first['triage_rows'] == first['items'] == 9
-    with store.connect() as c:
-        s = {r[0]: r[1] for r in c.execute('SELECT item_id,state FROM triage')}
-        assert s == dict(irr='removed', skip='removed', want='kept', probe='new', md='removed', mdold='kept',
-                         old='new', oldskip='auto_removed', fresh='new')
-        assert triage.code(c, 'want') == 'CO-0001' and triage.code(c, 'mdold') == 'CO-0002'
-        ev = c.execute("SELECT * FROM triage_events WHERE item_id='irr' AND actor='human'").fetchone()
-        assert ev['at'] == '2026-10-01T00:00:00+00:00' and ev['action'] == 'migrate'
-        queue = [r['item_id'] for r in triage.queue(c)]
-        assert queue[0] == 'fresh' and set(queue) == {'fresh', 'probe'}
-        backlog = {r[0] for r in c.execute('SELECT item_id FROM triage WHERE backlog=1')}
-        assert backlog == {'old'}
-    second = migrate_triage.main([str(store.path)])
-    assert second['new_events'] == 0 and second['new_codes'] == 0 and second['states'] == first['states']
-
-
 def test_block_rescreen_moves_untouched_to_auto_removed(db, cfg):
     db.ingest(item('one', title='Meissen Mietangebot'), cfg)
     db.ingest(dict(item('two'), description='Mietangebot in Meißen'), cfg)
@@ -371,9 +338,3 @@ def test_migration_bad_first_seen_and_time(db):
         c.execute("UPDATE kv SET v='坏' WHERE k='triage_migrated_at'")
         with pytest.raises(triage.TriageError, match='迁移时刻无效'):
             triage.migrate(c)
-
-
-def test_migrate_script_rejects_missing_db(tmp_path):
-    with pytest.raises(SystemExit):
-        migrate_triage.main([str(tmp_path / 'nope.db')])
-    assert not (tmp_path / 'nope.db').exists()

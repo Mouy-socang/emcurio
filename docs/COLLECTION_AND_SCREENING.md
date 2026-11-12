@@ -22,7 +22,6 @@ eBay 使用 Browse API，市场 EBAY_DE、所在地 DE、newlyListed 排序。�
 
 ## 第二层：客户证据试筛（单次脚本）
 
-`scripts/trial_customer_screen.py` 只读数据库快照和本地 GoodCustomer 文件，不修改生产判断。目前未接入每小时任务。
 
 1. 用中德英别名提取 maker、form、decor、qualifiers、sizes_cm。品牌、器型、图案、等级陈述、尺寸等都只是候选。没有看图，也没有调用模型。
 2. 客户正向线索仅来自客户本人“想要/喜欢”记录；排除含否定、第三方、完成线索的文字，要求可定位器型及品牌或装饰。该判断是保守正则，不理解完整上下文，可能误删，应保留审计。

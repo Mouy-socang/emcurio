@@ -115,17 +115,6 @@ def test_http_review(db,cfg):
         assert json.load(urllib.request.urlopen(base+'/api/items'))['total']==0
     finally:httpd.shutdown();httpd.server_close()
 
-def test_readonly_import_keeps_owner_skip(tmp_path,db,cfg):
-    from scripts.import_desktop import migrate
-    source=tmp_path/'legacy.db'
-    c=sqlite3.connect(source)
-    c.executescript("CREATE TABLE items(item_id TEXT,platform TEXT,title TEXT,price REAL,currency TEXT,first_seen TEXT,last_seen TEXT); CREATE TABLE decisions(item_id TEXT,decision TEXT,reason TEXT,fair_price TEXT,agent_decision TEXT,agent_reason TEXT,decided_at TEXT);")
-    c.execute("INSERT INTO items VALUES('legacy','ebay','Meissen Rose Tasse',40,'EUR','2026-09-01','2026-09-01')")
-    c.execute("INSERT INTO decisions VALUES('legacy','skip','太贵','20欧','probe','原规则','2026-09-01')");c.commit();c.close()
-    before=source.read_bytes();assert migrate(source,db,cfg)['reviews']==1
-    assert source.read_bytes()==before and db.page()['total']==0
-    assert migrate(source,db,cfg)['reviews']==0
-
 def test_unknown_price_not_free(db,cfg):
     from curio.curio_monitor import _ka_price
     assert _ka_price('VB') is None

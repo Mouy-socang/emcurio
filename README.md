@@ -5,7 +5,7 @@
 ## 仓库位置与来源（2026-11-02 合并）
 
 - 本仓库位于 `~/Desktop/curiobject`，由原 `curio-phase1`（`~/.codex/.chatgpt-projects/.../curio-phase1`）带完整 git 历史克隆而来；原仓库最后一次提交为「合并前快照」，此后不再使用。
-- 桌面旧版 `~/Desktop/curio` 的货已经 `scripts/import_desktop.py` 并入 `data/curio.db`；其未接入的 Etsy 代码保存在 `legacy/desktop_curio/`，仅供故事 2 参考。
+- 桌面旧版 `~/Desktop/curio` 的货已于 2026-11-02 并入 `data/curio.db`；当时的导入脚本与 Etsy 旧代码已在 2026-11-12 清理（见 git 历史）。
 - 跨机契约（JSON Schema 与 `schema_version` 约定）见 [`contract/README.md`](contract/README.md)。
 - `.env`、`data/` 被 gitignore，从不提交。
 
@@ -74,7 +74,7 @@ uv run python -m curio.review
 - 接口（故事 30）：`GET /api/pool?kind=auction`、`/api/rank?kind=auction`；`POST /api/rank` 带 `kind: "auction"` 保存拍卖榜（缺省 `normal`）。
 - 接口：`GET /api/pool`、`/api/rank`；`POST /api/rank`（`codes`、`request_id`）、`/api/pool/action`（`out_of_pool` / `back_to_pool`）、`/api/rank/preview`、`/api/rank/publish`。写接口沿用页面令牌、Origin 校验与 `request_id` 幂等（表 `triage_requests`）。命令行 `scripts/publish.py` 保留。
 
-打开网页不会触发采集或模型调用。所有操作数据都在 `data/curio.db`（WAL 模式，连接等待 30 秒；备份请用 `VACUUM INTO`，不要直接复制正在写入的库）：items、price_history、price_drops、cases、screening_jobs、kv。可用 `uv run python scripts/import_desktop.py /旧版路径/curio.db` 只读导入 eBay/Kleinanzeigen 商品与审核记录（不含 Lottissimo）。重复导入不会重复创建记录。旧审核缺失的当时价格快照留空，不拿当前价冒充；原价格历史保留在旧库，不迁移。导入商品需后续重新核验在售状态。采集状态和错误摘要保存在 kv。
+打开网页不会触发采集或模型调用。所有操作数据都在 `data/curio.db`（WAL 模式，连接等待 30 秒；备份请用 `VACUUM INTO`，不要直接复制正在写入的库）：items、price_history、price_drops、cases、screening_jobs、kv。采集状态和错误摘要保存在 kv。
 
 ## 调度与接口调用预算（AD-27）
 
@@ -106,7 +106,7 @@ sqlite3 data/curio.db "SELECT result FROM collection_runs ORDER BY id DESC LIMIT
 - 首次最多 1,000 条，跨关键词共享上限，按关键词顺序采集；记录分页进度，失败可继续。之后每个关键词按新上架翻页，遇到本轮增量开始前已在库里的 ID 停止（中断重试沿用同一边界）。API 每个查询最多翻至 10,000 条，**不是首次回填 10,000**。
 - 已知商品另轮询详情（默认每轮20件，最久未检查优先），保留价格变化和下架记录。未出现在搜索列表不等于下架；明确404/410或无库存才标记，下架不推断为已售。
 - Kleinanzeigen 沿用 curl，最多20页/关键词；遇到验证或拦截暂停2小时，状态存库。站点HTML变动仍可能影响解析，不绕过验证码。
-- Etsy Open API v3（`curio/etsy.py`，移植自 `legacy/desktop_curio/etsy_source.py`）：只在 `.env` 有 `ETSY_API_KEY` 时启用；按最新上架翻页（每关键词每轮最多 300 条），一页全是已知货即停，只为新货批量补图。货号 `etsy:<listing_id>`，经 `store.ingest` 去重并记录价格变化。账号额度 5000 次/天、5 次/秒，代码保证相邻请求间隔不少于 0.2 秒。在售检查：`state` 不是 active 或 `quantity` 为 0 判下架（`quantity` 缺失视为在售）；批量查询中途失败时只对拿到详情的编号下结论，其余保持原状态并记录错误。Etsy 未启用、鉴权失败（如 403）或出错时不影响 eBay 与 Kleinanzeigen。两种 key 写法都被 401/403 拒绝后，kv 记 `etsy_auth_backoff_until`（1 小时），期间 Etsy 不发任何请求（含在售检查），结果写 `etsy_status: error`、`etsy: Etsy 鉴权失败，1 小时后重试`；之后第一次请求成功即清除。
+- Etsy Open API v3（`curio/etsy.py`）：只在 `.env` 有 `ETSY_API_KEY` 时启用；按最新上架翻页（每关键词每轮最多 300 条），一页全是已知货即停，只为新货批量补图。货号 `etsy:<listing_id>`，经 `store.ingest` 去重并记录价格变化。账号额度 5000 次/天、5 次/秒，代码保证相邻请求间隔不少于 0.2 秒。在售检查：`state` 不是 active 或 `quantity` 为 0 判下架（`quantity` 缺失视为在售）；批量查询中途失败时只对拿到详情的编号下结论，其余保持原状态并记录错误。Etsy 未启用、鉴权失败（如 403）或出错时不影响 eBay 与 Kleinanzeigen。两种 key 写法都被 401/403 拒绝后，kv 记 `etsy_auth_backoff_until`（1 小时），期间 Etsy 不发任何请求（含在售检查），结果写 `etsy_status: error`、`etsy: Etsy 鉴权失败，1 小时后重试`；之后第一次请求成功即清除。
 - 每件新货调用一次 judge；仅标价或币种变化重判。规则排除的也保存原因。更改规则配置不会自动重判历史货，需运行 `scripts/rejudge.py`。
 - 拍卖总价 = 标价 × (1 + auction_fee_rate)，其他总价=标价。这里只包含配置手续费，不含未知运费/税费；竞拍标价是当前出价，不是最终成交价。
 
@@ -147,12 +147,7 @@ want / probe 进入 cheap / deep 记录。`daily_budget: 0` 时不调用任何 p
 
 ### 迁移
 
-```sh
-sqlite3 data/curio.db ".backup data/backups/curio-before-triage-<UTC时间>.db"
-uv run python scripts/migrate_triage.py      # 幂等，可重跑；打印各状态计数；数据库路径不存在时报错退出
-```
-
-规则：两表都有决定时按解析后的时间取较新者：市场页较新则它说了算（无关 → `removed`，取消无关 → 无人工决定）；否则看 `cases` 最新一条：irrelevant/skip → `removed`（human，沿用原时间）；`cases` 的 want → `kept` 并按决定时间顺序分配货号；probe → `new`（human）；其余按判断结果入 `new`/`auto_removed`。迁移时刻（kv `triage_migrated_at`，首次运行写入，重跑沿用，无法解析时报「迁移时刻无效」）前 7 天以上入库、未经人工的 `new` 货标 `backlog=1`（`first_seen` 为空或无法解析的不标），不进新货队列（待故事 7 处理）。已有人工事件的货，重跑时只应用比它最近一次人工事件**更新**的决定（记为 `migrate` 事件），所以不会重复写事件或货号。`scripts/import_desktop.py`、`market.migrate_legacy` 仍直接写 `cases` / `market_decisions`，用它们导入后需再跑一次本迁移，新导入的较新决定会被应用。重跑还会给早期迁移的市场页去掉补 `source='market'`。
+一次性迁移脚本 `scripts/migrate_triage.py` 已于 2026-11-02 在真实库跑完，2026-11-12 清理（规则与代码见 git 历史）。
 
 2026-11-02 真实库迁移结果：items 21996 = triage 21996；`removed` 195（cases 180 件 + market_decisions 15 件，全为人工无关/不要）、`auto_removed` 10539、`new` 11262（其中 backlog 7050，新货队列 4212）；无 want，货号 0 个。备份在 `data/backups/curio-before-triage-20261102T200445Z.db`。第二次运行新增事件 0、货号 0。
 
